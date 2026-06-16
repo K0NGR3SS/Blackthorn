@@ -9,25 +9,14 @@ import time
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
-def _get_db_path() -> str:
-    """Get the path to the SQLite database."""
-    if os.name == 'nt':
-        base = os.getenv('APPDATA') or os.path.expanduser('~')
-    else:
-        base = os.path.join(os.path.expanduser('~'), '.config')
-    d = os.path.join(base, 'wafpierce')
-    try:
-        os.makedirs(d, exist_ok=True)
-    except Exception:
-        pass
-    return os.path.join(d, 'wafpierce.db')
+from .config import get_database_path
 
 
 class WAFPierceDB:
     """Database handler for WAFPierce."""
     
     def __init__(self, db_path: str = None):
-        self.db_path = db_path or _get_db_path()
+        self.db_path = db_path or get_database_path()
         self._init_db()
     
     def _init_db(self):

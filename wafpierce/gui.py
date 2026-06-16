@@ -26,23 +26,13 @@ IS_FROZEN = getattr(sys, 'frozen', False) or os.environ.get('WAFPIERCE_FROZEN') 
 # path to bundled logo (used for watermark/icon)
 LOGO_PATH = os.path.join(os.path.dirname(__file__), 'logo_Temp', 'logo_wafpierce.png')
 
-
-def _get_config_path() -> str:
-    if os.name == 'nt':
-        base = os.getenv('APPDATA') or os.path.expanduser('~')
-    else:
-        base = os.path.join(os.path.expanduser('~'), '.config')
-    d = os.path.join(base, 'wafpierce')
-    try:
-        os.makedirs(d, exist_ok=True)
-    except Exception:
-        pass
-    return os.path.join(d, 'gui_prefs.json')
+# Use shared config module
+from .config import get_gui_prefs_path
 
 
 # default settings, change if you want different ones for the application
 def _load_prefs() -> dict:
-    path = _get_config_path()
+    path = get_gui_prefs_path()
     defaults = {
         'font_size': 12,
         'watermark': True,

@@ -47,12 +47,6 @@ else:
 if bundle_dir not in sys.path:
     sys.path.insert(0, bundle_dir)
 
-# Also add workspace root parent to help Python find the package reliably
-package_dir = os.path.join(bundle_dir, 'wafpierce')
-if os.path.isdir(package_dir):
-    if bundle_dir not in sys.path:
-        sys.path.insert(0, bundle_dir)
-
 def main():
     """Launch the WAFPierce GUI."""
     try:

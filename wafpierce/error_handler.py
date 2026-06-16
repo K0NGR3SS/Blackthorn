@@ -6,8 +6,10 @@ import time
 import logging
 import warnings
 import random
+import re
 from functools import wraps
 from typing import Callable, Any, Optional, Tuple, Type, Dict, List
+from urllib.parse import urlparse
 import requests
 from urllib3.exceptions import InsecureRequestWarning
 
@@ -21,10 +23,71 @@ from .exceptions import (
     RateLimitError,
     NetworkError,
     BackendDetectionError,
+    InvalidTargetError,
+    InvalidSchemeError,
 )
 
 
 logger = logging.getLogger(__name__)
+
+
+# Blocked hostnames for security
+BLOCKED_HOSTNAMES = frozenset([
+    'localhost',
+    '127.0.0.1',
+    '::1',
+    '0.0.0.0',
+])
+
+
+def validate_url_strict(url: str, allow_local: bool = False) -> str:
+    """
+    Strictly validate and sanitize target URL (raises exceptions).
+    
+    Args:
+        url: The URL to validate
+        allow_local: Whether to allow localhost addresses
+    
+    Returns:
+        The validated URL
+    
+    Raises:
+        InvalidTargetError: If URL is invalid
+        InvalidSchemeError: If scheme is not http/https
+    """
+    if not url:
+        raise InvalidTargetError("URL cannot be empty")
+    
+    # Basic URL parsing
+    parsed = urlparse(url)
+    
+    # Check scheme
+    if parsed.scheme not in ('http', 'https'):
+        raise InvalidSchemeError(f"Invalid scheme: {parsed.scheme}. Must be http or https.")
+    
+    if not parsed.netloc:
+        raise InvalidTargetError("No valid hostname in URL")
+    
+    # Check for blocked hostnames (security)
+    hostname = parsed.hostname.lower() if parsed.hostname else ''
+    
+    if not allow_local and hostname in BLOCKED_HOSTNAMES:
+        raise InvalidTargetError("Localhost addresses not allowed for security reasons")
+    
+    # Check for IP addresses that might be internal
+    ip_pattern = re.compile(r'^(\d{1,3}\.){3}\d{1,3}$')
+    if ip_pattern.match(hostname):
+        # It's an IP address, check for private ranges
+        try:
+            octets = [int(o) for o in hostname.split('.')]
+            # Check for private IP ranges (RFC 1918)
+            if octets[0] in (10, 172, 192):
+                if not allow_local:
+                    raise InvalidTargetError("Private IP addresses not allowed for security reasons")
+        except (ValueError, IndexError):
+            pass  # Invalid IP format, let it through
+    
+    return url
 
 
 def retry_on_network_error(
@@ -276,8 +339,6 @@ def validate_url(url: str) -> Tuple[bool, Optional[str]]:
     Returns:
         Tuple of (is_valid, error_message)
     """
-    from urllib.parse import urlparse
-    
     try:
         parsed = urlparse(url)
         

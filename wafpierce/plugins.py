@@ -15,31 +15,8 @@ from typing import Dict, List, Any, Optional, Callable
 from datetime import datetime
 from abc import ABC, abstractmethod
 
-
-# Keep both import paths aliased to a single module object.
-# This prevents class identity mismatches between:
-#   - from wafpierce.plugins import BypassPlugin
-#   - from plugins import BypassPlugin
-_self_module = sys.modules.get(__name__)
-if _self_module is not None:
-    if __name__ == 'wafpierce.plugins':
-        sys.modules.setdefault('plugins', _self_module)
-    elif __name__ == 'plugins':
-        sys.modules.setdefault('wafpierce.plugins', _self_module)
-
-
-def _get_plugins_dir() -> str:
-    """Get the plugins directory path."""
-    if os.name == 'nt':
-        base = os.getenv('APPDATA') or os.path.expanduser('~')
-    else:
-        base = os.path.join(os.path.expanduser('~'), '.config')
-    d = os.path.join(base, 'wafpierce', 'plugins')
-    try:
-        os.makedirs(d, exist_ok=True)
-    except Exception:
-        pass
-    return d
+# Use shared config module
+from .config import ensure_plugins_dir
 
 
 class BypassPlugin(ABC):
@@ -198,7 +175,7 @@ class PluginManager:
     """Manages loading, running, and organizing plugins."""
     
     def __init__(self, db=None):
-        self.plugins_dir = _get_plugins_dir()
+        self.plugins_dir = ensure_plugins_dir()
         self.plugins_dirs = self._get_plugin_dirs()
         self.plugins: Dict[str, BypassPlugin] = {}
         self.plugin_files: Dict[str, str] = {}
@@ -211,7 +188,7 @@ class PluginManager:
         dirs = []
 
         # Primary user plugins directory
-        dirs.append(_get_plugins_dir())
+        dirs.append(ensure_plugins_dir())
 
         # Workspace-local plugin folders (common user expectation)
         try:
@@ -572,6 +549,40 @@ PLUGIN_CLASS = UnicodeBypassPlugin
     def get_load_errors(self) -> Dict[str, str]:
         """Get plugin load errors keyed by file path."""
         return dict(self.load_errors)
+
+
+def validate_plugin(plugin: BypassPlugin) -> List[str]:
+    """
+    Validate a plugin and return list of issues.
+    
+    Args:
+        plugin: The plugin instance to validate
+    
+    Returns:
+        List of validation issues (empty if valid)
+    """
+    issues = []
+    
+    # Check name
+    if not plugin.name or plugin.name == "Unnamed Plugin":
+        issues.append("Plugin must have a custom name")
+    
+    # Check version format
+    if plugin.version:
+        parts = plugin.version.split('.')
+        if len(parts) != 3 or not all(p.isdigit() for p in parts):
+            issues.append("Version should be in semver format (e.g., '1.0.0')")
+    
+    # Check execute method
+    if not hasattr(plugin, 'execute') or not callable(getattr(plugin, 'execute', None)):
+        issues.append("Plugin must implement execute method")
+    
+    # Check category
+    valid_categories = ['bypass', 'encoding', 'header', 'injection', 'protocol', 'cloud', 'recon']
+    if plugin.category not in valid_categories:
+        issues.append(f"Category must be one of: {', '.join(valid_categories)}")
+    
+    return issues
 
 
 # Community Plugin Marketplace (placeholder for future implementation)

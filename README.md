@@ -1,41 +1,122 @@
-# WAFPierce
-**CloudFront WAF Bypass & Penetration Testing Tool**
+<div align="center">
+  <img src="promotion1.png" alt="WAFPierce Logo" width="400"/>
+  
+  <h1>WAFPierce</h1>
+  <b>Teaching firewalls humility, one bypass at a time</b>
+  <br><br>
+  <a href="https://img.shields.io/badge/version-1.5-blue"><img src="https://img.shields.io/badge/version-1.5-blue"/></a>
+  <a href="https://img.shields.io/badge/python-3.8+-green"><img src="https://img.shields.io/badge/python-3.8+-green"/></a>
+  <a href="https://img.shields.io/badge/license-MIT-orange"><img src="https://img.shields.io/badge/license-MIT-orange"/></a>
+</div>
 
-![Version](https://img.shields.io/badge/version-1.5-blue)
-![Python](https://img.shields.io/badge/python-3.8+-green)
-![License](https://img.shields.io/badge/license-MIT-orange)
+---
 
-![promotion image](promotion1.png)
+<details>
+<summary><b>Table of Contents</b></summary>
+
+- [What is WAFPierce?](#what-is-wafpierce)
+- [Key Features](#key-features)
+- [Changelog](#changelog)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Bypass Techniques](#bypass-techniques)
+- [Future Roadmap](#future-roadmap)
+- [Requirements](#requirements)
+- [Responsible Disclosure](#responsible-disclosure)
+- [Educational Resources](#educational-resources)
+- [Authors](#authors)
+- [Legal Disclaimer](#legal-disclaimer)
+
+</details>
+
+---
 
 ## What is WAFPierce?
 
-WAFPierce is a WAF/CDN assessment and bypass validation tool for penetration testing and security research.
-It fingerprints 17+ WAF vendors and 12+ CDN providers, then tests **100+ bypass/evasion techniques** using baseline + heuristic comparisons (status codes, response size, hashes) to confirm real bypasses—even when defenses return OK.
+WAFPierce is a powerful WAF/CDN assessment and bypass validation tool for penetration testing and security research.
+
+It fingerprints 17+ WAF vendors and 12+ CDN providers, then tests <b>100+ bypass/evasion techniques</b> using baseline + heuristic comparisons (status codes, response size, hashes) to confirm real bypasses—even when defenses return OK.
+
 It also supports rate-limit detection, API endpoint and directory discovery, protocol-level testing (request smuggling, HTTP/2 downgrade, WebSocket tunneling), comprehensive injection testing (SQLi, XSS, SSRF, NoSQL, LDAP, XXE, SSTI, Log4Shell), cloud-specific tests, a clean GUI, optimized parallel performance, and automated Markdown reporting.
 
-**Trailer**
+<p align="center">
+  <b>▶️ <a href="https://youtu.be/O_iT_AuvczY">Watch the Trailer</a></b>
+</p>
 
-https://youtu.be/O_iT_AuvczY
+---
 
-**Key Features:**
-- **WAF Detection & Fingerprinting** - Identifies 17+ WAF vendors (Cloudflare, AWS WAF, Akamai, Imperva, F5, Sucuri, ModSecurity, and more)
-- **CDN Detection** - Detects 12+ CDN providers (CloudFront, Akamai, Fastly, Cloudflare, etc.)
-- **WAF Bypass Detection** - Tests 100+ different bypass techniques
-- **Smart WAF Bypass** - Uses baseline comparison and heuristic analysis (size, hash, status codes) to detect bypasses even when WAFs return 200 OK
-- **Payload Evasion Testing** - SQLi, XSS, Command Injection, Path Traversal, SSRF bypass payloads
-- **Advanced Injection Testing** - NoSQL, LDAP, SSTI, XXE, CRLF, Prototype Pollution, Deserialization, Log4Shell
-- **Protocol-Level Attacks** - HTTP Request Smuggling, HTTP/2 Downgrade, H2C Smuggling, WebSocket CSWSH, HTTP Desync
-- **Security Misconfiguration** - CORS, Open Redirect, Security Headers, Cookie Security, Clickjacking
-- **Cloud Security Testing** - AWS S3, Azure Blob, GCP Buckets, Kubernetes API, Serverless Functions
-- **Information Disclosure** - Git/SVN/Env files, Backups, Debug endpoints, Sensitive configs, API Key Exposure
-- **Business Logic Testing** - IDOR, Mass Assignment, Race Conditions, File Upload Bypass, Integer Overflow
-- **Advanced Attacks** - JWT Exploitation, GraphQL Attacks, Web Cache Deception, DNS Rebinding, CSS/XSLT Injection
-- **Rate Limit Detection** - Identifies request thresholds and rate limiting behavior
-- **API Endpoint Discovery** - Finds unprotected API routes and debug endpoints
-- **Subdomain Takeover Detection** - Identifies vulnerable subdomains across 25+ services
-- **Automated Reporting** - Generates detailed markdown reports
-- **GUI system** - Clean and efficient GUI system made for the users comfort  
-- **Optimized Performance** - Connection pooling, response caching, and parallel batch testing
+## Key Features
+
+<details>
+<summary><b>Click to expand full feature list</b></summary>
+
+- <b>WAF Detection & Fingerprinting</b> — Identifies 17+ WAF vendors (Cloudflare, AWS WAF, Akamai, Imperva, F5, Sucuri, ModSecurity, and more)
+- <b>CDN Detection</b> — Detects 12+ CDN providers (CloudFront, Akamai, Fastly, Cloudflare, etc.)
+- <b>WAF Bypass Detection</b> — Tests 100+ different bypass techniques
+- <b>Smart WAF Bypass</b> — Uses baseline comparison and heuristic analysis (size, hash, status codes) to detect bypasses even when WAFs return 200 OK
+- <b>Payload Evasion Testing</b> — SQLi, XSS, Command Injection, Path Traversal, SSRF bypass payloads
+- <b>Advanced Injection Testing</b> — NoSQL, LDAP, SSTI, XXE, CRLF, Prototype Pollution, Deserialization, Log4Shell
+- <b>Protocol-Level Attacks</b> — HTTP Request Smuggling, HTTP/2 Downgrade, H2C Smuggling, WebSocket CSWSH, HTTP Desync
+- <b>Security Misconfiguration</b> — CORS, Open Redirect, Security Headers, Cookie Security, Clickjacking
+- <b>Cloud Security Testing</b> — AWS S3, Azure Blob, GCP Buckets, Kubernetes API, Serverless Functions
+- <b>Information Disclosure</b> — Git/SVN/Env files, Backups, Debug endpoints, Sensitive configs, API Key Exposure
+- <b>Business Logic Testing</b> — IDOR, Mass Assignment, Race Conditions, File Upload Bypass, Integer Overflow
+- <b>Advanced Attacks</b> — JWT Exploitation, GraphQL Attacks, Web Cache Deception, DNS Rebinding, CSS/XSLT Injection
+- <b>Rate Limit Detection</b> — Identifies request thresholds and rate limiting behavior
+- <b>API Endpoint Discovery</b> — Finds unprotected API routes and debug endpoints
+- <b>Subdomain Takeover Detection</b> — Identifies vulnerable subdomains across 25+ services
+- <b>Automated Reporting</b> — Generates detailed markdown reports
+- <b>GUI system</b> — Clean and efficient GUI system made for the users comfort
+- <b>Optimized Performance</b> — Connection pooling, response caching, and parallel batch testing
+
+</details>
+
+---
+
+
+---
+
+## 🚀 Quick Start
+
+```bash
+git clone https://github.com/K0NGR3SS/WAFPierce.git
+cd WAFPierce
+pip3 install -r requirements.txt
+python3 run_gui.py
+```
+
+---
+
+## 📦 Installation
+
+```bash
+# Clone repository
+git clone https://github.com/K0NGR3SS/WAFPierce.git
+cd WAFPierce
+
+# Install dependencies
+pip3 install -r requirements.txt
+
+# (Optional) Install in development mode
+pip3 install -e .
+```
+
+---
+
+## 🖥️ Usage
+
+### Run UI
+```bash
+python3 run_gui.py  
+```
+
+---
+
+## 🤝 Contributing
+
+Contributions, bug reports, and feature requests are welcome! Please open an issue or pull request on GitHub.
+
+---
 
 ## Changelog
 

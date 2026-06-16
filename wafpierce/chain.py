@@ -345,7 +345,7 @@ class FullPentestChain:
         Returns:
             True if scan succeeded, False otherwise
         """
-        print("[+] Phase 3: Vulnerability Scanning")
+        print_phase_header(3, "Vulnerability Scanning", "Testing for common web vulnerabilities")
         logger.info("Starting Phase 3: Vulnerability Scanning")
         
         xss_payloads = [
@@ -875,6 +875,14 @@ class FullPentestChain:
                 report += "\n### 3.6 Backend Indicators (Header Analysis)\n\n"
                 report += "```json\n" + json.dumps(backend_indicators, indent=2) + "\n```\n\n"
             
+            # Prepare S3 remediation message
+            accessible_s3 = [b['name'] for b in s3 if b.get('accessible')]
+            s3_remediation = (
+                f"- Restrict public access to: {', '.join(accessible_s3)}"
+                if accessible_s3
+                else "- All buckets are properly secured"
+            )
+            
             # Add remediation
             report += f"""
 ## 4. Remediation Recommendations
@@ -890,7 +898,7 @@ class FullPentestChain:
    - Implement Content Security Policy (CSP)
 
 3. **S3 Security**: Review S3 bucket permissions
-   {"- Restrict public access to: " + ", ".join([b['name'] for b in s3 if b.get('accessible')]) if any(b.get('accessible') for b in s3) else "- All buckets are properly secured"}
+   {s3_remediation}
 
 4. **Backend Origin Security**:
     - Ensure all backend origins (ELB, EC2, etc.) are only accessible via your approved CDN/edge layer
@@ -997,7 +1005,7 @@ Handle findings responsibly and patch vulnerabilities promptly.
         
         # Final summary
         safe_print(f"\n{border*78}")
-        safe_print(f"{border[0]}  SCAN COMPLETE")
+        safe_print(f"{border}  SCAN COMPLETE")
         safe_print(f"{border*78}")
         safe_print(f"  {get_icon('success')} Phases completed: {completed_phases}/{len(phases)}")
         if failed_phases:
@@ -1031,6 +1039,11 @@ def main():
                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
                        help="Logging level")
     args = parser.parse_args()
+    
+    # Validate threads parameter
+    if args.threads < 1 or args.threads > 100:
+        print("[!] Thread count must be between 1 and 100")
+        sys.exit(1)
     
     # Setup logging
     setup_logging(args.log_file, args.log_level)
