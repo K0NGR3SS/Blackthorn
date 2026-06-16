@@ -571,6 +571,7 @@ SCAN_CATEGORIES = {
             '_test_http_desync',
             '_test_verb_tampering_extended',
             '_test_multipart_bypass',
+            '_test_websocket_fuzzing',
         ]
     },
     'cache_control': {
@@ -610,6 +611,7 @@ SCAN_CATEGORIES = {
             '_test_json_sqli_bypass',
             '_test_dom_xss',
             '_test_client_side_path_traversal',
+            '_test_mutation_fuzzing',
         ]
     },
     'security_misconfig': {
@@ -685,6 +687,7 @@ SCAN_CATEGORIES = {
             '_test_cloud_provider_detection',
             '_test_cloud_metadata_enumeration',
             '_test_cloud_metadata_v2',
+            '_test_s3_bucket_enum',
         ]
     },
     'advanced_payloads': {
@@ -725,6 +728,7 @@ SCAN_CATEGORIES = {
             '_certificate_transparency_lookup',
             '_fingerprint_technology_stack',
             '_test_cve_fingerprint',
+            '_test_content_discovery',
         ]
     },
 }
@@ -863,6 +867,33 @@ ISO_TS_PATTERN = re.compile(r'\d{4}-\d{2}-\d{2}[t ]\d{2}:\d{2}:\d{2}', re.IGNORE
 EPOCH_PATTERN = re.compile(r'\b1[5-9]\d{8,11}\b')  # 10-13 digit unix timestamps
 
 
+def _load_wordlist(name: str, fallback: Optional[List[str]] = None) -> List[str]:
+    """Load a wordlist by filename, searching script/installed/frozen locations.
+
+    Looks in: <repo>/wordlists, <package>/wordlists, CWD/wordlists, and the
+    PyInstaller bundle dir. Returns ``fallback`` (or a tiny default) if not found.
+    """
+    import os as _os
+    candidates = []
+    here = _os.path.dirname(_os.path.abspath(__file__))
+    candidates.append(_os.path.join(here, '..', 'wordlists', name))   # repo root
+    candidates.append(_os.path.join(here, 'wordlists', name))         # packaged
+    candidates.append(_os.path.join(_os.getcwd(), 'wordlists', name))  # cwd
+    bundle = getattr(sys, '_MEIPASS', None)
+    if bundle:
+        candidates.append(_os.path.join(bundle, 'wordlists', name))
+    for path in candidates:
+        try:
+            if _os.path.isfile(path):
+                with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                    words = [ln.strip() for ln in f if ln.strip() and not ln.startswith('#')]
+                if words:
+                    return words
+        except Exception:
+            continue
+    return list(fallback or [])
+
+
 def _normalize_body(text: str, limit: int = 20000) -> str:
     """Strip volatile tokens from a response body so baselines compare stably.
 
@@ -933,7 +964,7 @@ class CloudFrontBypasser:
     _session_pool: Dict[str, requests.Session] = {}
     _session_lock = threading.Lock()
     
-    def __init__(self, target: str, threads: int = 10, delay: float = 0.2, timeout: int = 5, proxy_config: dict = None, enable_http_logging: bool = False, enable_ssl_analysis: bool = False, enable_crawl: bool = True, enable_schema: bool = True, custom_payloads: dict = None, plugins: list = None, evasion_profile: dict = None):
+    def __init__(self, target: str, threads: int = 10, delay: float = 0.2, timeout: int = 5, proxy_config: dict = None, enable_http_logging: bool = False, enable_ssl_analysis: bool = False, enable_crawl: bool = True, enable_schema: bool = True, custom_payloads: dict = None, plugins: list = None, evasion_profile: dict = None, auth: dict = None):
         """
         Initialize CloudFront WAF Bypasser
 
@@ -1012,6 +1043,8 @@ class CloudFrontBypasser:
         self.custom_payloads: Dict[str, List[str]] = custom_payloads or {}
         self._loaded_plugins = plugins or []
         self.evasion_profile = evasion_profile or {}
+        # Authenticated scanning: cookies / headers / bearer / basic / login flow.
+        self.auth = auth or {}
         
         # Response cache to avoid duplicate requests
         self._response_cache: Dict[str, Dict] = {}
@@ -1037,8 +1070,75 @@ class CloudFrontBypasser:
         # Initialize optimized session with connection pooling
         self._session = self._get_optimized_session()
         self._apply_evasion_profile()
+        self._apply_auth()
 
         logger.info(f"Initialized scanner for {self.target}")
+
+    def _apply_auth(self) -> None:
+        """Apply authenticated-scanning settings to the session so EVERY request
+        runs as the authenticated user.
+
+        Accepted ``auth`` keys (all optional):
+          * 'cookies'      : dict, or a raw 'k=v; k2=v2' Cookie string
+          * 'headers'      : dict of extra headers (e.g. an API key header)
+          * 'bearer'       : a bearer token -> Authorization: Bearer <token>
+          * 'basic'        : (user, pass) tuple -> HTTP Basic auth
+          * 'login'        : {'url','method','data'/'json','success'} to log in and
+                             capture the session cookies before scanning
+        """
+        a = self.auth or {}
+        if not a:
+            return
+        try:
+            cookies = a.get('cookies')
+            if isinstance(cookies, str):
+                for part in cookies.split(';'):
+                    if '=' in part:
+                        k, v = part.split('=', 1)
+                        self._session.cookies.set(k.strip(), v.strip())
+            elif isinstance(cookies, dict):
+                for k, v in cookies.items():
+                    self._session.cookies.set(k, v)
+
+            if isinstance(a.get('headers'), dict):
+                self._session.headers.update(a['headers'])
+            if a.get('bearer'):
+                self._session.headers['Authorization'] = f"Bearer {a['bearer']}"
+            if a.get('basic') and len(a['basic']) == 2:
+                self._session.auth = tuple(a['basic'])
+
+            login = a.get('login')
+            if isinstance(login, dict) and login.get('url'):
+                self._perform_login(login)
+            if a:
+                logger.info("Authenticated scanning: session credentials applied")
+                print("[*] Authenticated scanning enabled")
+        except Exception as e:
+            logger.debug(f"Auth apply error: {e}")
+
+    def _perform_login(self, login: dict) -> bool:
+        """Execute a login request and keep the resulting session cookies."""
+        try:
+            method = (login.get('method') or 'POST').upper()
+            url = login['url']
+            kwargs = {'timeout': self.timeout, 'verify': False, 'allow_redirects': True}
+            if login.get('json') is not None:
+                kwargs['json'] = login['json']
+            elif login.get('data') is not None:
+                kwargs['data'] = login['data']
+            resp = self._session.request(method, url, **kwargs)
+            success = login.get('success')
+            ok = True
+            if success and resp is not None:
+                ok = success in resp.text
+            if resp is not None and resp.status_code < 400 and ok:
+                print(f"[+] Login succeeded ({resp.status_code}); {len(self._session.cookies)} cookie(s) captured")
+                return True
+            print(f"[!] Login may have failed (status {getattr(resp,'status_code','?')})")
+        except Exception as e:
+            logger.debug(f"Login error: {e}")
+            print(f"[!] Login error: {e}")
+        return False
 
     def _apply_evasion_profile(self) -> None:
         """Apply an evasion profile's header/UA tweaks to the live session.
@@ -1378,6 +1478,10 @@ class CloudFrontBypasser:
             '_test_cloud_metadata_v2': self._test_cloud_metadata_v2,
             '_test_dom_xss': self._test_dom_xss,
             '_test_client_side_path_traversal': self._test_client_side_path_traversal,
+            '_test_mutation_fuzzing': self._test_mutation_fuzzing,
+            '_test_content_discovery': self._test_content_discovery,
+            '_test_s3_bucket_enum': self._test_s3_bucket_enum,
+            '_test_websocket_fuzzing': self._test_websocket_fuzzing,
         }
         
         # Build technique list from selected categories
@@ -1578,6 +1682,31 @@ class CloudFrontBypasser:
         if category:
             for r in results:
                 r.setdefault('category', category)
+        return results
+
+    def _pack(self, category: str, mutate_each: bool = True) -> List[str]:
+        """Build a fuzzing payload list from the built-in packs + mutation engine +
+        any user custom payloads for this category."""
+        try:
+            from .mutations import expand_pack
+            return expand_pack(category, extra=self.custom_payloads.get(category, []),
+                               mutate_each=mutate_each)
+        except Exception as e:
+            logger.debug(f"_pack({category}) error: {e}")
+            return list(self.custom_payloads.get(category, []))
+
+    def _test_mutation_fuzzing(self) -> List[Dict[str, Any]]:
+        """Fuzz discovered parameters with mutated evasion payloads across several
+        injection classes (deterministic mutation engine, no AI required)."""
+        if not self._injection_targets():
+            return []
+        print("  [*] Mutation fuzzing discovered parameters...")
+        results = []
+        for cat, label in [('sqli', 'SQLi-mut'), ('xss', 'XSS-mut'),
+                           ('ssti', 'SSTI-mut'), ('cmd', 'CmdInj-mut')]:
+            payloads = self._pack(cat)
+            results += self._fuzz_param_endpoints(payloads, label, category='INJECTION',
+                                                  max_payloads=6, max_endpoints=10)
         return results
 
     @retry_on_network_error(max_retries=3, backoff_factor=0.5)
@@ -9223,6 +9352,113 @@ class CloudFrontBypasser:
             'mysql_handshake_probe': 'gopher://127.0.0.1:3306/_' + quote('\x00', safe=''),
         }
 
+    def _test_content_discovery(self) -> List[Dict[str, Any]]:
+        """Directory / content brute-force using the bundled wordlist.
+
+        Each candidate path is requested and compared against the baseline 404
+        behaviour so only real, non-baseline resources are reported.
+        """
+        results = []
+        words = _load_wordlist('dirs.txt', fallback=[
+            'admin', 'login', 'api', 'config', 'backup', 'test', 'dev', '.git/HEAD',
+            '.env', 'robots.txt', 'sitemap.xml', 'wp-admin', 'phpinfo.php', 'server-status',
+        ])
+        words = words[:300]  # bound the brute-force
+        print(f"  [*] Content discovery: {len(words)} paths...")
+        # Calibrate against a definitely-missing path to detect soft-404s.
+        soft404_size = None
+        try:
+            cal = self._session.get(f"{self.target}/wafp_{hashlib.md5(self.target.encode()).hexdigest()[:8]}_404",
+                                    timeout=self.timeout, allow_redirects=False, verify=False)
+            if cal is not None and cal.status_code == 200:
+                soft404_size = len(cal.content)
+        except Exception:
+            pass
+
+        test_cases = [{'headers': {}, 'path': '/' + w.lstrip('/'),
+                       'technique': f'Content: /{w.lstrip("/")}'} for w in words]
+        batch = self._batch_test(test_cases, verbose=False)
+        for r in batch:
+            status = r.get('status', 0)
+            if status in (200, 201, 204, 301, 302, 307, 401, 403):
+                # Skip soft-404s (200 with the calibrated not-found body size).
+                if soft404_size is not None and status == 200 and abs(r.get('size', 0) - soft404_size) <= 16:
+                    continue
+                sev = 'MEDIUM' if status in (200, 401, 403) else 'LOW'
+                results.append({
+                    'technique': f'Discovered: {r["path"]}', 'bypass': status in (200, 401, 403),
+                    'status': status, 'size': r.get('size', 0),
+                    'reason': f'Accessible resource ({status})', 'severity': sev,
+                    'category': 'CONTENT_DISCOVERY', 'path': r['path'],
+                })
+        if results:
+            print(f"  [+] Content discovery found {len(results)} resource(s)")
+        return results
+
+    def _test_s3_bucket_enum(self) -> List[Dict[str, Any]]:
+        """Enumerate likely-public S3 buckets derived from the target name + wordlist."""
+        results = []
+        base = self.domain.split(':')[0]
+        root = base.replace('www.', '').split('.')[0] if base else 'app'
+        suffixes = _load_wordlist('s3_buckets.txt', fallback=[
+            'backup', 'backups', 'assets', 'static', 'media', 'uploads', 'data',
+            'dev', 'staging', 'prod', 'public', 'private', 'logs', 'images', 'files',
+        ])
+        suffixes = suffixes[:120]
+        candidates = [root]
+        for s in suffixes:
+            candidates.append(f"{root}-{s}")
+            candidates.append(f"{root}.{s}")
+            candidates.append(f"{s}-{root}")
+        candidates = list(dict.fromkeys(candidates))[:200]
+        print(f"  [*] S3 bucket enumeration: {len(candidates)} candidates...")
+
+        def _probe(bucket):
+            url = f"https://{bucket}.s3.amazonaws.com/"
+            try:
+                resp = self._session.get(url, timeout=self.timeout, verify=False)
+            except Exception:
+                return None
+            if resp is None:
+                return None
+            body = resp.text[:400]
+            if resp.status_code == 200 and '<ListBucketResult' in body:
+                return {'technique': f'Public S3 bucket: {bucket}', 'bypass': True,
+                        'status': 200, 'reason': 'Bucket is publicly listable', 'severity': 'HIGH',
+                        'category': 'CLOUD_S3', 'details': {'bucket': bucket, 'url': url}}
+            if resp.status_code == 403 and ('AccessDenied' in body or 'Access Denied' in body):
+                return {'technique': f'S3 bucket exists (private): {bucket}', 'bypass': False,
+                        'status': 403, 'reason': 'Bucket exists but access is denied', 'severity': 'INFO',
+                        'category': 'CLOUD_S3', 'details': {'bucket': bucket, 'url': url}}
+            return None
+
+        if self._executor is not None:
+            futures = {self._executor.submit(_probe, b): b for b in candidates}
+            for fut in as_completed(futures):
+                try:
+                    r = fut.result()
+                    if r:
+                        results.append(r)
+                        if r['bypass']:
+                            print(f"  [✓] HIGH: public S3 bucket {r['details']['bucket']}")
+                except Exception:
+                    pass
+        return results
+
+    def _test_websocket_fuzzing(self) -> List[Dict[str, Any]]:
+        """Deep WebSocket testing (handshake, CSWSH origin, message fuzzing)."""
+        try:
+            from .websocket_tests import run_websocket_tests
+        except Exception as e:
+            logger.debug(f"websocket_tests unavailable: {e}")
+            return []
+        print("  [*] WebSocket deep fuzzing...")
+        try:
+            return run_websocket_tests(self.target, self.crawl_targets, timeout=self.timeout)
+        except Exception as e:
+            logger.debug(f"WebSocket fuzzing error: {e}")
+            return []
+
     def triage_with_ai(self, api_key: str = None, model: str = None) -> Dict[str, Any]:
         """Run opt-in AI triage over current results (no-op without a key)."""
         try:
@@ -9377,6 +9613,14 @@ def main():
     # Monitoring
     parser.add_argument('--monitor', action='store_true', help='After scanning, diff against the previous scan of this target')
     parser.add_argument('--webhook', help='Webhook URL for monitoring alerts')
+    # Authenticated scanning
+    parser.add_argument('--cookie', help='Cookie string to send on every request (e.g. "session=abc; csrf=xyz")')
+    parser.add_argument('--header', action='append', default=[], help='Extra header "Name: value" (repeatable)')
+    parser.add_argument('--bearer', help='Bearer token -> Authorization: Bearer <token>')
+    parser.add_argument('--basic-auth', help='HTTP Basic auth as user:pass')
+    parser.add_argument('--login-url', help='Login URL to authenticate before scanning')
+    parser.add_argument('--login-data', help='Login form data as urlencoded string (e.g. "user=a&pass=b")')
+    parser.add_argument('--login-success', help='Substring expected in a successful login response')
     args = parser.parse_args()
 
     # In --json/pipeline mode, keep stdout clean for machine consumption.
@@ -9400,6 +9644,32 @@ def main():
     # Setup logging
     setup_logging(args.log_file, args.log_level)
     
+    # Assemble authenticated-scanning config from CLI flags.
+    auth = {}
+    if args.cookie:
+        auth['cookies'] = args.cookie
+    if args.header:
+        hdrs = {}
+        for h in args.header:
+            if ':' in h:
+                k, v = h.split(':', 1)
+                hdrs[k.strip()] = v.strip()
+        if hdrs:
+            auth['headers'] = hdrs
+    if args.bearer:
+        auth['bearer'] = args.bearer
+    if args.basic_auth and ':' in args.basic_auth:
+        u, p = args.basic_auth.split(':', 1)
+        auth['basic'] = (u, p)
+    if args.login_url:
+        login = {'url': args.login_url, 'method': 'POST'}
+        if args.login_data:
+            from urllib.parse import parse_qs as _pqs
+            login['data'] = {k: v[0] for k, v in _pqs(args.login_data).items()}
+        if args.login_success:
+            login['success'] = args.login_success
+        auth['login'] = login
+
     try:
         # Initialize scanner (pre-wired with DB custom payloads / plugins / evasion
         # profile unless explicitly disabled).
@@ -9408,6 +9678,7 @@ def main():
             use_db_extras=not args.no_db_extras,
             threads=args.threads, delay=args.delay, timeout=args.timeout,
             enable_crawl=not args.no_crawl, enable_schema=not args.no_schema,
+            auth=auth or None,
         )
 
         # Run scan with selected categories

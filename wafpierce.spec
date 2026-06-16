@@ -79,6 +79,8 @@ hidden_imports = [
     'wafpierce.monitor',
     'wafpierce.ai_triage',
     'wafpierce.browser_tests',
+    'wafpierce.mutations',
+    'wafpierce.websocket_tests',
     # Standard library modules
     'json',
     'threading',
