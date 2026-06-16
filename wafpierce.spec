@@ -66,6 +66,7 @@ hidden_imports = [
     # WAFPierce modules
     'wafpierce',
     'wafpierce.gui',
+    'wafpierce.theme',
     'wafpierce.pierce',
     'wafpierce.chain',
     'wafpierce.error_handler',

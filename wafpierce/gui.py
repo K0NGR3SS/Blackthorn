@@ -1774,9 +1774,107 @@ def main() -> None:
             except Exception:
                 pass
 
+        def _nav_button(self, glyph, label, slot, active=False):
+            from PySide6.QtWidgets import QPushButton
+            from PySide6.QtCore import Qt
+            btn = QPushButton(f"  {glyph}   {label}")
+            btn.setObjectName('NavButton')
+            try:
+                btn.setCursor(Qt.PointingHandCursor)
+            except Exception:
+                pass
+            btn.setMinimumHeight(38)
+            if slot:
+                try:
+                    btn.clicked.connect(slot)
+                except Exception:
+                    pass
+            btn.setProperty('active', 'true' if active else 'false')
+            return btn
+
+        def _build_sidebar(self):
+            """Build the left navigation rail (brand + nav actions + version)."""
+            from PySide6.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout, QLabel
+            from PySide6.QtGui import QPixmap
+            from PySide6.QtCore import Qt
+
+            bar = QFrame()
+            bar.setObjectName('Sidebar')
+            bar.setFixedWidth(212)
+            lay = QVBoxLayout(bar)
+            lay.setContentsMargins(16, 18, 16, 16)
+            lay.setSpacing(6)
+
+            # Brand: logo + wordmark
+            brand = QHBoxLayout()
+            brand.setSpacing(10)
+            logo = QLabel()
+            try:
+                if os.path.exists(LOGO_PATH):
+                    pm = QPixmap(LOGO_PATH)
+                    if not pm.isNull():
+                        logo.setPixmap(pm.scaledToHeight(30, Qt.SmoothTransformation))
+            except Exception:
+                pass
+            brand.addWidget(logo)
+            name_box = QVBoxLayout()
+            name_box.setSpacing(0)
+            name_lbl = QLabel('WAFPierce')
+            name_lbl.setObjectName('BrandName')
+            tag_lbl = QLabel('v1.5')
+            tag_lbl.setObjectName('BrandTag')
+            name_box.addWidget(name_lbl)
+            name_box.addWidget(tag_lbl)
+            brand.addLayout(name_box)
+            brand.addStretch()
+            lay.addLayout(brand)
+            lay.addSpacing(18)
+
+            section = QLabel('MENU')
+            section.setObjectName('NavSection')
+            lay.addWidget(section)
+            lay.addSpacing(4)
+
+            # Nav items map to existing actions/dialogs.
+            self._nav_buttons = {}
+            nav_items = [
+                ('scan', '◉', 'Scan', lambda: self.target_edit.setFocus(), True),
+                ('dashboard', '▦', 'Dashboard', self._show_dashboard, False),
+                ('results', '◆', 'Results', self.show_results_summary, False),
+                ('payloads', '⚑', 'Payloads', self._show_payloads_dialog, False),
+                ('schedule', '◷', 'Schedule', self._show_scheduled_scans_dialog, False),
+                ('timeline', '☰', 'Timeline', self._show_timeline_viewer, False),
+                ('plugins', '❖', 'Plugins', self._show_plugin_manager, False),
+                ('settings', '⚙', 'Settings', self._open_qt_settings, False),
+            ]
+            for key, glyph, label, slot, active in nav_items:
+                btn = self._nav_button(glyph, label, slot, active)
+                self._nav_buttons[key] = btn
+                lay.addWidget(btn)
+
+            lay.addStretch()
+            ver = QLabel('v1.5.0')
+            ver.setObjectName('SidebarVersion')
+            lay.addWidget(ver)
+            return bar
+
         def _build_ui(self):
-            v = QVBoxLayout(self)
+            # New shell: left navigation rail + main content area.
+            root = QHBoxLayout(self)
+            root.setContentsMargins(0, 0, 0, 0)
+            root.setSpacing(0)
+            self._layout_root = root
+
+            sidebar = self._build_sidebar()
+            root.addWidget(sidebar)
+
+            content = QWidget()
+            content.setObjectName('Content')
+            v = QVBoxLayout(content)
+            v.setContentsMargins(22, 20, 22, 20)
+            v.setSpacing(14)
             self._layout_main = v
+            root.addWidget(content, 1)
 
             # top controls
             top = QHBoxLayout()
@@ -1812,56 +1910,9 @@ def main() -> None:
             except Exception:
                 pass
             
-            # small compact settings button at the top-right
-            try:
-                top.addStretch()
-                
-                # Dashboard button
-                dash_btn = QPushButton('📈')
-                dash_btn.setFixedHeight(28)
-                dash_btn.setFixedWidth(35)
-                dash_btn.setToolTip(_t('dashboard', self._lang) if 'dashboard' in TRANSLATIONS.get(self._lang, {}) else 'Dashboard')
-                dash_btn.clicked.connect(self._show_dashboard)
-                top.addWidget(dash_btn)
-                
-                # Payloads button
-                payload_btn = QPushButton('🎯')
-                payload_btn.setFixedHeight(28)
-                payload_btn.setFixedWidth(35)
-                payload_btn.setToolTip(_t('custom_payloads', self._lang) if 'custom_payloads' in TRANSLATIONS.get(self._lang, {}) else 'Custom Payloads')
-                payload_btn.clicked.connect(self._show_payloads_dialog)
-                top.addWidget(payload_btn)
-                
-                # Scheduled Scans button
-                schedule_btn = QPushButton('⏰')
-                schedule_btn.setFixedHeight(28)
-                schedule_btn.setFixedWidth(35)
-                schedule_btn.setToolTip(_t('scheduled_scans', self._lang) if 'scheduled_scans' in TRANSLATIONS.get(self._lang, {}) else 'Scheduled Scans')
-                schedule_btn.clicked.connect(self._show_scheduled_scans_dialog)
-                top.addWidget(schedule_btn)
-                
-                # Timeline button
-                timeline_btn = QPushButton('📅')
-                timeline_btn.setFixedHeight(28)
-                timeline_btn.setFixedWidth(35)
-                timeline_btn.setToolTip(_t('scan_timeline', self._lang) if 'scan_timeline' in TRANSLATIONS.get(self._lang, {}) else 'Scan Timeline')
-                timeline_btn.clicked.connect(self._show_timeline_viewer)
-                top.addWidget(timeline_btn)
-                
-                # Plugins button
-                plugins_btn = QPushButton('🔌')
-                plugins_btn.setFixedHeight(28)
-                plugins_btn.setFixedWidth(35)
-                plugins_btn.setToolTip(_t('plugins', self._lang) if 'plugins' in TRANSLATIONS.get(self._lang, {}) else 'Plugins')
-                plugins_btn.clicked.connect(self._show_plugin_manager)
-                top.addWidget(plugins_btn)
-                
-                sbtn = QPushButton(_t('settings', self._lang))
-                sbtn.setFixedHeight(28)
-                sbtn.clicked.connect(self._open_qt_settings)
-                top.addWidget(sbtn)
-            except Exception:
-                pass
+            # Navigation actions now live in the left sidebar; keep the target
+            # row left-aligned by absorbing remaining space on the right.
+            top.addStretch()
             v.addLayout(top)
 
             # options (threads / delay)
@@ -1912,10 +1963,10 @@ def main() -> None:
                     lbl.setStyleSheet(f'background:{color}; padding:4px; color: white; border-radius:3px')
                     self._legend_labels[key] = lbl
                     return lbl
-                legend_h.addWidget(_legend_label('queued', _t('queued', self._lang), '#2b2f33'))
-                legend_h.addWidget(_legend_label('running', _t('running', self._lang), '#3b82f6'))
-                legend_h.addWidget(_legend_label('done', _t('done', self._lang), '#163f19'))
-                legend_h.addWidget(_legend_label('error', _t('error', self._lang), '#ff4d4d'))
+                legend_h.addWidget(_legend_label('queued', _t('queued', self._lang), '#2a3340'))
+                legend_h.addWidget(_legend_label('running', _t('running', self._lang), '#6366f1'))
+                legend_h.addWidget(_legend_label('done', _t('done', self._lang), '#15331f'))
+                legend_h.addWidget(_legend_label('error', _t('error', self._lang), '#ef4444'))
                 v.addLayout(legend_h)
             except Exception:
                 pass
@@ -1985,7 +2036,11 @@ def main() -> None:
                         except Exception:
                             css_path = tmp.replace('\\', '/')
                         self.log.setStyleSheet(
-                            f"background-image: url('{css_path}'); background-repeat: no-repeat; background-position: center; background-attachment: fixed;"
+                            "QTextEdit {"
+                            f" background-image: url('{css_path}');"
+                            " background-repeat: no-repeat; background-position: center; background-attachment: fixed;"
+                            " background-color: #12161d; color: #e6eaf0;"
+                            " border: 1px solid #262f3b; border-radius: 10px; padding: 8px; }"
                         )
             except Exception:
                 pass
@@ -2002,18 +2057,18 @@ def main() -> None:
             self._total_progress_bar.setFixedHeight(22)
             self._total_progress_bar.setStyleSheet('''
                 QProgressBar {
-                    border: 1px solid #30363d;
-                    border-radius: 5px;
-                    background-color: #21262d;
+                    border: 1px solid #262f3b;
+                    border-radius: 7px;
+                    background-color: #1a212b;
                     text-align: center;
-                    color: #d7e1ea;
+                    color: #e6eaf0;
                     font-size: 12px;
                     font-weight: bold;
                 }
                 QProgressBar::chunk {
                     background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                        stop:0 #2563eb, stop:1 #3b82f6);
-                    border-radius: 4px;
+                        stop:0 #4f52d6, stop:1 #6366f1);
+                    border-radius: 6px;
                 }
             ''')
             total_progress_layout.addWidget(total_progress_label)
@@ -2028,20 +2083,22 @@ def main() -> None:
             self.results_btn.setFixedHeight(40)
             self._results_btn_base_style = '''
                 QPushButton {
-                    background-color: #2b2f33;
-                    color: #d7e1ea;
-                    border: none;
+                    background-color: #1a212b;
+                    color: #e6eaf0;
+                    border: 1px solid #262f3b;
                     padding: 8px 20px;
-                    border-radius: 5px;
+                    border-radius: 8px;
                     font-size: 14px;
                     font-weight: bold;
                 }
                 QPushButton:hover {
-                    background-color: #3b4045;
+                    background-color: #1f2731;
+                    border-color: #6366f1;
                 }
                 QPushButton:disabled {
-                    background-color: #1e2124;
-                    color: #666;
+                    background-color: #12161d;
+                    color: #6b7585;
+                    border-color: #1c232d;
                 }
             '''
             self._results_btn_green_style = '''
@@ -2085,8 +2142,12 @@ def main() -> None:
             bottom = QHBoxLayout()
             self._layout_bottom = bottom
             self.start_btn = QPushButton(_t('start', self._lang))
+            self.start_btn.setObjectName('PrimaryButton')
+            self.start_btn.setMinimumHeight(38)
             self.start_btn.clicked.connect(self.start_scan)
             self.stop_btn = QPushButton(_t('stop', self._lang))
+            self.stop_btn.setObjectName('DangerButton')
+            self.stop_btn.setMinimumHeight(38)
             self.stop_btn.setEnabled(False)
             self.stop_btn.clicked.connect(self.stop_scan)
             self.save_btn = QPushButton(_t('save', self._lang))
@@ -3581,7 +3642,11 @@ def main() -> None:
                         except Exception:
                             css_path = tmp.replace('\\', '/')
                         self.log.setStyleSheet(
-                            f"background-image: url('{css_path}'); background-repeat: no-repeat; background-position: center; background-attachment: fixed;"
+                            "QTextEdit {"
+                            f" background-image: url('{css_path}');"
+                            " background-repeat: no-repeat; background-position: center; background-attachment: fixed;"
+                            " background-color: #12161d; color: #e6eaf0;"
+                            " border: 1px solid #262f3b; border-radius: 10px; padding: 8px; }"
                         )
                 else:
                     self.log.setStyleSheet('')
@@ -6399,12 +6464,25 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
             dark_palette.setColor(QPalette.ButtonText, QColor(215, 225, 234))
             dark_palette.setColor(QPalette.BrightText, QColor(255, 77, 77))
             dark_palette.setColor(QPalette.Link, QColor(88, 166, 255))
-            dark_palette.setColor(QPalette.Highlight, QColor(59, 130, 246))
+            dark_palette.setColor(QPalette.Highlight, QColor(99, 102, 241))
             dark_palette.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
             app.setPalette(dark_palette)
         except Exception:
             pass
-        
+
+        # Apply the centralized modern neutral-dark theme (global QSS).
+        try:
+            try:
+                from .theme import apply_theme
+            except ImportError:
+                try:
+                    from wafpierce.theme import apply_theme
+                except ImportError:
+                    from theme import apply_theme
+            apply_theme(app)
+        except Exception as _e:
+            print(f"[!] Theme load failed: {_e}")
+
         # set application icon from bundled logo when available
         try:
             if os.path.exists(LOGO_PATH):
