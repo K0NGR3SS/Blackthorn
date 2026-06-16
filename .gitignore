@@ -6,4 +6,9 @@ venv/
 dist/
 build/
 pentest_results/
-EOF
+
+# Local editor / harness config (machine-specific paths)
+.claude/
+
+# Build & validation logs
+*.log
