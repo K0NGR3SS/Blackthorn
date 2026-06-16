@@ -6,3 +6,11 @@ certifi
 charset-normalizer
 idna
 cryptography>=42.0.0
+# HTTP/2 client used for the single-packet race attack and HTTP/2 smuggling tests.
+httpx[http2]>=0.27.0
+
+# ---- Optional extras (not required for core scanning) ----
+# Headless-browser tests (DOM XSS, Client-Side Path Traversal):
+#   pip install playwright && python -m playwright install chromium
+# AI triage / auto-report (opt-in, needs an Anthropic API key):
+#   pip install anthropic

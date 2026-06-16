@@ -70,6 +70,15 @@ hidden_imports = [
     'wafpierce.chain',
     'wafpierce.error_handler',
     'wafpierce.exceptions',
+    'wafpierce.database',
+    'wafpierce.plugins',
+    # v1.5 modules (lazily imported — list explicitly so PyInstaller bundles them)
+    'wafpierce.crawler',
+    'wafpierce.schema_ingest',
+    'wafpierce.exporters',
+    'wafpierce.monitor',
+    'wafpierce.ai_triage',
+    'wafpierce.browser_tests',
     # Standard library modules
     'json',
     'threading',

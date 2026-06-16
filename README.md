@@ -1,7 +1,7 @@
 # WAFPierce
 **CloudFront WAF Bypass & Penetration Testing Tool**
 
-![Version](https://img.shields.io/badge/version-1.4-blue)
+![Version](https://img.shields.io/badge/version-1.5-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-green)
 ![License](https://img.shields.io/badge/license-MIT-orange)
 
@@ -38,6 +38,53 @@ https://youtu.be/O_iT_AuvczY
 - **Optimized Performance** - Connection pooling, response caching, and parallel batch testing
 
 ## Changelog
+
+### Version 1.5 (June 2026)
+
+#### Engine: faster, more accurate, bounded
+- **Single bounded thread pool** — Replaced the nested `ThreadPoolExecutor`-per-technique design (which could spawn ~`threads²` concurrent sockets and trigger WAF throttling) with one shared, bounded pool. The configured thread count is now a real ceiling on in-flight requests. Techniques run sequentially and fan their requests across the shared pool.
+- **Adaptive concurrency** — A token-style limiter shrinks parallelism on `429/503` pushback and recovers after sustained clean responses.
+- **Response cache actually works** — The cache key no longer includes the per-technique `X-Technique` marker, so identical probes are now deduplicated.
+- **`X-Technique` no longer leaks** — The technique label is tracked out-of-band and is never sent to the target (previously it fingerprinted the scanner and could trip custom-header WAF rules).
+- **Multi-sample baseline + similarity scoring** — The baseline is sampled multiple times to learn the page's natural jitter band; dynamic tokens (CSRF/nonce/timestamps/UUIDs) are normalized out and content is compared with a similarity ratio instead of a raw MD5. Dramatically reduces false-positive "different content" findings on dynamic pages.
+
+#### New discovery
+- **Crawler / spider** — Same-host BFS plus `robots.txt` and `sitemap.xml` parsing discovers real endpoints, forms, and parameters. Injection tests (SQLi, XSS, command injection, path traversal, SSRF) now fuzz **live discovered parameters**, not just `/`.
+- **Schema ingestion** — Pulls OpenAPI/Swagger (`/swagger.json`, `/openapi.json`, `/v3/api-docs`, …) and runs GraphQL introspection to drive schema-aware fuzzing.
+
+#### New test modules
+- **JSON-based SQLi WAF bypass** (PortSwigger 2022 technique)
+- **Charset / overlong-UTF-8 confusion** bypasses
+- **Deep cache poisoning** — fat GET, parameter cloaking, additional unkeyed headers
+- **OAuth/OIDC** — `redirect_uri` bypass variants + OIDC config exposure
+- **Secrets in JS bundles** — downloads referenced `.js` files and scans them for keys/tokens
+- **CVE fingerprinting** — maps detected server/tech versions to known CVEs (Heartbleed, CVE-2021-41773/42013, Log4Shell, Ghostcat, …)
+- **HTTP/2 single-packet race** (optional, via `httpx[http2]`) — far more reliable than concurrent-thread race testing
+- **Extended cloud metadata SSRF** — AWS/GCP/Azure/DigitalOcean/Oracle/Alibaba/OpenStack IMDS + ready-to-use **gopher** payload generation for Redis/MySQL
+- **DOM XSS + Client-Side Path Traversal** (optional, via Playwright headless browser)
+
+#### Integrations & extensibility (now actually wired into the engine)
+- **Custom payloads** from the database are merged into injection tests
+- **User plugins** are executed as a scan phase
+- **Evasion profiles** apply header/UA tweaks and can contribute curated techniques
+- A `create_scanner()` factory pre-wires all of the above from the DB/plugin manager (used by the CLI, GUI subprocess, and frozen `--scan-worker`)
+
+#### AI (opt-in)
+- **AI triage** (`--ai-triage`) flags likely false positives and adjusts severity
+- **AI report** (`--ai-report`) drafts a professional markdown assessment
+- **Payload mutation** helper generates novel evasion variants
+- Off by default; requires `pip install anthropic` and an Anthropic API key (`--ai-key` or `ANTHROPIC_API_KEY`)
+
+#### Reporting & automation
+- **Exports** — SARIF (CI/CD code scanning), Nuclei templates, and a standalone HTML report (`--export`, `--export-format`)
+- **Pipeline mode** — `--json` emits clean machine-readable results to stdout
+- **Continuous monitoring** — `--monitor` diffs against the previous scan of a target and reports only *new* findings, with optional `--webhook` alerts
+- New CLI toggles: `--no-crawl`, `--no-schema`, `--no-db-extras`
+
+#### Dependencies
+- Added `httpx[http2]` (core, for HTTP/2 tests). Optional extras: `playwright` (browser tests) and `anthropic` (AI) — install via `pip install -e .[browser,ai]` or `.[full]`.
+
+---
 
 ### Version 1.4 (March 2026)
 
@@ -345,7 +392,13 @@ WAFPierce tests **100+ bypass methods** across multiple categories:
 
 Features planned for future releases:
 
-### AI implementation
+### AI implementation ✅ (shipped in 1.5 — opt-in)
+AI triage, payload mutation, and auto-report are now available via the Anthropic API. Future work: in-scan adaptive payload generation and LLM-guided crawling.
+
+### Ideas under consideration
+- WebSocket message fuzzing
+- gRPC / protobuf endpoint testing
+- Authenticated-session scanning (login + cookie/jar reuse)
 
 ### Community Suggestions
 Have ideas for new tests? Message either Marwan or Nazariy

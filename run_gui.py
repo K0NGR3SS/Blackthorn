@@ -88,10 +88,12 @@ def _run_scan_worker() -> int:
     args, _ = parser.parse_known_args()
 
     try:
-        from wafpierce.pierce import CloudFrontBypasser
+        from wafpierce.pierce import create_scanner
 
         print(f"[*] Scanning {args.target}")
-        scanner = CloudFrontBypasser(args.target, args.threads, args.delay, 5)
+        # create_scanner pre-wires DB custom payloads / plugins / evasion profile and
+        # enables crawling + schema discovery by default.
+        scanner = create_scanner(args.target, threads=args.threads, delay=args.delay, timeout=5)
         selected_categories = [c.strip() for c in args.categories.split(',') if c.strip()]
         results = scanner.scan(selected_categories if selected_categories else None)
 
