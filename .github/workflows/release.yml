@@ -1,0 +1,103 @@
+name: Build & Release
+
+# Builds native PyInstaller binaries for Windows, macOS and Linux and attaches
+# them to a GitHub Release. Triggered by pushing a version tag (e.g. v1.5.0) or
+# run manually from the Actions tab.
+#
+# The website download buttons point at the "latest release" asset URLs, e.g.
+#   https://github.com/<owner>/WAFPierce/releases/latest/download/WAFPierce-windows.exe
+# so they keep working as new releases are published.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            asset: WAFPierce-windows.exe
+          - os: macos-latest
+            asset: WAFPierce-macos.zip
+          - os: ubuntu-latest
+            asset: WAFPierce-linux.tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Linux GUI/runtime libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libdbus-1-3 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-randr0 libxcb-render-util0 libxcb-shape0
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller pillow
+
+      - name: Build with PyInstaller
+        run: pyinstaller --noconfirm --clean wafpierce.spec
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir -p out
+          cp dist/WAFPierce.exe "out/${{ matrix.asset }}"
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p out
+          chmod +x dist/WAFPierce
+          cd dist && zip -r "../out/${{ matrix.asset }}" WAFPierce
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p out
+          chmod +x dist/WAFPierce
+          tar -czf "out/${{ matrix.asset }}" -C dist WAFPierce
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: out/${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
