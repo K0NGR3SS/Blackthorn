@@ -140,10 +140,19 @@ def to_html(target: str, results: List[Dict[str, Any]]) -> str:
         )
         fp = fp + conf_badge
         curl = r.get('curl')
-        repro = (
-            f"<details><summary>curl</summary><pre class='repro'>{html.escape(str(curl))}</pre></details>"
-            if curl else '<span class="muted">—</span>'
-        )
+        oob = r.get('oob') or {}
+        repro_parts = []
+        if oob:
+            proof = (f"protocol: {oob.get('protocol','?')}\nsource: {oob.get('source','?')}\n"
+                     f"id: {oob.get('full_id','')}\n\n{oob.get('raw','')}")
+            repro_parts.append(
+                f"<details open><summary>OOB proof</summary><pre class='repro'>{html.escape(proof)}</pre></details>"
+            )
+        if curl:
+            repro_parts.append(
+                f"<details><summary>curl</summary><pre class='repro'>{html.escape(str(curl))}</pre></details>"
+            )
+        repro = ''.join(repro_parts) if repro_parts else '<span class="muted">—</span>'
         rows.append(
             f"<tr>"
             f"<td><span style='background:{color};color:#fff;padding:2px 8px;border-radius:4px;font-size:12px'>{html.escape(sev)}</span></td>"

