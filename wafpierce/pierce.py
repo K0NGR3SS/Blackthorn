@@ -13,6 +13,7 @@ import time
 import hashlib
 import logging
 import difflib
+import random
 import socket
 import ssl
 import json
@@ -981,7 +982,7 @@ class CloudFrontBypasser(ExtraTechniques):
     _session_pool: Dict[str, requests.Session] = {}
     _session_lock = threading.Lock()
     
-    def __init__(self, target: str, threads: int = 10, delay: float = 0.2, timeout: int = 5, proxy_config: dict = None, enable_http_logging: bool = False, enable_ssl_analysis: bool = False, enable_crawl: bool = True, enable_schema: bool = True, custom_payloads: dict = None, plugins: list = None, evasion_profile: dict = None, auth: dict = None, oob=None, impersonate: Optional[str] = None):
+    def __init__(self, target: str, threads: int = 10, delay: float = 0.2, timeout: int = 5, proxy_config: dict = None, enable_http_logging: bool = False, enable_ssl_analysis: bool = False, enable_crawl: bool = True, enable_schema: bool = True, custom_payloads: dict = None, plugins: list = None, evasion_profile: dict = None, auth: dict = None, oob=None, impersonate: Optional[str] = None, scope: dict = None, safe_mode: bool = False, jitter: float = 0.0, proxy_pool: list = None):
         """
         Initialize CloudFront WAF Bypasser
 
@@ -1084,7 +1085,20 @@ class CloudFrontBypasser(ExtraTechniques):
         # Accepts a browser target ("chrome", "chrome124", "safari17_0", ...).
         self.impersonate = impersonate
         self._impersonating = False
-        
+
+        # Engine controls (v1.6):
+        #  scope      : {'include':[regex], 'exclude':[regex]} for discovery/recon
+        #  safe_mode  : skip noisy/DoS-flavored techniques and state-changing writes
+        #  jitter     : add up to N random seconds per request (rate-WAF evasion)
+        #  proxy_pool : rotate requests across a list of proxy URLs (incl. Tor)
+        import re as _re
+        self.scope = scope or {}
+        self._scope_inc = [_re.compile(p, _re.I) for p in (self.scope.get('include') or [])]
+        self._scope_exc = [_re.compile(p, _re.I) for p in (self.scope.get('exclude') or [])]
+        self.safe_mode = safe_mode
+        self.jitter = max(0.0, float(jitter or 0.0))
+        self.proxy_pool = list(proxy_pool) if proxy_pool else []
+
         # Response cache to avoid duplicate requests
         self._response_cache: Dict[str, Dict] = {}
         self._cache_lock = threading.Lock()
@@ -1112,6 +1126,25 @@ class CloudFrontBypasser(ExtraTechniques):
         self._apply_auth()
 
         logger.info(f"Initialized scanner for {self.target}")
+
+    # Techniques skipped in --safe-mode (DoS-flavored or noisy/state-changing).
+    SAFE_MODE_SKIP = {
+        '_test_race_condition', '_test_single_packet_race', '_test_buffer_limits',
+        '_test_integer_overflow', '_test_range_header_attacks', '_test_http_desync',
+        '_test_smuggling_cl0', '_test_multipart_bypass', '_test_graphql_deep_testing',
+        '_test_websocket_fuzzing',
+    }
+
+    def _in_scope(self, url: str) -> bool:
+        """Scope guard for discovered/recon URLs. Exclude wins; if an include list
+        exists, a URL must match at least one include pattern."""
+        if not url:
+            return True
+        if any(p.search(url) for p in self._scope_exc):
+            return False
+        if self._scope_inc and not any(p.search(url) for p in self._scope_inc):
+            return False
+        return True
 
     def _apply_auth(self) -> None:
         """Apply authenticated-scanning settings to the session so EVERY request
@@ -1630,6 +1663,15 @@ class CloudFrontBypasser(ExtraTechniques):
                     added_techniques.add(technique_name)
             print(f"[*] Evasion profile added {len(profile_techniques)} curated technique(s)")
 
+        # Safe mode: drop noisy / DoS-flavored / state-changing techniques.
+        if self.safe_mode:
+            before = len(techniques)
+            techniques = [t for t in techniques
+                          if getattr(t, '__name__', '') not in self.SAFE_MODE_SKIP]
+            skipped = before - len(techniques)
+            if skipped:
+                print(f"[*] Safe mode: skipped {skipped} noisy/destructive technique(s)")
+
         # Filter techniques based on detected OS
         original_count = len(techniques)
         techniques = self._filter_techniques_by_os(techniques, detected_os)
@@ -1701,6 +1743,13 @@ class CloudFrontBypasser(ExtraTechniques):
         # Backfill reproduction commands for any results built outside the
         # _test_request chokepoint (recon/audit/cloud findings).
         self._attach_repro_commands()
+
+        # Attach CVSS base score/vector + CWE for reporting & CI gating.
+        try:
+            from .cvss import annotate as _cvss_annotate
+            _cvss_annotate(self.results)
+        except Exception as e:
+            logger.debug(f"CVSS annotation error: {e}")
 
         logger.info(f"Scan complete: Found {len(self.results)} bypasses")
         return self.results
@@ -1993,6 +2042,19 @@ class CloudFrontBypasser(ExtraTechniques):
                 logger.debug(f"Schema phase error: {e}")
 
         self.crawl_targets = list(discovered.values())
+
+        # Apply scope rules to discovered endpoints (exclude wins; an include
+        # list restricts to matching paths/URLs).
+        if (self._scope_inc or self._scope_exc) and self.crawl_targets:
+            before = len(self.crawl_targets)
+            self.crawl_targets = [
+                t for t in self.crawl_targets
+                if self._in_scope(f"{self.target}{t.get('path', '/')}")
+            ]
+            dropped = before - len(self.crawl_targets)
+            if dropped:
+                print(f"[*] Scope: dropped {dropped} out-of-scope endpoint(s)")
+
         if self.crawl_targets:
             print(f"[+] Discovery complete: {len(self.crawl_targets)} testable endpoint(s)")
 
@@ -2345,15 +2407,15 @@ class CloudFrontBypasser(ExtraTechniques):
         # Adaptive concurrency: bound in-flight requests and pace under pushback.
         self._limiter.acquire()
         try:
-            resp = self._session.request(
-                method=method,
-                url=url,
-                headers=req_headers,
-                data=data,
-                timeout=self.timeout,
-                allow_redirects=False,
-                verify=False
+            req_kwargs = dict(
+                method=method, url=url, headers=req_headers, data=data,
+                timeout=self.timeout, allow_redirects=False, verify=False,
             )
+            # Per-request proxy rotation (thread-safe: not mutating the session).
+            if self.proxy_pool:
+                proxy = random.choice(self.proxy_pool)
+                req_kwargs['proxies'] = {'http': proxy, 'https': proxy}
+            resp = self._session.request(**req_kwargs)
 
             # Log HTTP transaction for forensic analysis
             self._log_http_transaction(method, url, req_headers, resp)
@@ -2368,9 +2430,12 @@ class CloudFrontBypasser(ExtraTechniques):
             else:
                 self._limiter.reward()
 
-            # Pacing delay (may have been adjusted by rate-limit handling)
+            # Pacing delay (may have been adjusted by rate-limit handling),
+            # plus optional random jitter to defeat rate-based heuristics.
             if self.delay > 0:
                 time.sleep(self.delay)
+            if self.jitter > 0:
+                time.sleep(random.uniform(0, self.jitter))
 
             # Check if bypass succeeded
             bypass_result = self._is_bypass_fast(resp)
@@ -9987,6 +10052,19 @@ def main():
                        help='Mimic a real browser TLS (JA3/JA4) + HTTP/2 fingerprint via '
                             'curl_cffi to evade bot/JS WAFs. Bare flag = chrome; or pass a '
                             'target like chrome124 / safari17_0')
+    parser.add_argument('--jitter', type=float, default=0.0, metavar='SECONDS',
+                       help='Add up to N random seconds per request (rate-WAF evasion)')
+    parser.add_argument('--proxy-pool', help='Comma-separated proxy URLs to rotate per request '
+                                             '(e.g. "http://a:8080,socks5h://b:1080")')
+    parser.add_argument('--tor', action='store_true',
+                       help='Route through Tor (adds socks5h://127.0.0.1:9050 to the proxy pool)')
+    # Scope & safety
+    parser.add_argument('--scope-include', action='append', default=[], metavar='REGEX',
+                       help='Only test discovered URLs matching this regex (repeatable)')
+    parser.add_argument('--scope-exclude', action='append', default=[], metavar='REGEX',
+                       help='Never test discovered URLs matching this regex (repeatable)')
+    parser.add_argument('--safe-mode', action='store_true',
+                       help='Skip noisy/DoS-flavored and state-changing techniques')
     # Exports
     parser.add_argument('--export', help='Write an extra export to this path (format from --export-format)')
     parser.add_argument('--export-format', default='html', choices=['sarif', 'nuclei', 'html', 'json'],
@@ -10086,6 +10164,18 @@ def main():
         except Exception as e:
             print(f"[!] OOB init failed: {e}")
 
+    # Assemble proxy pool (+ Tor) and scope rules.
+    proxy_pool = []
+    if args.proxy_pool:
+        proxy_pool = [p.strip() for p in args.proxy_pool.split(',') if p.strip()]
+    if args.tor:
+        proxy_pool.append('socks5h://127.0.0.1:9050')
+    scope = {}
+    if args.scope_include:
+        scope['include'] = args.scope_include
+    if args.scope_exclude:
+        scope['exclude'] = args.scope_exclude
+
     try:
         # Initialize scanner (pre-wired with DB custom payloads / plugins / evasion
         # profile unless explicitly disabled).
@@ -10095,6 +10185,8 @@ def main():
             threads=args.threads, delay=args.delay, timeout=args.timeout,
             enable_crawl=not args.no_crawl, enable_schema=not args.no_schema,
             auth=auth or None, oob=oob_provider, impersonate=args.impersonate,
+            scope=scope or None, safe_mode=args.safe_mode, jitter=args.jitter,
+            proxy_pool=proxy_pool or None,
         )
         scanner.reconfirm = not args.no_reconfirm
         scanner.reconfirm_samples = max(1, args.reconfirm_samples)
