@@ -1428,7 +1428,10 @@ class CloudFrontBypasser(ExtraTechniques):
         print("[*] Establishing baseline...")
         try:
             baseline = self._get_baseline()
-            if not baseline:
+            # NB: bool(requests.Response) is response.ok (False for 4xx/5xx), so
+            # check identity — a 403/429/503 root is a perfectly valid baseline
+            # (the engine compares against it for auth-bypass detection).
+            if baseline is None:
                 raise BaselineFailedError(
                     "Failed to establish baseline - target may be down",
                     details={'target': self.target}
@@ -2250,19 +2253,15 @@ class CloudFrontBypasser(ExtraTechniques):
             TargetUnreachableError: If target cannot be reached after retries
         """
         try:
-            # When impersonating, baseline through the same fingerprinted session
-            # so the baseline isn't blocked while probes pass (or vice-versa).
-            if self._impersonating:
-                return self._session.request(
-                    method='GET', url=self.target,
-                    timeout=self.timeout, allow_redirects=False, verify=False,
-                )
-            resp = safe_request(
-                self.target,
-                timeout=self.timeout,
-                allow_redirects=False
+            # Baseline through the SAME session every probe uses: the browser
+            # User-Agent, any auth/evasion headers, and verify=False. Using
+            # safe_request here instead would send a bare `python-requests` UA
+            # and verify TLS — so a UA-filtering edge or a TLS-intercepting proxy
+            # could fail the baseline while the real scan would have worked.
+            return self._session.request(
+                method='GET', url=self.target,
+                timeout=self.timeout, allow_redirects=False, verify=False,
             )
-            return resp
         except Exception as e:
             logger.error(f"Baseline request failed: {e}")
             raise

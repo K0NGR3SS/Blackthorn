@@ -247,6 +247,11 @@ def safe_request(
     Raises:
         WAFPierce exceptions for various error conditions
     """
+    # WAFPierce scans hostile / misconfigured targets; TLS verification is off
+    # everywhere else in the engine, so default it off here too (a caller can
+    # still pass verify=True explicitly). Prevents a self-signed/intercepted
+    # cert from blocking detection or baseline.
+    kwargs.setdefault('verify', False)
     try:
         if method.upper() == 'GET':
             response = requests.get(
