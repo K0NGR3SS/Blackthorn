@@ -130,8 +130,26 @@ Contributions, bug reports, and feature requests are welcome! Please open an iss
 #### Evasion
 - **TLS (JA3/JA4) + HTTP/2 fingerprint impersonation** — `--impersonate [chrome|chrome124|safari17_0|…]` routes probes through `curl_cffi` to mimic a real browser and slip past JS/bot WAFs (DataDome, PerimeterX, Kasada). Degrades gracefully to the `requests` stack if unavailable.
 
+#### New attack modules
+- **CSP analyzer** (unsafe-inline / wildcard / JSONP-able allowlist), **JWT embedded-`jwk` self-signing**, **GraphQL CSRF** (GET / form-urlencoded), **CL.0 / 0.CL request smuggling**, **SAML/XSW** surface detection, **password-reset host-poisoning**, **LLM prompt-injection** (new *AI / LLM Attacks* category), and **gRPC** + **HTTP/3 (QUIC)** detection.
+
+#### Engine controls
+- **CVSS v3.1** base score + vector + CWE on every finding; **scope rules** (`--scope-include`/`--scope-exclude`); **`--safe-mode`** (skips noisy/DoS/state-changing tests); **`--jitter`** random per-request delay; **proxy rotation** (`--proxy-pool`) and **`--tor`**.
+- **WAF feedback loop** — learns which techniques bypass which WAF vendor and runs the effective ones first next time.
+- **Resumable scans** (`--resume`) via per-target checkpoints; **auto re-login** when an authenticated session expires mid-scan.
+
+#### Input, integrations & reporting
+- **Traffic import** — seed the scan from **HAR / Postman / Burp** captures (`--import-har`/`--import-postman`/`--import-burp`).
+- **Integrations** — Slack push (`--slack-webhook`), generic webhook, DefectDojo finding mapping.
+- **PDF report export** (`--export-format pdf`, via reportlab; falls back to HTML).
+
+#### GUI
+- Scan dialog exposes **Re-confirm / Safe-mode / Impersonate / OOB** toggles (persisted), and the new **AI / LLM Attacks** category.
+
 #### Project health
-- **First automated test suite** — `pytest` against an in-process mock-WAF server covering repro, bypass detection, re-confirmation, exporters, OOB crypto/listener, and impersonation. Added a `tests` CI workflow (`requirements-dev.txt`, `[dev]` extra).
+- **First automated test suite** — `pytest` against an in-process mock-WAF server (88 tests) covering repro, bypass detection, re-confirmation, exporters/PDF, OOB crypto/listener, impersonation, new attack modules, engine controls, importers, integrations, feedback/checkpoint, and the sample plugin. Added a `tests` + advisory `ruff` CI workflow (`requirements-dev.txt`, `[dev]` extra), a **sample plugin + `PLUGIN_SDK.md`**.
+
+> Deliberately **not** done: a full async-engine rewrite — the bounded adaptive thread pool already controls concurrency, and replacing the request path under 150 tested techniques is high-risk for low gain.
 
 ### Version 1.5 (June 2026)
 
@@ -497,11 +515,10 @@ AI triage, payload mutation, and auto-report are now available via the Anthropic
 - Automated test suite + CI
 
 ### Ideas under consideration
-- gRPC / protobuf endpoint testing
-- LLM / prompt-injection endpoint testing
-- Modern request smuggling (client-side desync, CL.0 / 0.CL)
-- SAML / XML signature wrapping; CSP analyzer
-- PDF report export; CVSS vectors; proxy rotation / Tor
+- Full async engine (currently a bounded adaptive thread pool)
+- gRPC/protobuf *fuzzing* (detection shipped) and HTTP/3 bypass testing over QUIC
+- GUI: built-in Repeater, request/response inspector, trend dashboard
+- Deeper SAML XSW exploitation and live JWT-jwk replay confirmation
 
 ### Community Suggestions
 Have ideas for new tests? Message either Marwan or Nazariy
