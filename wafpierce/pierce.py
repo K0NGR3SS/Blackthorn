@@ -43,6 +43,7 @@ from .error_handler import (
     retry_on_network_error,
 )
 from .repro import build_curl
+from .techniques_v16 import ExtraTechniques
 
 
 logger = logging.getLogger(__name__)
@@ -573,6 +574,9 @@ SCAN_CATEGORIES = {
             '_test_verb_tampering_extended',
             '_test_multipart_bypass',
             '_test_websocket_fuzzing',
+            '_test_smuggling_cl0',
+            '_test_grpc_detection',
+            '_test_http3_detection',
         ]
     },
     'cache_control': {
@@ -626,6 +630,7 @@ SCAN_CATEGORIES = {
             '_test_clickjacking',
             '_test_content_sniffing',
             '_test_response_splitting',
+            '_test_csp_analysis',
         ]
     },
     'business_logic': {
@@ -649,6 +654,9 @@ SCAN_CATEGORIES = {
             '_test_jwt_oauth_bypass',
             '_test_jwt_attacks',
             '_test_oauth_oidc',
+            '_test_jwt_jwk_injection',
+            '_test_saml_xsw',
+            '_test_auth_logic',
         ]
     },
     'graphql_attacks': {
@@ -657,6 +665,14 @@ SCAN_CATEGORIES = {
         'techniques': [
             '_test_graphql_bypass',
             '_test_graphql_deep_testing',
+            '_test_graphql_csrf',
+        ]
+    },
+    'ai_attacks': {
+        'name': 'AI / LLM Attacks',
+        'description': 'Detects AI/LLM-backed endpoints and probes for prompt injection and system-prompt leakage.',
+        'techniques': [
+            '_test_llm_prompt_injection',
         ]
     },
     'ssrf_advanced': {
@@ -958,7 +974,7 @@ class _AdaptiveLimiter:
         return self._cap
 
 
-class CloudFrontBypasser:
+class CloudFrontBypasser(ExtraTechniques):
     """Optimized WAF Bypass Scanner with connection pooling and smart detection"""
     
     # Class-level session pool for connection reuse
@@ -1582,6 +1598,16 @@ class CloudFrontBypasser:
             '_test_content_discovery': self._test_content_discovery,
             '_test_s3_bucket_enum': self._test_s3_bucket_enum,
             '_test_websocket_fuzzing': self._test_websocket_fuzzing,
+            # New modules (v1.6)
+            '_test_csp_analysis': self._test_csp_analysis,
+            '_test_jwt_jwk_injection': self._test_jwt_jwk_injection,
+            '_test_graphql_csrf': self._test_graphql_csrf,
+            '_test_smuggling_cl0': self._test_smuggling_cl0,
+            '_test_saml_xsw': self._test_saml_xsw,
+            '_test_auth_logic': self._test_auth_logic,
+            '_test_llm_prompt_injection': self._test_llm_prompt_injection,
+            '_test_grpc_detection': self._test_grpc_detection,
+            '_test_http3_detection': self._test_http3_detection,
         }
         
         # Build technique list from selected categories
