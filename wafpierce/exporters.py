@@ -132,6 +132,11 @@ def to_html(target: str, results: List[Dict[str, Any]]) -> str:
         color = _SEV_COLOR.get(sev, '#607d8b')
         triage = r.get('ai_triage') or {}
         fp = ' <span style="color:#b00020">(AI: likely FP)</span>' if triage.get('false_positive') else ''
+        curl = r.get('curl')
+        repro = (
+            f"<details><summary>curl</summary><pre class='repro'>{html.escape(str(curl))}</pre></details>"
+            if curl else '<span class="muted">—</span>'
+        )
         rows.append(
             f"<tr>"
             f"<td><span style='background:{color};color:#fff;padding:2px 8px;border-radius:4px;font-size:12px'>{html.escape(sev)}</span></td>"
@@ -140,6 +145,7 @@ def to_html(target: str, results: List[Dict[str, Any]]) -> str:
             f"<td>{html.escape(str(r.get('status', '')))}</td>"
             f"<td>{html.escape(str(r.get('reason', '')))}</td>"
             f"<td><code>{html.escape(str(r.get('path', '')))}</code></td>"
+            f"<td>{repro}</td>"
             f"</tr>"
         )
     summary = " ".join(
@@ -159,6 +165,9 @@ def to_html(target: str, results: List[Dict[str, Any]]) -> str:
  th{{color:#9aa4b2;text-transform:uppercase;font-size:11px;letter-spacing:.04em}}
  tr:hover td{{background:#161a22}} code{{color:#7fd1ff}}
  .summary{{margin:18px 0}}
+ .muted{{color:#5b6472}}
+ details summary{{cursor:pointer;color:#7fd1ff;font-size:12px}}
+ pre.repro{{white-space:pre-wrap;word-break:break-all;background:#0b0d11;border:1px solid #232936;border-radius:6px;padding:8px;margin:6px 0 0;font-size:12px;color:#cfe8ff}}
 </style></head>
 <body>
  <header>
@@ -168,9 +177,9 @@ def to_html(target: str, results: List[Dict[str, Any]]) -> str:
  <div class="wrap">
   <div class="summary">{summary}</div>
   <table>
-   <thead><tr><th>Severity</th><th>Technique</th><th>Category</th><th>Status</th><th>Reason</th><th>Path</th></tr></thead>
+   <thead><tr><th>Severity</th><th>Technique</th><th>Category</th><th>Status</th><th>Reason</th><th>Path</th><th>Reproduce</th></tr></thead>
    <tbody>
-   {''.join(rows) if rows else '<tr><td colspan=6>No findings.</td></tr>'}
+   {''.join(rows) if rows else '<tr><td colspan=7>No findings.</td></tr>'}
    </tbody>
   </table>
  </div>

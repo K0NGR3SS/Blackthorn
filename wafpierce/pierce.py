@@ -42,6 +42,7 @@ from .error_handler import (
     GracefulErrorHandler,
     retry_on_network_error,
 )
+from .repro import build_curl
 
 
 logger = logging.getLogger(__name__)
@@ -1551,8 +1552,40 @@ class CloudFrontBypasser:
             logger.warning(f"Scan completed with {error_count} technique errors")
             print(f"\n[!] Warning: {error_count} techniques encountered errors")
 
+        # Backfill reproduction commands for any results built outside the
+        # _test_request chokepoint (recon/audit/cloud findings).
+        self._attach_repro_commands()
+
         logger.info(f"Scan complete: Found {len(self.results)} bypasses")
         return self.results
+
+    def _attach_repro_commands(self) -> None:
+        """Ensure every finding carries a copy-paste ``curl`` reproduction.
+
+        Findings produced via :meth:`_test_request` already have one (built from
+        the exact wire request). This backfills the rest by merging the live
+        session headers with the finding's technique-specific headers.
+        """
+        try:
+            base_headers = dict(self._session.headers)
+        except Exception:
+            base_headers = {}
+        for r in self.results:
+            if not isinstance(r, dict) or r.get('curl'):
+                continue
+            path = r.get('path', '/') or '/'
+            if path.startswith('http://') or path.startswith('https://'):
+                url = path
+            else:
+                url = f"{self.target}{path if path.startswith('/') else '/' + path}"
+            merged = dict(base_headers)
+            extra = r.get('headers')
+            if isinstance(extra, dict):
+                merged.update(extra)
+            try:
+                r['curl'] = build_curl(r.get('method', 'GET'), url, merged, r.get('data'))
+            except Exception:
+                pass
 
     def _run_plugins(self) -> None:
         """Execute user-supplied bypass plugins as a scan phase.
@@ -2024,6 +2057,14 @@ class CloudFrontBypasser:
                 'reason': bypass_result['reason'],
                 'severity': bypass_result['severity']
             }
+
+            # Attach a copy-paste reproduction command built from the request as
+            # it actually went on the wire (full headers + body), so any finding
+            # can be independently verified.
+            try:
+                result['curl'] = build_curl(method, url, req_headers, data)
+            except Exception:
+                pass
 
             # Cache result
             with self._cache_lock:
