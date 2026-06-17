@@ -14,6 +14,9 @@ httpx[http2]>=0.27.0
 # to the requests stack if unavailable.
 curl_cffi>=0.7.0
 
+# PDF report export (--export-format pdf). Degrades to HTML if unavailable.
+reportlab>=4.0.0
+
 # ---- Optional extras (not required for core scanning) ----
 # Headless-browser tests (DOM XSS, Client-Side Path Traversal):
 #   pip install playwright && python -m playwright install chromium

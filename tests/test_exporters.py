@@ -56,3 +56,15 @@ def test_sarif_is_valid_json_with_runs():
 def test_nuclei_is_nonempty_yaml_text():
     out = to_nuclei('https://t.example', SAMPLE)
     assert 'id:' in out or 'info:' in out
+
+
+def test_pdf_export_writes_a_file(tmp_path):
+    pytest.importorskip("reportlab")
+    out_path = tmp_path / "report.pdf"
+    written = export(SAMPLE, 'https://t.example', 'pdf', str(out_path))
+    assert out_path.exists()
+    assert out_path.stat().st_size > 0
+    # Returned path points at the artifact actually written.
+    assert written.endswith('.pdf')
+    with open(out_path, 'rb') as f:
+        assert f.read(4) == b'%PDF'

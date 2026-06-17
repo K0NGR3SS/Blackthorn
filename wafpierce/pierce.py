@@ -982,7 +982,7 @@ class CloudFrontBypasser(ExtraTechniques):
     _session_pool: Dict[str, requests.Session] = {}
     _session_lock = threading.Lock()
     
-    def __init__(self, target: str, threads: int = 10, delay: float = 0.2, timeout: int = 5, proxy_config: dict = None, enable_http_logging: bool = False, enable_ssl_analysis: bool = False, enable_crawl: bool = True, enable_schema: bool = True, custom_payloads: dict = None, plugins: list = None, evasion_profile: dict = None, auth: dict = None, oob=None, impersonate: Optional[str] = None, scope: dict = None, safe_mode: bool = False, jitter: float = 0.0, proxy_pool: list = None):
+    def __init__(self, target: str, threads: int = 10, delay: float = 0.2, timeout: int = 5, proxy_config: dict = None, enable_http_logging: bool = False, enable_ssl_analysis: bool = False, enable_crawl: bool = True, enable_schema: bool = True, custom_payloads: dict = None, plugins: list = None, evasion_profile: dict = None, auth: dict = None, oob=None, impersonate: Optional[str] = None, scope: dict = None, safe_mode: bool = False, jitter: float = 0.0, proxy_pool: list = None, seed_targets: list = None):
         """
         Initialize CloudFront WAF Bypasser
 
@@ -1098,6 +1098,9 @@ class CloudFrontBypasser(ExtraTechniques):
         self.safe_mode = safe_mode
         self.jitter = max(0.0, float(jitter or 0.0))
         self.proxy_pool = list(proxy_pool) if proxy_pool else []
+        # Endpoints seeded from imported traffic (HAR/Postman/Burp); merged into
+        # discovery so injection tests fuzz those real requests too.
+        self.seed_targets = list(seed_targets) if seed_targets else []
 
         # Response cache to avoid duplicate requests
         self._response_cache: Dict[str, Dict] = {}
@@ -1485,7 +1488,7 @@ class CloudFrontBypasser(ExtraTechniques):
             self.results.extend(os_results)
 
         # Discover real endpoints + params so injection tests hit live inputs.
-        if self.enable_crawl or self.enable_schema:
+        if self.enable_crawl or self.enable_schema or self.seed_targets:
             print("\n[*] Phase 2.5: Endpoint & Parameter Discovery...")
             try:
                 self._run_discovery()
@@ -2019,6 +2022,11 @@ class CloudFrontBypasser(ExtraTechniques):
                 key = f"{method}:{path}:{','.join(sorted(params.keys()))}"
                 if key not in discovered:
                     discovered[key] = {'path': path, 'params': dict(params), 'method': method}
+
+        # Seed from imported traffic first (HAR/Postman/Burp).
+        if self.seed_targets:
+            _merge(self.seed_targets)
+            print(f"[*] Seeded {len(self.seed_targets)} imported request(s)")
 
         if self.enable_crawl:
             try:
@@ -10067,9 +10075,15 @@ def main():
                        help='Skip noisy/DoS-flavored and state-changing techniques')
     # Exports
     parser.add_argument('--export', help='Write an extra export to this path (format from --export-format)')
-    parser.add_argument('--export-format', default='html', choices=['sarif', 'nuclei', 'html', 'json'],
+    parser.add_argument('--export-format', default='html', choices=['sarif', 'nuclei', 'html', 'json', 'pdf'],
                        help='Format for --export (default: html)')
     parser.add_argument('--json', action='store_true', help='Print results as JSON to stdout (pipeline mode)')
+    # Import recorded traffic to fuzz real (often authenticated) requests
+    parser.add_argument('--import-har', help='Seed the scan from a HAR capture')
+    parser.add_argument('--import-postman', help='Seed the scan from a Postman v2 collection')
+    parser.add_argument('--import-burp', help='Seed the scan from a Burp items XML export')
+    # Integrations
+    parser.add_argument('--slack-webhook', help='Post a findings summary to a Slack incoming webhook')
     # AI (opt-in)
     parser.add_argument('--ai-triage', action='store_true', help='Run AI false-positive triage (needs ANTHROPIC_API_KEY)')
     parser.add_argument('--ai-report', help='Write an AI-generated markdown report to this path (needs ANTHROPIC_API_KEY)')
@@ -10176,6 +10190,19 @@ def main():
     if args.scope_exclude:
         scope['exclude'] = args.scope_exclude
 
+    # Import recorded traffic (HAR / Postman / Burp) to seed the scan.
+    seed_targets = []
+    try:
+        from .importers import load_requests
+        for src, fmt in ((args.import_har, 'har'), (args.import_postman, 'postman'),
+                         (args.import_burp, 'burp')):
+            if src:
+                imported = load_requests(src, fmt)
+                seed_targets.extend(imported)
+                print(f"[*] Imported {len(imported)} request(s) from {src}")
+    except Exception as e:
+        print(f"[!] Import failed: {e}")
+
     try:
         # Initialize scanner (pre-wired with DB custom payloads / plugins / evasion
         # profile unless explicitly disabled).
@@ -10186,7 +10213,7 @@ def main():
             enable_crawl=not args.no_crawl, enable_schema=not args.no_schema,
             auth=auth or None, oob=oob_provider, impersonate=args.impersonate,
             scope=scope or None, safe_mode=args.safe_mode, jitter=args.jitter,
-            proxy_pool=proxy_pool or None,
+            proxy_pool=proxy_pool or None, seed_targets=seed_targets or None,
         )
         scanner.reconfirm = not args.no_reconfirm
         scanner.reconfirm_samples = max(1, args.reconfirm_samples)
@@ -10215,6 +10242,17 @@ def main():
                 print(f"[+] Exported {args.export_format.upper()} to {args.export}")
             except Exception as e:
                 print(f"[!] Export failed: {e}")
+
+        # Push a findings summary to Slack.
+        if args.slack_webhook:
+            try:
+                from .integrations import send_slack
+                if send_slack(args.slack_webhook, args.target, results):
+                    print("[+] Posted findings summary to Slack")
+                else:
+                    print("[!] Slack push failed (see logs)")
+            except Exception as e:
+                logger.debug(f"Slack push error: {e}")
 
         # AI-written markdown report.
         if args.ai_report:

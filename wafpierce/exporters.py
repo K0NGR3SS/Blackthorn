@@ -205,9 +205,73 @@ def to_html(target: str, results: List[Dict[str, Any]]) -> str:
 </body></html>"""
 
 
+def to_pdf(target: str, results: List[Dict[str, Any]], path: str) -> bool:
+    """Render a findings PDF to ``path`` using reportlab. Returns False if
+    reportlab is unavailable (caller can fall back to HTML)."""
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import mm
+        from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
+                                        Table, TableStyle)
+    except Exception:
+        logger.warning("reportlab not installed; cannot export PDF")
+        return False
+
+    styles = getSampleStyleSheet()
+    small = ParagraphStyle('small', parent=styles['BodyText'], fontSize=7, leading=9)
+    ts = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    ordered = sorted(results, key=lambda r: _SEV_RANK.get(r.get('severity', 'INFO'), 5))
+
+    doc = SimpleDocTemplate(path, pagesize=A4, title=f"WAFPierce — {target}")
+    story = [Paragraph("WAFPierce Security Report", styles['Title']),
+             Paragraph(f"Target: {target} &nbsp; • &nbsp; Generated: {ts} &nbsp; • &nbsp; "
+                       f"{len(results)} findings", styles['Normal']),
+             Spacer(1, 6 * mm)]
+
+    rows = [['Severity', 'CVSS', 'Technique', 'Status', 'Reason']]
+    for r in ordered:
+        rows.append([
+            r.get('severity', 'INFO'),
+            str(r.get('cvss_score', '')),
+            Paragraph(html.escape(str(r.get('technique', '')))[:80], small),
+            str(r.get('status', '')),
+            Paragraph(html.escape(str(r.get('reason', '')))[:160], small),
+        ])
+    table = Table(rows, colWidths=[22 * mm, 14 * mm, 50 * mm, 16 * mm, 70 * mm],
+                  repeatRows=1)
+    style = [('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#161a22')),
+             ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+             ('FONTSIZE', (0, 0), (-1, -1), 7),
+             ('GRID', (0, 0), (-1, -1), 0.25, colors.HexColor('#cccccc')),
+             ('VALIGN', (0, 0), (-1, -1), 'TOP')]
+    sev_color = {'CRITICAL': '#b71c1c', 'HIGH': '#e65100', 'MEDIUM': '#f9a825',
+                 'LOW': '#1565c0', 'INFO': '#607d8b'}
+    for i, r in enumerate(ordered, start=1):
+        style.append(('TEXTCOLOR', (0, i), (0, i),
+                      colors.HexColor(sev_color.get(r.get('severity', 'INFO'), '#607d8b'))))
+    table.setStyle(TableStyle(style))
+    story.append(table)
+    doc.build(story)
+    return True
+
+
 def export(results: List[Dict[str, Any]], target: str, fmt: str, path: str = None) -> str:
-    """Render results to ``fmt`` ('sarif'|'nuclei'|'html'|'json'); optionally write to ``path``."""
+    """Render results to ``fmt`` ('sarif'|'nuclei'|'html'|'json'|'pdf'); optionally write to ``path``."""
     fmt = (fmt or 'json').lower()
+    if fmt == 'pdf':
+        if not path:
+            raise ValueError("PDF export requires an output path")
+        if to_pdf(target, results, path):
+            return path
+        # Fall back to an HTML file alongside the requested path.
+        html_path = path.rsplit('.', 1)[0] + '.html'
+        content = to_html(target, results)
+        with open(html_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+        logger.warning(f"PDF unavailable; wrote HTML to {html_path}")
+        return html_path
     if fmt == 'sarif':
         content = to_sarif(target, results)
     elif fmt == 'nuclei':
