@@ -7,6 +7,7 @@ setup(
     extras_require={
         'browser': ['playwright>=1.40.0'],
         'ai': ['anthropic>=0.40.0'],
+        'dev': ['pytest>=8.0.0', 'ruff>=0.5.0'],
         'full': ['playwright>=1.40.0', 'anthropic>=0.40.0'],
     },
     entry_points={'console_scripts': ['wafpierce=wafpierce.chain:main']}
