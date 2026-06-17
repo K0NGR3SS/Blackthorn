@@ -1102,6 +1102,19 @@ class CloudFrontBypasser(ExtraTechniques):
         # discovery so injection tests fuzz those real requests too.
         self.seed_targets = list(seed_targets) if seed_targets else []
 
+        # WAF feedback loop: an optional DB handle used to (a) reorder techniques
+        # so historically-effective ones run first against the detected WAF and
+        # (b) record this scan's outcomes for next time. None -> learning off.
+        self.feedback_db = None
+        self._detected_waf_type: Optional[str] = None
+
+        # Resumable scans: when True, scan() loads a per-target checkpoint, skips
+        # already-completed techniques, and saves progress after each one.
+        self.resume = False
+        self._completed_techniques: Set[str] = set()
+        # Auto re-login throttle (re-auth at most once per window on expiry).
+        self._last_reauth = 0.0
+
         # Response cache to avoid duplicate requests
         self._response_cache: Dict[str, Dict] = {}
         self._cache_lock = threading.Lock()
@@ -1476,6 +1489,11 @@ class CloudFrontBypasser(ExtraTechniques):
         waf_results = self._detect_waf()
         if waf_results:
             self.results.extend(waf_results)
+            # Capture the highest-confidence WAF vendor for the feedback loop.
+            for r in waf_results:
+                if r.get('category') == 'WAF_DETECTION' and r.get('details', {}).get('waf'):
+                    self._detected_waf_type = r['details']['waf']
+                    break
         
         cdn_results = self._detect_cdn()
         if cdn_results:
@@ -1666,6 +1684,19 @@ class CloudFrontBypasser(ExtraTechniques):
                     added_techniques.add(technique_name)
             print(f"[*] Evasion profile added {len(profile_techniques)} curated technique(s)")
 
+        # WAF feedback loop: run historically-effective techniques first.
+        if self.feedback_db and self._detected_waf_type:
+            try:
+                prio = self.feedback_db.get_prioritized_techniques(self._detected_waf_type)
+                if prio:
+                    order = {name: i for i, name in enumerate(prio)}
+                    techniques.sort(key=lambda t: order.get(getattr(t, '__name__', ''), 10_000))
+                    matched = sum(1 for t in techniques if getattr(t, '__name__', '') in order)
+                    print(f"[*] WAF feedback: prioritized {matched} learned technique(s) "
+                          f"for {self._detected_waf_type}")
+            except Exception as e:
+                logger.debug(f"Feedback reorder error: {e}")
+
         # Safe mode: drop noisy / DoS-flavored / state-changing techniques.
         if self.safe_mode:
             before = len(techniques)
@@ -1686,6 +1717,21 @@ class CloudFrontBypasser(ExtraTechniques):
         else:
             print(f"[*] Running {len(techniques)} techniques from {len(selected_categories)} categories\n")
         
+        # Resume: load a prior checkpoint, restore findings, skip finished techniques.
+        if self.resume:
+            try:
+                from . import checkpoint as _ckpt
+                saved = _ckpt.load(self.target)
+                if saved:
+                    self._completed_techniques = set(saved.get('completed', []))
+                    prior = saved.get('results', [])
+                    # Keep prior findings but avoid double-counting detection phase.
+                    self.results.extend(prior)
+                    print(f"[*] Resuming: {len(self._completed_techniques)} technique(s) "
+                          f"already done, {len(prior)} prior finding(s) restored")
+            except Exception as e:
+                logger.debug(f"Resume load error: {e}")
+
         # Execute techniques against ONE shared, bounded thread pool.
         # Each technique runs sequentially and fans its own requests out across this
         # pool, so total in-flight requests never exceed self.threads (no nested
@@ -1694,10 +1740,30 @@ class CloudFrontBypasser(ExtraTechniques):
         self._executor = ThreadPoolExecutor(max_workers=self.threads)
         try:
             for technique in techniques:
+                tname = getattr(technique, '__name__', '?')
+                if self.resume and tname in self._completed_techniques:
+                    continue
                 try:
                     result = technique()
                     if result:
                         self.results.extend(result)
+                    # Feed the learning loop: did this technique fire on this WAF?
+                    if self.feedback_db and self._detected_waf_type:
+                        had_bypass = bool(result) and any(
+                            isinstance(r, dict) and r.get('bypass') for r in result)
+                        try:
+                            self.feedback_db.record_technique_outcome(
+                                self._detected_waf_type, tname, had_bypass)
+                        except Exception:
+                            pass
+                    # Checkpoint progress for resumable scans.
+                    if self.resume:
+                        self._completed_techniques.add(tname)
+                        try:
+                            from . import checkpoint as _ckpt
+                            _ckpt.save(self.target, list(self._completed_techniques), self.results)
+                        except Exception:
+                            pass
                 except KeyboardInterrupt:
                     logger.warning("Scan interrupted by user")
                     raise ScanInterruptedError("Scan interrupted by user")
@@ -1754,8 +1820,50 @@ class CloudFrontBypasser(ExtraTechniques):
         except Exception as e:
             logger.debug(f"CVSS annotation error: {e}")
 
+        # Clean completion: drop the resume checkpoint.
+        if self.resume:
+            try:
+                from . import checkpoint as _ckpt
+                _ckpt.clear(self.target)
+            except Exception:
+                pass
+
         logger.info(f"Scan complete: Found {len(self.results)} bypasses")
         return self.results
+
+    @staticmethod
+    def looks_like_session_expiry(status: int, body: str) -> bool:
+        """Heuristic: does this response look like the auth session expired?
+        Pure so it can be unit-tested."""
+        if status in (401,):
+            return True
+        sample = (body or '')[:1500].lower()
+        markers = ('please log in', 'please sign in', 'session expired',
+                   'login required', 'name="password"', 'your session has expired',
+                   'authentication required')
+        return any(m in sample for m in markers)
+
+    def _maybe_reauth(self, resp) -> None:
+        """Re-run the login flow if the session looks expired (throttled).
+
+        Only active when authenticated scanning was configured with a login flow.
+        """
+        login = (self.auth or {}).get('login')
+        if not isinstance(login, dict) or not login.get('url'):
+            return
+        try:
+            if not self.looks_like_session_expiry(getattr(resp, 'status_code', 0),
+                                                  getattr(resp, 'text', '') or ''):
+                return
+            now = time.time()
+            if now - self._last_reauth < 30:   # throttle: at most once / 30s
+                return
+            self._last_reauth = now
+            logger.info("Session looks expired; re-authenticating")
+            print("[*] Session expired — re-authenticating")
+            self._perform_login(login)
+        except Exception as e:
+            logger.debug(f"Re-auth error: {e}")
 
     def _reconfirm_bypasses(self, samples: int = 2, keep_threshold: float = 0.5) -> None:
         """Replay each flagged bypass ``samples`` more times and demote flukes.
@@ -2437,6 +2545,10 @@ class CloudFrontBypasser(ExtraTechniques):
                 self._limiter.penalize()
             else:
                 self._limiter.reward()
+
+            # Authenticated scanning: re-login if the session looks expired.
+            if resp.status_code in (401, 403) and (self.auth or {}).get('login'):
+                self._maybe_reauth(resp)
 
             # Pacing delay (may have been adjusted by rate-limit handling),
             # plus optional random jitter to defeat rate-based heuristics.
@@ -10018,11 +10130,21 @@ def create_scanner(target: str, db=None, use_db_extras: bool = True,
     Any explicit kwargs (threads, delay, enable_crawl, ...) are passed through and
     take precedence over the DB-loaded extras.
     """
+    feedback_db = None
     if use_db_extras:
+        if db is None:
+            try:
+                from .database import WAFPierceDB
+                db = WAFPierceDB()
+            except Exception:
+                db = None
         kwargs.setdefault('custom_payloads', load_custom_payloads(db))
         kwargs.setdefault('plugins', load_plugins())
         kwargs.setdefault('evasion_profile', load_evasion_profile(db, waf_type))
-    return CloudFrontBypasser(target, **kwargs)
+        feedback_db = db
+    scanner = CloudFrontBypasser(target, **kwargs)
+    scanner.feedback_db = feedback_db
+    return scanner
 
 
 def main():
@@ -10073,6 +10195,8 @@ def main():
                        help='Never test discovered URLs matching this regex (repeatable)')
     parser.add_argument('--safe-mode', action='store_true',
                        help='Skip noisy/DoS-flavored and state-changing techniques')
+    parser.add_argument('--resume', action='store_true',
+                       help='Resume an interrupted scan of this target from its checkpoint')
     # Exports
     parser.add_argument('--export', help='Write an extra export to this path (format from --export-format)')
     parser.add_argument('--export-format', default='html', choices=['sarif', 'nuclei', 'html', 'json', 'pdf'],
@@ -10218,6 +10342,7 @@ def main():
         scanner.reconfirm = not args.no_reconfirm
         scanner.reconfirm_samples = max(1, args.reconfirm_samples)
         scanner.oob_wait = max(0, args.oob_wait)
+        scanner.resume = args.resume
 
         # Run scan with selected categories
         results = scanner.scan(selected_categories)

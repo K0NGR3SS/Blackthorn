@@ -70,6 +70,20 @@ class WAFPierceDB:
         c.execute('CREATE INDEX IF NOT EXISTS idx_results_scan ON results(scan_id)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_results_target ON results(target)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_results_severity ON results(severity)')
+
+        # WAF feedback loop - learns which techniques bypass which WAF vendor so
+        # future scans can run the historically-effective ones first.
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS waf_feedback (
+                waf_type TEXT NOT NULL,
+                technique TEXT NOT NULL,
+                category TEXT,
+                successes INTEGER DEFAULT 0,
+                attempts INTEGER DEFAULT 0,
+                last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (waf_type, technique)
+            )
+        ''')
         
         # Legacy templates table (kept for database compatibility)
         c.execute('''
@@ -438,7 +452,49 @@ class WAFPierceDB:
         
         conn.commit()
         conn.close()
-    
+
+    # ------------------------------------------------------------------ #
+    # WAF feedback loop
+    # ------------------------------------------------------------------ #
+    def record_technique_outcome(self, waf_type: str, technique: str,
+                                 success: bool, category: str = '') -> None:
+        """Record that ``technique`` was tried (and maybe succeeded) against
+        ``waf_type``. Upserts a running success/attempt tally."""
+        if not waf_type or not technique:
+            return
+        conn = sqlite3.connect(self.db_path)
+        try:
+            c = conn.cursor()
+            c.execute('''
+                INSERT INTO waf_feedback (waf_type, technique, category, successes, attempts, last_seen)
+                VALUES (?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+                ON CONFLICT(waf_type, technique) DO UPDATE SET
+                    successes = successes + ?,
+                    attempts = attempts + 1,
+                    category = excluded.category,
+                    last_seen = CURRENT_TIMESTAMP
+            ''', (waf_type, technique, category, 1 if success else 0, 1 if success else 0))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_prioritized_techniques(self, waf_type: str, min_successes: int = 1) -> List[str]:
+        """Return technique names that have historically bypassed ``waf_type``,
+        most-effective first (by success rate then volume)."""
+        if not waf_type:
+            return []
+        conn = sqlite3.connect(self.db_path)
+        try:
+            c = conn.cursor()
+            c.execute('''
+                SELECT technique FROM waf_feedback
+                WHERE waf_type = ? AND successes >= ?
+                ORDER BY (CAST(successes AS REAL) / MAX(attempts, 1)) DESC, successes DESC
+            ''', (waf_type, min_successes))
+            return [row[0] for row in c.fetchall()]
+        finally:
+            conn.close()
+
     def get_scan_history(self, limit: int = 50) -> List[dict]:
         """Get recent scan history."""
         conn = sqlite3.connect(self.db_path)
