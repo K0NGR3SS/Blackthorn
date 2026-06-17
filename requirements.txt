@@ -9,6 +9,11 @@ cryptography>=42.0.0
 # HTTP/2 client used for the single-packet race attack and HTTP/2 smuggling tests.
 httpx[http2]>=0.27.0
 
+# Browser TLS (JA3/JA4) + HTTP/2 fingerprint impersonation (--impersonate) to
+# evade bot/JS WAFs. Ships a bundled libcurl-impersonate; degrades gracefully
+# to the requests stack if unavailable.
+curl_cffi>=0.7.0
+
 # ---- Optional extras (not required for core scanning) ----
 # Headless-browser tests (DOM XSS, Client-Side Path Traversal):
 #   pip install playwright && python -m playwright install chromium

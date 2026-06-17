@@ -82,6 +82,12 @@ hidden_imports = [
     'wafpierce.browser_tests',
     'wafpierce.mutations',
     'wafpierce.websocket_tests',
+    'wafpierce.repro',
+    'wafpierce.oob',
+    # Optional native-dep features (lazily imported; degrade gracefully)
+    'cryptography',
+    'curl_cffi',
+    'curl_cffi.requests',
     # Standard library modules
     'json',
     'threading',
@@ -100,10 +106,27 @@ hidden_imports = [
     'webbrowser',
 ]
 
+# Collect native binaries/data PyInstaller can't trace from imports alone.
+# curl_cffi bundles a libcurl-impersonate shared library; without this the
+# --impersonate feature silently degrades inside the frozen build.
+binaries = []
+try:
+    from PyInstaller.utils.hooks import collect_all
+    for _pkg in ('curl_cffi', 'cryptography'):
+        try:
+            _datas, _bins, _hidden = collect_all(_pkg)
+            datas += _datas
+            binaries += _bins
+            hidden_imports += _hidden
+        except Exception:
+            pass
+except Exception:
+    pass
+
 a = Analysis(
     [os.path.join(project_root, 'run_gui.py')],
     pathex=[project_root],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hidden_imports,
     hookspath=[],

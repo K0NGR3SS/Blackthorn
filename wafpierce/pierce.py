@@ -965,7 +965,7 @@ class CloudFrontBypasser:
     _session_pool: Dict[str, requests.Session] = {}
     _session_lock = threading.Lock()
     
-    def __init__(self, target: str, threads: int = 10, delay: float = 0.2, timeout: int = 5, proxy_config: dict = None, enable_http_logging: bool = False, enable_ssl_analysis: bool = False, enable_crawl: bool = True, enable_schema: bool = True, custom_payloads: dict = None, plugins: list = None, evasion_profile: dict = None, auth: dict = None, oob=None):
+    def __init__(self, target: str, threads: int = 10, delay: float = 0.2, timeout: int = 5, proxy_config: dict = None, enable_http_logging: bool = False, enable_ssl_analysis: bool = False, enable_crawl: bool = True, enable_schema: bool = True, custom_payloads: dict = None, plugins: list = None, evasion_profile: dict = None, auth: dict = None, oob=None, impersonate: Optional[str] = None):
         """
         Initialize CloudFront WAF Bypasser
 
@@ -1061,6 +1061,13 @@ class CloudFrontBypasser:
         self._oob_fired: Dict[str, Tuple[str, str]] = {}
         self._oob_spray_time: float = 0.0
         self._oob_seen: Set[str] = set()
+
+        # TLS/HTTP2 fingerprint impersonation (JA3/JA4 + H2 frame order) via
+        # curl_cffi. Lets probes mimic a real browser to slip past JS/bot WAFs
+        # (DataDome, PerimeterX, Kasada...). None -> plain requests stack.
+        # Accepts a browser target ("chrome", "chrome124", "safari17_0", ...).
+        self.impersonate = impersonate
+        self._impersonating = False
         
         # Response cache to avoid duplicate requests
         self._response_cache: Dict[str, Dict] = {}
@@ -1178,8 +1185,77 @@ class CloudFrontBypasser:
         except Exception as e:
             logger.debug(f"Evasion profile apply error: {e}")
     
+    @staticmethod
+    def _curl_cffi_browsers() -> Set[str]:
+        """Supported curl_cffi impersonation targets (empty set if undiscoverable
+        — in which case we don't pre-filter and let curl_cffi decide)."""
+        import typing
+        try:
+            from curl_cffi.requests.impersonate import BrowserTypeLiteral
+            return set(typing.get_args(BrowserTypeLiteral))
+        except Exception:
+            pass
+        try:
+            from curl_cffi.requests import BrowserType
+            return {b.value for b in BrowserType}
+        except Exception:
+            return set()
+
+    def _build_impersonation_session(self):
+        """Build a curl_cffi session that mimics a real browser's TLS (JA3/JA4)
+        and HTTP/2 fingerprint. Returns None if curl_cffi is unavailable or the
+        requested target is invalid, so the caller can fall back to ``requests``.
+        """
+        try:
+            from curl_cffi import requests as cffi
+        except Exception:
+            logger.warning("curl_cffi not installed; --impersonate ignored (using requests)")
+            return None
+
+        # Resolve the impersonation target; a bare flag means "a recent Chrome".
+        target = self.impersonate
+        if not isinstance(target, str) or target.lower() in ('1', 'true', 'yes', 'auto', 'on'):
+            target = 'chrome'
+
+        # curl_cffi validates the target lazily (at request time, not session
+        # construction), so an unsupported value would only blow up mid-scan.
+        # Validate against the supported set up front and fall back to 'chrome'.
+        supported = self._curl_cffi_browsers()
+        if supported and target not in supported and target != 'chrome':
+            logger.warning(f"Impersonation target '{target}' unsupported; falling back to 'chrome'")
+            print(f"[!] Impersonation target '{target}' not supported; using 'chrome'")
+            target = 'chrome'
+
+        try:
+            session = cffi.Session(impersonate=target)
+        except Exception as e:
+            logger.warning(f"curl_cffi impersonation unavailable ({e}); using requests")
+            return None
+
+        if self.proxy_config:
+            proxy_type = self.proxy_config.get('type', 'http')
+            proxy_host = self.proxy_config.get('host', '127.0.0.1')
+            proxy_port = self.proxy_config.get('port', 8080)
+            scheme = 'socks5h' if proxy_type in ('socks5', 'socks5h') else 'http'
+            proxy_url = f"{scheme}://{proxy_host}:{proxy_port}"
+            session.proxies = {'http': proxy_url, 'https': proxy_url}
+            logger.info(f"Using proxy: {proxy_url}")
+
+        # Do NOT override User-Agent / Accept headers here: curl_cffi sets a
+        # browser-consistent header set as part of the impersonation, and
+        # rewriting them would defeat the fingerprint match.
+        self._impersonating = True
+        logger.info(f"TLS/HTTP2 impersonation active (curl_cffi: {target})")
+        print(f"[*] Fingerprint impersonation: {target} (JA3/JA4 + HTTP/2)")
+        return session
+
     def _get_optimized_session(self) -> requests.Session:
         """Create an optimized session with connection pooling and retry logic"""
+        if self.impersonate:
+            impersonated = self._build_impersonation_session()
+            if impersonated is not None:
+                return impersonated
+
         session = requests.Session()
         
         # Configure retry strategy
@@ -1970,6 +2046,13 @@ class CloudFrontBypasser:
             TargetUnreachableError: If target cannot be reached after retries
         """
         try:
+            # When impersonating, baseline through the same fingerprinted session
+            # so the baseline isn't blocked while probes pass (or vice-versa).
+            if self._impersonating:
+                return self._session.request(
+                    method='GET', url=self.target,
+                    timeout=self.timeout, allow_redirects=False, verify=False,
+                )
             resp = safe_request(
                 self.target,
                 timeout=self.timeout,
@@ -9872,6 +9955,12 @@ def main():
                        help='Skip the bypass re-confirmation pass (faster, more false positives)')
     parser.add_argument('--reconfirm-samples', type=int, default=2,
                        help='Replays per candidate bypass during re-confirmation (default: 2)')
+    # Evasion: TLS/HTTP2 fingerprint impersonation (needs curl_cffi)
+    parser.add_argument('--impersonate', nargs='?', const='chrome', default=None,
+                       metavar='BROWSER',
+                       help='Mimic a real browser TLS (JA3/JA4) + HTTP/2 fingerprint via '
+                            'curl_cffi to evade bot/JS WAFs. Bare flag = chrome; or pass a '
+                            'target like chrome124 / safari17_0')
     # Exports
     parser.add_argument('--export', help='Write an extra export to this path (format from --export-format)')
     parser.add_argument('--export-format', default='html', choices=['sarif', 'nuclei', 'html', 'json'],
@@ -9979,7 +10068,7 @@ def main():
             use_db_extras=not args.no_db_extras,
             threads=args.threads, delay=args.delay, timeout=args.timeout,
             enable_crawl=not args.no_crawl, enable_schema=not args.no_schema,
-            auth=auth or None, oob=oob_provider,
+            auth=auth or None, oob=oob_provider, impersonate=args.impersonate,
         )
         scanner.reconfirm = not args.no_reconfirm
         scanner.reconfirm_samples = max(1, args.reconfirm_samples)
