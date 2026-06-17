@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 setup(
     name="wafpierce",
-    version="1.5",
+    version="1.6.0",
     packages=find_packages(),
     install_requires=['requests', 'urllib3', 'certifi', 'charset-normalizer', 'idna', 'cryptography', 'httpx[http2]>=0.27.0', 'curl_cffi>=0.7.0', 'reportlab>=4.0.0'],
     extras_require={
