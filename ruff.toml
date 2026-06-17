@@ -1,0 +1,20 @@
+# Ruff configuration for WAFPierce.
+# Lint is advisory in CI (the codebase predates it); these rules catch real bugs
+# without forcing a mass reformat.
+target-version = "py38"
+line-length = 120
+
+exclude = [
+    ".venv", "venv", "build", "dist", "__pycache__",
+]
+
+[lint]
+# Start conservative: pyflakes (F) + a few high-signal pycodestyle errors.
+select = ["F", "E9"]
+ignore = [
+    "F401",  # unused imports — many are intentional lazy/optional guards
+    "F841",  # assigned-but-unused locals — common in defensive try blocks
+]
+
+[lint.per-file-ignores]
+"tests/*" = ["F811", "F401"]
