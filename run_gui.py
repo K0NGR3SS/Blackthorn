@@ -79,20 +79,46 @@ def _run_scan_worker() -> int:
     parser.add_argument('--delay', type=float, default=0.2)
     parser.add_argument('--output', required=True)
     parser.add_argument('--categories', default='')
+    # v1.6 advanced options (mirrors wafpierce.pierce CLI flags)
+    parser.add_argument('--safe-mode', action='store_true')
+    parser.add_argument('--no-reconfirm', action='store_true')
+    parser.add_argument('--impersonate', nargs='?', const='chrome', default=None)
+    parser.add_argument('--oob', choices=['off', 'interactsh', 'selfhosted'], default='off')
+    parser.add_argument('--jitter', type=float, default=0.0)
+    parser.add_argument('--export', default=None)
+    parser.add_argument('--export-format', default='html')
     args, _ = parser.parse_known_args()
 
     try:
         from wafpierce.pierce import create_scanner
 
         print(f"[*] Scanning {args.target}")
+        oob_provider = None
+        if args.oob and args.oob != 'off':
+            try:
+                from wafpierce.oob import build_oob
+                oob_provider = build_oob(args.oob)
+            except Exception as exc:
+                print(f"[!] OOB init failed: {exc}")
         # create_scanner pre-wires DB custom payloads / plugins / evasion profile and
         # enables crawling + schema discovery by default.
-        scanner = create_scanner(args.target, threads=args.threads, delay=args.delay, timeout=5)
+        scanner = create_scanner(args.target, threads=args.threads, delay=args.delay,
+                                 timeout=5, oob=oob_provider, impersonate=args.impersonate,
+                                 safe_mode=args.safe_mode, jitter=args.jitter)
+        scanner.reconfirm = not args.no_reconfirm
         selected_categories = [c.strip() for c in args.categories.split(',') if c.strip()]
         results = scanner.scan(selected_categories if selected_categories else None)
 
         with open(args.output, 'w', encoding='utf-8') as f:
             json.dump(results or [], f, indent=2)
+
+        if args.export:
+            try:
+                from wafpierce.exporters import export as _export
+                _export(results or [], args.target, args.export_format, args.export)
+                print(f"[+] Exported {args.export_format.upper()} to {args.export}")
+            except Exception as exc:
+                print(f"[!] Export failed: {exc}")
 
         print(f"[+] Scan complete: {len(results or [])} result(s)")
         return 0

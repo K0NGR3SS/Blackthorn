@@ -172,6 +172,7 @@ TRANSLATIONS = {
         'business_logic': 'Business Logic & Authorization',
         'jwt_auth': 'JWT & Authentication Attacks',
         'graphql_attacks': 'GraphQL Attacks',
+        'ai_attacks': 'AI / LLM Attacks',
         'ssrf_advanced': 'SSRF Advanced',
         'pdf_document': 'PDF/Document Attacks',
         'cloud_security': 'Cloud Security',
@@ -1141,6 +1142,10 @@ SCAN_CATEGORIES_GUI = {
         'name_key': 'graphql_attacks',
         'description': 'Tests for GraphQL-specific vulnerabilities including introspection, batching attacks, and injection.',
     },
+    'ai_attacks': {
+        'name_key': 'ai_attacks',
+        'description': 'Detects AI/LLM-backed endpoints and probes for prompt injection and system-prompt leakage.',
+    },
     'ssrf_advanced': {
         'name_key': 'ssrf_advanced',
         'description': 'Tests for Server-Side Request Forgery including protocol smuggling and DNS rebinding.',
@@ -1272,7 +1277,7 @@ def main() -> None:
         # emit progress update: target, progress_percent (0-100)
         progress_update = Signal(str, int)
 
-        def __init__(self, targets, threads, delay, concurrent=1, use_concurrent=True, retry_failed=0, selected_categories=None, proxy_config=None, enable_http_logging=False, enable_ssl_analysis=False, parent=None):
+        def __init__(self, targets, threads, delay, concurrent=1, use_concurrent=True, retry_failed=0, selected_categories=None, proxy_config=None, enable_http_logging=False, enable_ssl_analysis=False, advanced_opts=None, parent=None):
             super().__init__(parent)
             self.targets = targets
             self.threads = threads
@@ -1284,9 +1289,32 @@ def main() -> None:
             self.proxy_config = proxy_config  # Proxy configuration dict
             self.enable_http_logging = enable_http_logging  # Enable HTTP request/response logging
             self.enable_ssl_analysis = enable_ssl_analysis  # Enable SSL/TLS analysis
+            # v1.6 advanced options (safe-mode, OOB, impersonate, jitter, reconfirm,
+            # export). Empty dict -> defaults; never changes legacy behavior.
+            self.advanced_opts = advanced_opts or {}
             self._abort = False
             # track running subprocesses so abort() can terminate them
             self._running_procs = {}
+
+        def _advanced_flags(self):
+            """Translate the advanced-options dict into CLI flags understood by
+            both the frozen --scan-worker and `python -m wafpierce.pierce`."""
+            opts = self.advanced_opts or {}
+            flags = []
+            if opts.get('safe_mode'):
+                flags.append('--safe-mode')
+            if opts.get('no_reconfirm'):
+                flags.append('--no-reconfirm')
+            if opts.get('impersonate'):
+                flags.extend(['--impersonate', str(opts['impersonate'])])
+            if opts.get('oob') and opts['oob'] != 'off':
+                flags.extend(['--oob', str(opts['oob'])])
+            if opts.get('jitter'):
+                flags.extend(['--jitter', str(opts['jitter'])])
+            if opts.get('export') and opts.get('export_path'):
+                flags.extend(['--export', str(opts['export_path']),
+                              '--export-format', str(opts['export'])])
+            return flags
 
         def abort(self):
             self._abort = True
@@ -1409,6 +1437,9 @@ def main() -> None:
                             cmd.extend(['--categories', ','.join(self.selected_categories)])
                         else:
                             cmd.extend(['-c', ','.join(self.selected_categories)])
+                    # v1.6 advanced options -> CLI flags (same flags in both the
+                    # frozen --scan-worker and the `python -m` paths).
+                    cmd.extend(self._advanced_flags())
                     env = os.environ.copy()
                     env['PYTHONIOENCODING'] = 'utf-8'
                     env['PYTHONUNBUFFERED'] = '1'  # Force unbuffered output
@@ -2744,7 +2775,8 @@ def main() -> None:
                 self._prefs = prefs
             except Exception:
                 pass
-            self._worker = QtWorker(targets, threads, delay, concurrent_val, use_concurrent, retry_failed, selected_categories, proxy_config=self._proxy_config, enable_http_logging=self._enable_http_logging, enable_ssl_analysis=self._enable_ssl_analysis)
+            advanced_opts = getattr(self, '_pending_advanced', None) or {}
+            self._worker = QtWorker(targets, threads, delay, concurrent_val, use_concurrent, retry_failed, selected_categories, proxy_config=self._proxy_config, enable_http_logging=self._enable_http_logging, enable_ssl_analysis=self._enable_ssl_analysis, advanced_opts=advanced_opts)
             self._worker_thread = QtCore.QThread()
             self._worker.moveToThread(self._worker_thread)
             self._worker.log_line.connect(self.append_log, QtCore.Qt.QueuedConnection)
@@ -2911,6 +2943,7 @@ def main() -> None:
                     'business_logic': '🏢',
                     'jwt_auth': '🔑',
                     'graphql_attacks': '📊',
+                    'ai_attacks': '🤖',
                     'ssrf_advanced': '🌐',
                     'pdf_document': '📄',
                     'cloud_security': '☁️',
@@ -2987,7 +3020,38 @@ def main() -> None:
                 evasion_layout.addWidget(evasion_combo)
                 evasion_layout.addStretch()
                 layout.addLayout(evasion_layout)
-                
+
+                # v1.6 advanced options row.
+                adv = (self._prefs.get('advanced') or {}) if hasattr(self, '_prefs') else {}
+                adv_layout = QHBoxLayout()
+                reconfirm_chk = QCheckBox('Re-confirm findings')
+                reconfirm_chk.setChecked(not adv.get('no_reconfirm', False))
+                reconfirm_chk.setToolTip('Replay each bypass to demote false positives')
+                safe_chk = QCheckBox('Safe mode')
+                safe_chk.setChecked(bool(adv.get('safe_mode', False)))
+                safe_chk.setToolTip('Skip noisy/DoS-flavored and state-changing techniques')
+                impersonate_chk = QCheckBox('Impersonate browser')
+                impersonate_chk.setChecked(bool(adv.get('impersonate')))
+                impersonate_chk.setToolTip('Spoof a Chrome TLS (JA3/JA4) + HTTP/2 fingerprint (curl_cffi)')
+                oob_label = QLabel('OOB:')
+                oob_label.setStyleSheet('color: #8b949e;')
+                oob_combo = QtWidgets.QComboBox()
+                oob_combo.addItem('Off', 'off')
+                oob_combo.addItem('Interactsh', 'interactsh')
+                oob_combo.addItem('Self-hosted', 'selfhosted')
+                _oob_idx = {'off': 0, 'interactsh': 1, 'selfhosted': 2}.get(adv.get('oob', 'off'), 0)
+                oob_combo.setCurrentIndex(_oob_idx)
+                oob_combo.setToolTip('Confirm blind SSRF/Log4Shell/XXE via out-of-band callbacks')
+                for w in (reconfirm_chk, safe_chk, impersonate_chk):
+                    w.setCursor(QCursor(Qt.PointingHandCursor))
+                adv_layout.addWidget(reconfirm_chk)
+                adv_layout.addWidget(safe_chk)
+                adv_layout.addWidget(impersonate_chk)
+                adv_layout.addStretch()
+                adv_layout.addWidget(oob_label)
+                adv_layout.addWidget(oob_combo)
+                layout.addLayout(adv_layout)
+
                 # Bottom row
                 bottom_layout = QHBoxLayout()
                 bottom_layout.addWidget(count_label)
@@ -3008,10 +3072,25 @@ def main() -> None:
                 
                 # Store the evasion profile selection for use after dialog
                 self._selected_evasion_profile = None
-                
+                self._pending_advanced = {}
+
                 def on_accept():
                     self._selected_evasion_profile = evasion_combo.currentData()
-                
+                    self._pending_advanced = {
+                        'no_reconfirm': not reconfirm_chk.isChecked(),
+                        'safe_mode': safe_chk.isChecked(),
+                        'impersonate': 'chrome' if impersonate_chk.isChecked() else None,
+                        'oob': oob_combo.currentData(),
+                    }
+                    # Persist as defaults for next time.
+                    try:
+                        prefs = _load_prefs()
+                        prefs['advanced'] = self._pending_advanced
+                        _save_prefs(prefs)
+                        self._prefs = prefs
+                    except Exception:
+                        pass
+
                 dialog.accepted.connect(on_accept)
                 
                 # Show dialog
