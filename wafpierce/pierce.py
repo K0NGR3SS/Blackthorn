@@ -1046,6 +1046,12 @@ class CloudFrontBypasser:
         self.evasion_profile = evasion_profile or {}
         # Authenticated scanning: cookies / headers / bearer / basic / login flow.
         self.auth = auth or {}
+
+        # Re-confirmation: replay each flagged bypass a few more times (cache off)
+        # and demote ones that don't reproduce. Crushes false positives from
+        # transient jitter. Toggleable by the CLI/GUI.
+        self.reconfirm = True
+        self.reconfirm_samples = 2
         
         # Response cache to avoid duplicate requests
         self._response_cache: Dict[str, Dict] = {}
@@ -1552,12 +1558,75 @@ class CloudFrontBypasser:
             logger.warning(f"Scan completed with {error_count} technique errors")
             print(f"\n[!] Warning: {error_count} techniques encountered errors")
 
+        # Re-confirm flagged bypasses before reporting so transient flukes get
+        # demoted rather than shipped as findings.
+        if self.reconfirm:
+            try:
+                self._reconfirm_bypasses(samples=self.reconfirm_samples)
+            except Exception as e:
+                logger.debug(f"Re-confirmation phase error: {e}")
+
         # Backfill reproduction commands for any results built outside the
         # _test_request chokepoint (recon/audit/cloud findings).
         self._attach_repro_commands()
 
         logger.info(f"Scan complete: Found {len(self.results)} bypasses")
         return self.results
+
+    def _reconfirm_bypasses(self, samples: int = 2, keep_threshold: float = 0.5) -> None:
+        """Replay each flagged bypass ``samples`` more times and demote flukes.
+
+        A finding keeps its ``bypass`` flag only if it reproduces in at least
+        ``keep_threshold`` of the confirmation attempts. Replays bypass the
+        response cache so they actually re-hit the network. Adds ``confidence``
+        (high|medium|low|single) and ``confirmations`` ("n/m") to each finding.
+
+        Only HTTP findings addressable as ``target + path`` are replayed; recon /
+        detection findings (absolute URLs, no replayable request, or explicitly
+        opted out via ``_no_reconfirm``) are marked ``single`` and left intact.
+        """
+        if self._baseline_size is None:
+            return
+        targets = [
+            r for r in self.results
+            if isinstance(r, dict) and r.get('bypass')
+            and r.get('path') and not r.get('_no_reconfirm')
+            and not str(r.get('path')).startswith(('http://', 'https://'))
+        ]
+        if not targets:
+            return
+        print(f"\n[*] Re-confirming {len(targets)} candidate bypass(es) "
+              f"({samples} replay(s) each, cache off)...")
+        demoted = 0
+        for r in targets:
+            method = r.get('method', 'GET')
+            path = r.get('path', '/')
+            headers = r.get('headers') if isinstance(r.get('headers'), dict) else {}
+            data = r.get('data')
+            confirmed = 0
+            for _ in range(samples):
+                try:
+                    replay = self._test_request(
+                        dict(headers), method=method, path=path,
+                        technique=r.get('technique'), data=data, use_cache=False,
+                    )
+                except Exception:
+                    replay = None
+                if replay and replay.get('bypass'):
+                    confirmed += 1
+            ratio = (confirmed / samples) if samples else 0.0
+            r['confirmations'] = f"{confirmed}/{samples}"
+            if ratio >= keep_threshold:
+                r['confidence'] = 'high' if ratio == 1.0 else 'medium'
+            else:
+                r['bypass'] = False
+                r['confidence'] = 'low'
+                r['reason'] = f"Unconfirmed (reproduced {confirmed}/{samples}): {r.get('reason', '')}"
+                demoted += 1
+        if demoted:
+            print(f"[+] Re-confirmation demoted {demoted} unstable finding(s) to low confidence")
+        else:
+            print("[+] All candidate bypasses re-confirmed")
 
     def _attach_repro_commands(self) -> None:
         """Ensure every finding carries a copy-paste ``curl`` reproduction.
@@ -1971,6 +2040,7 @@ class CloudFrontBypasser:
         path: str = '/',
         technique: Optional[str] = None,
         data: Any = None,
+        use_cache: bool = True,
     ) -> Optional[Dict[str, Any]]:
         """
         Test a single request configuration with error handling.
@@ -2003,12 +2073,15 @@ class CloudFrontBypasser:
         body_key = '' if data is None else hash(repr(data))
         cache_key = f"{method}:{path}:{body_key}:{hash(frozenset(headers.items()))}"
 
-        # Check cache first (now actually hits, because the key is technique-free)
-        with self._cache_lock:
-            if cache_key in self._response_cache:
-                cached = dict(self._response_cache[cache_key])
-                cached['technique'] = technique  # keep caller's label
-                return cached
+        # Check cache first (now actually hits, because the key is technique-free).
+        # Re-confirmation replays pass use_cache=False so they hit the network
+        # instead of being served a stale "bypass" verdict.
+        if use_cache:
+            with self._cache_lock:
+                if cache_key in self._response_cache:
+                    cached = dict(self._response_cache[cache_key])
+                    cached['technique'] = technique  # keep caller's label
+                    return cached
 
         req_headers = dict(self._session.headers)
         req_headers.update(headers)
@@ -2066,9 +2139,15 @@ class CloudFrontBypasser:
             except Exception:
                 pass
 
+            # Keep the body so the re-confirmation pass can replay the exact
+            # request (GET findings store None; harmless).
+            if data is not None:
+                result['data'] = data
+
             # Cache result
-            with self._cache_lock:
-                self._response_cache[cache_key] = result
+            if use_cache:
+                with self._cache_lock:
+                    self._response_cache[cache_key] = result
 
             return result
 
@@ -9641,6 +9720,11 @@ def main():
     # Extensibility
     parser.add_argument('--no-db-extras', action='store_true',
                        help='Do not load custom payloads / plugins / evasion profile from the DB')
+    # Accuracy
+    parser.add_argument('--no-reconfirm', action='store_true',
+                       help='Skip the bypass re-confirmation pass (faster, more false positives)')
+    parser.add_argument('--reconfirm-samples', type=int, default=2,
+                       help='Replays per candidate bypass during re-confirmation (default: 2)')
     # Exports
     parser.add_argument('--export', help='Write an extra export to this path (format from --export-format)')
     parser.add_argument('--export-format', default='html', choices=['sarif', 'nuclei', 'html', 'json'],
@@ -9721,6 +9805,8 @@ def main():
             enable_crawl=not args.no_crawl, enable_schema=not args.no_schema,
             auth=auth or None,
         )
+        scanner.reconfirm = not args.no_reconfirm
+        scanner.reconfirm_samples = max(1, args.reconfirm_samples)
 
         # Run scan with selected categories
         results = scanner.scan(selected_categories)

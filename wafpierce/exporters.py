@@ -132,6 +132,13 @@ def to_html(target: str, results: List[Dict[str, Any]]) -> str:
         color = _SEV_COLOR.get(sev, '#607d8b')
         triage = r.get('ai_triage') or {}
         fp = ' <span style="color:#b00020">(AI: likely FP)</span>' if triage.get('false_positive') else ''
+        conf = r.get('confidence')
+        conf_badge = (
+            f" <span class='conf conf-{html.escape(str(conf))}'>{html.escape(str(conf))}"
+            f"{' ' + html.escape(str(r['confirmations'])) if r.get('confirmations') else ''}</span>"
+            if conf else ''
+        )
+        fp = fp + conf_badge
         curl = r.get('curl')
         repro = (
             f"<details><summary>curl</summary><pre class='repro'>{html.escape(str(curl))}</pre></details>"
@@ -166,6 +173,9 @@ def to_html(target: str, results: List[Dict[str, Any]]) -> str:
  tr:hover td{{background:#161a22}} code{{color:#7fd1ff}}
  .summary{{margin:18px 0}}
  .muted{{color:#5b6472}}
+ .conf{{font-size:11px;padding:1px 6px;border-radius:3px;margin-left:4px}}
+ .conf-high{{background:#1b3a2b;color:#5bd98a}} .conf-medium{{background:#3a341b;color:#e6c84b}}
+ .conf-low{{background:#3a1b1b;color:#e67a7a}} .conf-single{{background:#26303a;color:#9ac4e6}}
  details summary{{cursor:pointer;color:#7fd1ff;font-size:12px}}
  pre.repro{{white-space:pre-wrap;word-break:break-all;background:#0b0d11;border:1px solid #232936;border-radius:6px;padding:8px;margin:6px 0 0;font-size:12px;color:#cfe8ff}}
 </style></head>
@@ -196,7 +206,7 @@ def export(results: List[Dict[str, Any]], target: str, fmt: str, path: str = Non
     elif fmt == 'html':
         content = to_html(target, results)
     else:
-        content = json.dumps(results, indent=2)
+        content = json.dumps(results, indent=2, default=str)
     if path:
         with open(path, 'w', encoding='utf-8') as f:
             f.write(content)
