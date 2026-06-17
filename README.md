@@ -120,6 +120,19 @@ Contributions, bug reports, and feature requests are welcome! Please open an iss
 
 ## Changelog
 
+### Version 1.6 (June 2026)
+
+#### Accuracy & evidence
+- **Out-of-band (OOB) confirmation engine** — blind SSRF / Log4Shell-JNDI / blind XXE now *prove* themselves. A pluggable OOB layer (`--oob interactsh|selfhosted`) sprays uniquely-correlated callbacks early in the scan and collects interactions at the end; any received callback becomes a **CONFIRMED CRITICAL** finding carrying the inbound request as proof. Two backends: an **Interactsh** client (public `oast.*` or self-hosted, pure `cryptography`) and a **built-in self-hosted listener** (HTTP + best-effort DNS). Opt-in.
+- **Bypass re-confirmation pass** — every flagged bypass is replayed (cache off) and demoted to low confidence if it doesn't reproduce. Findings now carry `confidence` (high/medium/low) and `confirmations` (n/m). Toggle with `--no-reconfirm`.
+- **Reproduction `curl` per finding** — each result carries the exact copy-paste `curl` built from the request as it went on the wire; surfaced in the HTML report.
+
+#### Evasion
+- **TLS (JA3/JA4) + HTTP/2 fingerprint impersonation** — `--impersonate [chrome|chrome124|safari17_0|…]` routes probes through `curl_cffi` to mimic a real browser and slip past JS/bot WAFs (DataDome, PerimeterX, Kasada). Degrades gracefully to the `requests` stack if unavailable.
+
+#### Project health
+- **First automated test suite** — `pytest` against an in-process mock-WAF server covering repro, bypass detection, re-confirmation, exporters, OOB crypto/listener, and impersonation. Added a `tests` CI workflow (`requirements-dev.txt`, `[dev]` extra).
+
 ### Version 1.5 (June 2026)
 
 #### Engine: faster, more accurate, bounded
@@ -476,10 +489,19 @@ Features planned for future releases:
 ### AI implementation ✅ (shipped in 1.5 — opt-in)
 AI triage, payload mutation, and auto-report are now available via the Anthropic API. Future work: in-scan adaptive payload generation and LLM-guided crawling.
 
+### Shipped in 1.6 ✅
+- Out-of-band (OOB) blind-vuln confirmation (Interactsh + self-hosted listener)
+- Bypass re-confirmation pass (confidence scoring)
+- Reproduction `curl` per finding
+- TLS (JA3/JA4) + HTTP/2 fingerprint impersonation
+- Automated test suite + CI
+
 ### Ideas under consideration
-- WebSocket message fuzzing
 - gRPC / protobuf endpoint testing
-- Authenticated-session scanning (login + cookie/jar reuse)
+- LLM / prompt-injection endpoint testing
+- Modern request smuggling (client-side desync, CL.0 / 0.CL)
+- SAML / XML signature wrapping; CSP analyzer
+- PDF report export; CVSS vectors; proxy rotation / Tor
 
 ### Community Suggestions
 Have ideas for new tests? Message either Marwan or Nazariy
