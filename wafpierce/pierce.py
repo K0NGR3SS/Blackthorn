@@ -10332,9 +10332,14 @@ def main(argv=None):
         return 0
 
     parser = ArgumentParser(prog='wafpierce scan', description='WAFPierce WAF Bypass Scanner')
-    parser.add_argument('target', help='Target URL')
+    parser.add_argument('target', nargs='?', help='Target URL (or set it in --config)')
     parser.add_argument('-V', '--version', action='store_true',
                        help='Show version + installed optional components, then exit')
+    parser.add_argument('--config', metavar='FILE',
+                       help='Load scanner defaults from a JSON/TOML config file '
+                            '(explicit flags still win)')
+    parser.add_argument('--config-profile', metavar='NAME',
+                       help='Use a named [profiles.NAME] section from --config')
     parser.add_argument('-t', '--threads', type=int, default=10, help='Number of threads')
     parser.add_argument('-d', '--delay', type=float, default=0.2, help='Delay between requests')
     parser.add_argument('--timeout', type=int, default=5, help='Request timeout in seconds')
@@ -10461,8 +10466,21 @@ def main(argv=None):
     no_color = args.no_color or no_color_env
     quiet = args.quiet
 
+    # Load config-file defaults (explicit CLI flags already on `args` win).
+    if args.config:
+        try:
+            from .configfile import load_config, apply_config
+            apply_config(args, parser, load_config(args.config, profile=args.config_profile))
+        except Exception as e:
+            print(f"[!] Config load failed: {e}")
+            return 2
+
     # Resolve --profile presets (explicit flags win) before anything reads them.
     _apply_profile(args)
+
+    # A target is required (from the positional arg or the config file).
+    if not args.target:
+        parser.error("a target URL is required (pass it as an argument or set it in --config)")
 
     # Deterministic RNG for reproducible scans (jitter/UA/proxy/mutation choices).
     if args.seed is not None:

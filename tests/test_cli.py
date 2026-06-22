@@ -146,6 +146,75 @@ def test_seed_is_accepted(capsys):
     assert 'DRY RUN' in capsys.readouterr().out
 
 
+# ------------------------------------------------------------------ config file
+def test_config_load_json_and_profile(tmp_path):
+    from wafpierce.configfile import load_config
+    import json as _json
+    cfg = tmp_path / "wp.json"
+    cfg.write_text(_json.dumps({
+        "threads": 20, "safe-mode": True,
+        "profiles": {"staging": {"target": "https://staging.example.com", "oob": "interactsh"}},
+    }), encoding="utf-8")
+    flat = load_config(str(cfg))
+    assert flat["threads"] == 20 and flat["safe_mode"] is True  # dash normalized
+    assert "profiles" not in flat
+    withp = load_config(str(cfg), profile="staging")
+    assert withp["target"] == "https://staging.example.com"
+    assert withp["oob"] == "interactsh"
+
+
+def test_config_unknown_profile_raises(tmp_path):
+    from wafpierce.configfile import load_config
+    cfg = tmp_path / "wp.json"
+    cfg.write_text('{"threads": 5}', encoding="utf-8")
+    import pytest
+    with pytest.raises(RuntimeError):
+        load_config(str(cfg), profile="nope")
+
+
+def test_config_apply_respects_explicit_flags():
+    from wafpierce.configfile import apply_config
+    args = _ns_for_config(threads=10, delay=0.2, oob='off')
+    parser = _parser_for_config()
+    apply_config(args, parser, {'threads': 30, 'oob': 'interactsh'})
+    # threads was at default(10) -> overridden; but if user had set it, kept (next test)
+    assert args.threads == 30
+    assert args.oob == 'interactsh'
+
+
+def test_config_does_not_override_explicit():
+    from wafpierce.configfile import apply_config
+    args = _ns_for_config(threads=50, delay=0.2, oob='off')   # user set threads=50
+    parser = _parser_for_config()
+    apply_config(args, parser, {'threads': 30})
+    assert args.threads == 50  # explicit (non-default) value preserved
+
+
+def test_config_end_to_end_supplies_target(tmp_path, capsys):
+    import json as _json
+    cfg = tmp_path / "wp.json"
+    cfg.write_text(_json.dumps({"profiles": {"s": {"target": "https://from-config.invalid"}}}),
+                   encoding="utf-8")
+    rc = cli.main(['scan', '--config', str(cfg), '--config-profile', 's', '--dry-run'])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert 'from-config.invalid' in out  # target came from the config profile
+
+
+def _parser_for_config():
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument('--threads', type=int, default=10)
+    p.add_argument('--delay', type=float, default=0.2)
+    p.add_argument('--oob', default='off')
+    return p
+
+
+def _ns_for_config(**kw):
+    import argparse
+    return argparse.Namespace(**kw)
+
+
 # -------------------------------------------------------------- --fail-on gate
 def test_fail_on_gating():
     from wafpierce.pierce import _fail_on_exit

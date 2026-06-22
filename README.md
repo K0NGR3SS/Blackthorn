@@ -132,7 +132,21 @@ to see every technique grouped by category.
 Without installing, the equivalent is `python3 -m wafpierce <command> ...`.
 
 Helpful flags: `--dry-run`, `--list-categories`, `--list-techniques`, `-q/--quiet`,
-`--no-color` (also honors the `NO_COLOR` env var).
+`--no-color` (also honors the `NO_COLOR` env var), `--max-time <seconds>`,
+`--seed <n>`, `--profile stealth|normal|aggressive`.
+
+**Config file** — stop retyping flags (`--config wp.toml [--config-profile staging]`,
+JSON or TOML; explicit flags still win):
+
+```toml
+threads = 20
+impersonate = "chrome"
+safe_mode = true
+
+[profiles.staging]
+target = "https://staging.example.com"
+oob = "interactsh"
+```
 
 **CI / reporting / safety:**
 - `--export-format` now also supports `junit` and `csv` (alongside `sarif`,
