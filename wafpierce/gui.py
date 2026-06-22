@@ -1390,6 +1390,12 @@ def main() -> None:
             if opts.get('export') and opts.get('export_path'):
                 flags.extend(['--export', str(opts['export_path']),
                               '--export-format', str(opts['export'])])
+            if opts.get('ai_triage'):
+                flags.append('--ai-triage')
+            if opts.get('ai_model'):
+                flags.extend(['--ai-model', str(opts['ai_model'])])
+            # NB: the API key is passed via the ANTHROPIC_API_KEY env var (set in
+            # run()), never as a CLI flag (which would be visible in the process list).
             return flags
 
         def abort(self):
@@ -1519,6 +1525,9 @@ def main() -> None:
                     env = os.environ.copy()
                     env['PYTHONIOENCODING'] = 'utf-8'
                     env['PYTHONUNBUFFERED'] = '1'  # Force unbuffered output
+                    # Pass the Anthropic key via env (not argv) when AI triage is on.
+                    if self.advanced_opts.get('ai_triage') and self.advanced_opts.get('ai_key'):
+                        env['ANTHROPIC_API_KEY'] = str(self.advanced_opts['ai_key'])
                     try:
                         proc = subprocess.Popen(
                             cmd,
@@ -3110,6 +3119,10 @@ def main() -> None:
                 impersonate_chk = QCheckBox('Impersonate browser')
                 impersonate_chk.setChecked(bool(adv.get('impersonate')))
                 impersonate_chk.setToolTip('Spoof a Chrome TLS (JA3/JA4) + HTTP/2 fingerprint (curl_cffi)')
+                ai_triage_chk = QCheckBox('AI triage')
+                ai_triage_chk.setChecked(bool(adv.get('ai_triage', False)))
+                ai_triage_chk.setToolTip('Run AI false-positive triage on findings '
+                                         '(needs an Anthropic API key in Settings)')
                 oob_label = QLabel('OOB:')
                 oob_label.setStyleSheet('color: #8b949e;')
                 oob_combo = QtWidgets.QComboBox()
@@ -3119,11 +3132,12 @@ def main() -> None:
                 _oob_idx = {'off': 0, 'interactsh': 1, 'selfhosted': 2}.get(adv.get('oob', 'off'), 0)
                 oob_combo.setCurrentIndex(_oob_idx)
                 oob_combo.setToolTip('Confirm blind SSRF/Log4Shell/XXE via out-of-band callbacks')
-                for w in (reconfirm_chk, safe_chk, impersonate_chk):
+                for w in (reconfirm_chk, safe_chk, impersonate_chk, ai_triage_chk):
                     w.setCursor(QCursor(Qt.PointingHandCursor))
                 adv_layout.addWidget(reconfirm_chk)
                 adv_layout.addWidget(safe_chk)
                 adv_layout.addWidget(impersonate_chk)
+                adv_layout.addWidget(ai_triage_chk)
                 adv_layout.addStretch()
                 adv_layout.addWidget(oob_label)
                 adv_layout.addWidget(oob_combo)
@@ -3153,11 +3167,15 @@ def main() -> None:
 
                 def on_accept():
                     self._selected_evasion_profile = evasion_combo.currentData()
+                    _aiprefs = _load_prefs()
                     self._pending_advanced = {
                         'no_reconfirm': not reconfirm_chk.isChecked(),
                         'safe_mode': safe_chk.isChecked(),
                         'impersonate': 'chrome' if impersonate_chk.isChecked() else None,
                         'oob': oob_combo.currentData(),
+                        'ai_triage': ai_triage_chk.isChecked(),
+                        'ai_key': (_aiprefs.get('anthropic_api_key') or None),
+                        'ai_model': (_aiprefs.get('ai_model') or None),
                     }
                     # Persist as defaults for next time.
                     try:
@@ -3637,6 +3655,41 @@ def main() -> None:
                 
                 layout.addWidget(privacy_group)
 
+                # ========== AI (ANTHROPIC) SETTINGS ==========
+                ai_group = QtWidgets.QGroupBox('🤖 AI (Anthropic)')
+                ai_layout = QVBoxLayout(ai_group)
+                ai_layout.addWidget(QLabel(
+                    'Optional. Used for AI triage / AI report (enable per-scan in the scan '
+                    'dialog). The key is stored locally and passed to the scanner via the '
+                    'ANTHROPIC_API_KEY environment variable — never on the command line.'))
+                key_row = QtWidgets.QHBoxLayout()
+                key_row.addWidget(QLabel('API key:'))
+                ai_key_edit = QLineEdit()
+                ai_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+                ai_key_edit.setPlaceholderText('sk-ant-…')
+                try:
+                    ai_key_edit.setText(str(prefs.get('anthropic_api_key', '') or ''))
+                except Exception:
+                    pass
+                show_key_chk = QCheckBox('show')
+                show_key_chk.toggled.connect(
+                    lambda on: ai_key_edit.setEchoMode(
+                        QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password))
+                key_row.addWidget(ai_key_edit, 1)
+                key_row.addWidget(show_key_chk)
+                ai_layout.addLayout(key_row)
+                model_row = QtWidgets.QHBoxLayout()
+                model_row.addWidget(QLabel('Model:'))
+                ai_model_edit = QLineEdit()
+                ai_model_edit.setPlaceholderText('default (per-feature) — e.g. claude-opus-4-8')
+                try:
+                    ai_model_edit.setText(str(prefs.get('ai_model', '') or ''))
+                except Exception:
+                    pass
+                model_row.addWidget(ai_model_edit, 1)
+                ai_layout.addLayout(model_row)
+                layout.addWidget(ai_group)
+
                 # ========== SCAN PROFILE (export / import) ==========
                 profile_group = QtWidgets.QGroupBox('🗂️ Scan Profile')
                 profile_layout = QVBoxLayout(profile_group)
@@ -3719,6 +3772,10 @@ def main() -> None:
                         
                         # Save privacy settings
                         prefs['censor_sites'] = bool(censor_sites_chk.isChecked())
+
+                        # Save AI (Anthropic) settings
+                        prefs['anthropic_api_key'] = ai_key_edit.text().strip()
+                        prefs['ai_model'] = ai_model_edit.text().strip()
                         
                         # Update instance variables
                         self._enable_http_logging = prefs['enable_http_logging']
