@@ -84,6 +84,28 @@ def _finding_to_python(finding: dict) -> str:
     return '\n'.join(lines)
 
 
+# Scan-profile keys that are safe to export/import (NOT the API key — secrets
+# never leave the machine via a shared profile).
+PROFILE_KEYS = [
+    'threads', 'delay', 'concurrent', 'use_concurrent', 'retry_failed', 'advanced',
+    'use_proxy', 'proxy_type_idx', 'proxy_host', 'proxy_port',
+    'enable_http_logging', 'enable_ssl_analysis', 'ai_model',
+]
+
+
+def profile_from_prefs(prefs: dict) -> dict:
+    """Extract the shareable scan-profile subset of prefs (no secrets)."""
+    return {k: prefs[k] for k in PROFILE_KEYS if k in prefs}
+
+
+def merge_profile(prefs: dict, data: dict) -> dict:
+    """Merge an imported profile into prefs (only known, non-secret keys)."""
+    for k in PROFILE_KEYS:
+        if k in data:
+            prefs[k] = data[k]
+    return prefs
+
+
 # default settings, change if you want different ones for the application
 def _load_prefs() -> dict:
     path = get_gui_prefs_path()
@@ -3276,10 +3298,38 @@ def main() -> None:
             except Exception:
                 pass
 
+        def _notify_scan_complete(self):
+            """Best-effort OS tray notification when a scan finishes."""
+            try:
+                if not _load_prefs().get('notify_on_complete', True):
+                    return
+                from PySide6.QtWidgets import QSystemTrayIcon, QApplication
+                if not QSystemTrayIcon.isSystemTrayAvailable():
+                    return
+                total = len(self._results)
+                bypasses = sum(1 for r in self._results if r.get('bypass'))
+                crit = sum(1 for r in self._results
+                           if str(r.get('severity', '')).upper() in ('CRITICAL', 'HIGH'))
+                if getattr(self, '_tray', None) is None:
+                    icon = self.windowIcon()
+                    if icon.isNull():
+                        icon = QApplication.style().standardIcon(
+                            QtWidgets.QStyle.StandardPixmap.SP_MessageBoxInformation)
+                    self._tray = QSystemTrayIcon(icon, self)
+                    self._tray.setToolTip('WAFPierce')
+                self._tray.show()
+                self._tray.showMessage(
+                    'WAFPierce — scan complete',
+                    f'{total} findings • {bypasses} confirmed bypasses • {crit} critical/high',
+                    QSystemTrayIcon.MessageIcon.Information, 6000)
+            except Exception:
+                pass
+
         def _on_finished(self):
             self.append_log(_t('run_finished', self._lang))
             self.start_btn.setEnabled(True)
             self.stop_btn.setEnabled(False)
+            self._notify_scan_complete()
             try:
                 self.threads_spin.setEnabled(True)
                 self.delay_spin.setEnabled(True)
@@ -3586,6 +3636,55 @@ def main() -> None:
                 privacy_layout.addWidget(censor_sites_chk)
                 
                 layout.addWidget(privacy_group)
+
+                # ========== SCAN PROFILE (export / import) ==========
+                profile_group = QtWidgets.QGroupBox('🗂️ Scan Profile')
+                profile_layout = QVBoxLayout(profile_group)
+                profile_layout.addWidget(QLabel(
+                    'Save your scan setup (threads, delay, categories, proxy, advanced '
+                    'options) to a JSON file you can re-import or share. The API key is '
+                    'never included.'))
+                prof_btns = QtWidgets.QHBoxLayout()
+                export_cfg_btn = QPushButton('⬇ Export Profile…')
+                import_cfg_btn = QPushButton('⬆ Import Profile…')
+                prof_btns.addWidget(export_cfg_btn)
+                prof_btns.addWidget(import_cfg_btn)
+                profile_layout.addLayout(prof_btns)
+                layout.addWidget(profile_group)
+
+                def _export_profile():
+                    try:
+                        path, _ = QFileDialog.getSaveFileName(
+                            dlg, 'Export scan profile', 'wafpierce-profile.json',
+                            'JSON files (*.json)')
+                        if not path:
+                            return
+                        with open(path, 'w', encoding='utf-8') as f:
+                            json.dump(profile_from_prefs(_load_prefs()), f, indent=2)
+                        QMessageBox.information(dlg, 'Profile exported', f'Saved to:\n{path}')
+                    except Exception as e:
+                        QMessageBox.warning(dlg, 'Export failed', str(e))
+
+                def _import_profile():
+                    try:
+                        path, _ = QFileDialog.getOpenFileName(
+                            dlg, 'Import scan profile', '', 'JSON files (*.json)')
+                        if not path:
+                            return
+                        with open(path, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                        prefs2 = merge_profile(_load_prefs(), data)
+                        _save_prefs(prefs2)
+                        self._prefs = prefs2
+                        QMessageBox.information(
+                            dlg, 'Profile imported',
+                            'Imported. Re-open Settings / the scan dialog to see the '
+                            'restored values.')
+                    except Exception as e:
+                        QMessageBox.warning(dlg, 'Import failed', str(e))
+
+                export_cfg_btn.clicked.connect(_export_profile)
+                import_cfg_btn.clicked.connect(_import_profile)
 
                 btn_h = QtWidgets.QHBoxLayout()
                 save_btn = QPushButton(_t('save'))

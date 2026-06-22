@@ -3,7 +3,10 @@
 These live at module scope in wafpierce.gui specifically so they can be unit
 tested without a display or Qt installed.
 """
-from wafpierce.gui import _finding_url, _finding_to_curl, _finding_to_python
+from wafpierce.gui import (
+    _finding_url, _finding_to_curl, _finding_to_python,
+    profile_from_prefs, merge_profile, PROFILE_KEYS,
+)
 
 
 def test_finding_url_prefers_explicit_url():
@@ -39,3 +42,30 @@ def test_python_snippet_is_runnable_shape():
     assert "data='q=1'" in out
     assert 'verify=False' in out
     compile(out, '<snippet>', 'exec')  # must be valid Python
+
+
+# -- scan profile export/import ------------------------------------------- #
+def test_profile_export_excludes_secrets():
+    prefs = {'threads': 20, 'delay': 0.5, 'advanced': {'safe_mode': True},
+             'anthropic_api_key': 'sk-SECRET', 'ai_model': 'claude-opus-4-8',
+             'font_size': 14, 'language': 'en'}
+    prof = profile_from_prefs(prefs)
+    assert 'anthropic_api_key' not in prof          # secret never exported
+    assert 'font_size' not in prof and 'language' not in prof  # non-scan prefs excluded
+    assert prof['threads'] == 20
+    assert prof['advanced'] == {'safe_mode': True}
+    assert prof['ai_model'] == 'claude-opus-4-8'    # model is fine to share
+
+
+def test_profile_merge_only_known_keys():
+    base = {'threads': 5, 'font_size': 11}
+    merged = merge_profile(base, {'threads': 30, 'delay': 1.0, 'bogus': 'x',
+                                  'anthropic_api_key': 'sk-LEAK'})
+    assert merged['threads'] == 30 and merged['delay'] == 1.0
+    assert 'bogus' not in merged
+    assert 'anthropic_api_key' not in merged        # not a profile key -> not merged
+    assert merged['font_size'] == 11                # untouched
+
+
+def test_profile_keys_have_no_secret():
+    assert 'anthropic_api_key' not in PROFILE_KEYS
