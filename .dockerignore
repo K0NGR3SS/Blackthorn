@@ -1,0 +1,15 @@
+.git
+.github
+.venv
+venv
+build
+dist
+*.egg-info
+__pycache__
+**/__pycache__
+*.pyc
+tests
+pentest_results
+*.html
+build_log.txt
+.pre-commit-config.yaml

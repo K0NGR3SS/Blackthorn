@@ -101,6 +101,19 @@ pip3 install -r requirements.txt
 pip3 install -e .
 ```
 
+### pipx (isolated CLI install)
+```bash
+pipx install .
+wafpierce doctor
+```
+
+### Docker (headless CLI, no GUI)
+```bash
+docker build -t wafpierce .
+docker run --rm wafpierce scan https://target --safe-mode
+docker run --rm wafpierce doctor
+```
+
 ---
 
 ## 🖥️ Usage
