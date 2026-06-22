@@ -101,3 +101,16 @@ def test_dry_run_bare_url_defaults_to_scan(capsys):
     assert rc == 0
     assert 'DRY RUN' in out
     assert 'categories' in out
+
+
+# -------------------------------------------------------------- --fail-on gate
+def test_fail_on_gating():
+    from wafpierce.pierce import _fail_on_exit
+    high = [{'severity': 'HIGH'}]
+    low = [{'severity': 'LOW'}]
+    assert _fail_on_exit(high, 'high') == 10        # meets threshold
+    assert _fail_on_exit(low, 'high') is None        # below threshold
+    assert _fail_on_exit(high, 'critical') is None   # HIGH < CRITICAL
+    assert _fail_on_exit(low, 'low') == 10           # exactly at threshold
+    assert _fail_on_exit(high, None) is None         # gating disabled
+    assert _fail_on_exit([], 'info') is None         # nothing found

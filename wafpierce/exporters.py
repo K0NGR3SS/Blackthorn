@@ -11,10 +11,13 @@ All exporters are stdlib-only (no PyYAML dependency) and never raise on bad data
 """
 import json
 import html
+import logging
 import datetime
 from typing import List, Dict, Any
 
 from . import __version__
+
+logger = logging.getLogger(__name__)
 
 _SEV_TO_SARIF = {
     'CRITICAL': 'error', 'HIGH': 'error', 'MEDIUM': 'warning',
@@ -259,8 +262,80 @@ def to_pdf(target: str, results: List[Dict[str, Any]], path: str) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------- JUnit
+# Severity at or above this rank is reported as a JUnit test *failure* so CI
+# surfaces it; everything else is a passing (informational) testcase.
+_SEV_RANK = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3, 'INFO': 4}
+_JUNIT_FAIL_AT = _SEV_RANK['MEDIUM']
+
+
+def _is_failure(r: Dict[str, Any]) -> bool:
+    sev = (r.get('severity') or 'INFO').upper()
+    return bool(r.get('bypass')) or _SEV_RANK.get(sev, 4) <= _JUNIT_FAIL_AT
+
+
+def to_junit(target: str, results: List[Dict[str, Any]]) -> str:
+    """JUnit XML so CI shows findings as test failures (grouped by category)."""
+    from xml.sax.saxutils import escape, quoteattr
+
+    by_cat: Dict[str, List[Dict[str, Any]]] = {}
+    for r in results:
+        by_cat.setdefault(r.get('category') or 'UNCATEGORIZED', []).append(r)
+
+    total = len(results)
+    total_fail = sum(1 for r in results if _is_failure(r))
+    lines = ['<?xml version="1.0" encoding="utf-8"?>']
+    lines.append(f'<testsuites name="WAFPierce" tests="{total}" '
+                 f'failures="{total_fail}" errors="0">')
+    for cat, items in by_cat.items():
+        fails = sum(1 for r in items if _is_failure(r))
+        lines.append(f'  <testsuite name={quoteattr(cat)} tests="{len(items)}" '
+                     f'failures="{fails}">')
+        for r in items:
+            name = r.get('technique', 'finding')
+            sev = (r.get('severity') or 'INFO').upper()
+            lines.append(f'    <testcase classname={quoteattr(cat)} '
+                         f'name={quoteattr(name)}>')
+            if _is_failure(r):
+                msg = f"[{sev}] {r.get('reason', '')}".strip()
+                detail = []
+                for k in ('reason', 'status', 'confidence', 'path', 'cvss_score', 'curl'):
+                    if r.get(k) not in (None, ''):
+                        detail.append(f"{k}: {r.get(k)}")
+                lines.append(f'      <failure message={quoteattr(msg[:300])} '
+                             f'type={quoteattr(sev)}>{escape(chr(10).join(detail))}</failure>')
+            lines.append('    </testcase>')
+        lines.append('  </testsuite>')
+    lines.append('</testsuites>')
+    return '\n'.join(lines)
+
+
+# ------------------------------------------------------------------------ CSV
+def to_csv(target: str, results: List[Dict[str, Any]]) -> str:
+    """Flat CSV for spreadsheet triage."""
+    import csv
+    import io
+
+    cols = ['severity', 'category', 'technique', 'bypass', 'confidence',
+            'status', 'cvss_score', 'cwe', 'path', 'reason']
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator='\n')
+    w.writerow(cols)
+    # Most-severe first for readability.
+    ordered = sorted(results, key=lambda r: _SEV_RANK.get((r.get('severity') or 'INFO').upper(), 4))
+    for r in ordered:
+        w.writerow([
+            r.get('severity', ''), r.get('category', ''), r.get('technique', ''),
+            'yes' if r.get('bypass') else 'no', r.get('confidence', ''),
+            r.get('status', ''), r.get('cvss_score', ''), r.get('cwe', ''),
+            r.get('path', ''), (r.get('reason', '') or '').replace('\n', ' '),
+        ])
+    return buf.getvalue()
+
+
 def export(results: List[Dict[str, Any]], target: str, fmt: str, path: str = None) -> str:
-    """Render results to ``fmt`` ('sarif'|'nuclei'|'html'|'json'|'pdf'); optionally write to ``path``."""
+    """Render results to ``fmt`` ('sarif'|'nuclei'|'html'|'json'|'pdf'|'junit'|'csv');
+    optionally write to ``path``."""
     fmt = (fmt or 'json').lower()
     if fmt == 'pdf':
         if not path:
@@ -280,6 +355,10 @@ def export(results: List[Dict[str, Any]], target: str, fmt: str, path: str = Non
         content = to_nuclei(target, results)
     elif fmt == 'html':
         content = to_html(target, results)
+    elif fmt == 'junit':
+        content = to_junit(target, results)
+    elif fmt == 'csv':
+        content = to_csv(target, results)
     else:
         content = json.dumps(results, indent=2, default=str)
     if path:

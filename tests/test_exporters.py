@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from wafpierce.exporters import export, to_html, to_sarif, to_nuclei
+from wafpierce.exporters import export, to_html, to_sarif, to_nuclei, to_junit, to_csv
 
 SAMPLE = [
     {
@@ -56,6 +56,38 @@ def test_sarif_is_valid_json_with_runs():
 def test_nuclei_is_nonempty_yaml_text():
     out = to_nuclei('https://t.example', SAMPLE)
     assert 'id:' in out or 'info:' in out
+
+
+@pytest.mark.parametrize('fmt', ['junit', 'csv'])
+def test_new_formats_export_nonempty(fmt):
+    out = export(SAMPLE, 'https://t.example', fmt)
+    assert isinstance(out, str) and out.strip()
+
+
+def test_junit_is_wellformed_xml_with_failures():
+    import xml.etree.ElementTree as ET
+    out = to_junit('https://t.example', SAMPLE)
+    root = ET.fromstring(out)            # raises if malformed
+    assert root.tag == 'testsuites'
+    # HIGH bypass -> a failure; INFO baseline -> a passing testcase.
+    assert int(root.get('tests')) == 2
+    assert int(root.get('failures')) == 1
+    failures = root.findall('.//failure')
+    assert len(failures) == 1
+    assert failures[0].get('type') == 'HIGH'
+
+
+def test_csv_has_header_and_rows():
+    import csv
+    import io
+    out = to_csv('https://t.example', SAMPLE)
+    rows = list(csv.reader(io.StringIO(out)))
+    assert rows[0] == ['severity', 'category', 'technique', 'bypass', 'confidence',
+                       'status', 'cvss_score', 'cwe', 'path', 'reason']
+    assert len(rows) == 3  # header + 2 findings
+    # Most-severe first: HIGH row precedes INFO row.
+    assert rows[1][0] == 'HIGH'
+    assert rows[1][3] == 'yes'  # bypass column
 
 
 def test_pdf_export_writes_a_file(tmp_path):

@@ -10194,6 +10194,20 @@ def _print_technique_list() -> None:
     print(f"{total} techniques across {len(SCAN_CATEGORIES)} categories.")
 
 
+def _fail_on_exit(results, fail_on) -> 'Optional[int]':
+    """CI gating: return exit code 10 if any finding is at or above ``fail_on``
+    severity, else ``None`` (caller uses its normal exit code)."""
+    if not fail_on:
+        return None
+    thr = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3, 'info': 4}.get(fail_on)
+    if thr is None:
+        return None
+    rank = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3, 'INFO': 4}
+    if any(rank.get((r.get('severity') or 'INFO').upper(), 4) <= thr for r in results):
+        return 10
+    return None
+
+
 def _print_dry_run_plan(args, no_color: bool = False) -> None:
     """Show the technique plan + effective settings for the given flags, no I/O."""
     selected, invalid = _resolve_categories(getattr(args, 'categories', None))
@@ -10328,9 +10342,14 @@ def main(argv=None):
                        help='Resume an interrupted scan of this target from its checkpoint')
     # Exports
     parser.add_argument('--export', help='Write an extra export to this path (format from --export-format)')
-    parser.add_argument('--export-format', default='html', choices=['sarif', 'nuclei', 'html', 'json', 'pdf'],
+    parser.add_argument('--export-format', default='html',
+                       choices=['sarif', 'nuclei', 'html', 'json', 'pdf', 'junit', 'csv'],
                        help='Format for --export (default: html)')
     parser.add_argument('--json', action='store_true', help='Print results as JSON to stdout (pipeline mode)')
+    parser.add_argument('--fail-on', choices=['critical', 'high', 'medium', 'low', 'info'],
+                       metavar='SEVERITY',
+                       help='Exit non-zero (code 10) if any finding at or above this severity is '
+                            'present (CI gating). Independent of the default 0/1 exit code.')
     # Import recorded traffic to fuzz real (often authenticated) requests
     parser.add_argument('--import-har', help='Seed the scan from a HAR capture')
     parser.add_argument('--import-postman', help='Seed the scan from a Postman v2 collection')
@@ -10502,6 +10521,9 @@ def main(argv=None):
         # Run scan with selected categories
         results = scanner.scan(selected_categories)
 
+        # CI gating: optionally exit non-zero (10) when findings reach a severity.
+        fail_exit = _fail_on_exit(results, args.fail_on)
+
         # Opt-in AI triage (annotates results with false-positive likelihood).
         if args.ai_triage:
             try:
@@ -10554,7 +10576,7 @@ def main(argv=None):
             if args.output:
                 with open(args.output, 'w', encoding='utf-8') as f:
                     json.dump(results, f, indent=2)
-            sys.exit(0 if len(results) == 0 else 1)
+            sys.exit(fail_exit if fail_exit is not None else (0 if len(results) == 0 else 1))
 
         # Continuous monitoring: diff against the previous scan of this target.
         if args.monitor:
@@ -10622,8 +10644,11 @@ def main(argv=None):
             if not quiet:
                 print(f"\n[+] Results saved to {args.output}")
 
+        if fail_exit is not None and not quiet:
+            print(f"\n[!] --fail-on {args.fail_on}: threshold met -> exit {fail_exit}")
+
         # Return appropriate exit code
-        sys.exit(0 if len(results) == 0 else 1)
+        sys.exit(fail_exit if fail_exit is not None else (0 if len(results) == 0 else 1))
     
     except InvalidTargetError as e:
         print(f"[!] Invalid target: {e}")
