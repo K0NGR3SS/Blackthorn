@@ -65,6 +65,84 @@ def send_slack(webhook_url: str, target: str, results: List[Dict[str, Any]],
         return False
 
 
+def _summary_lines(target: str, results: List[Dict[str, Any]]) -> List[str]:
+    """Plain-text summary lines shared by the chat integrations."""
+    counts = _counts(results)
+    summary = '  '.join(f"{s}: {counts.get(s, 0)}"
+                        for s in ('CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO')
+                        if counts.get(s))
+    lines = [f"WAFPierce scan — {target}", summary or "no findings"]
+    top = _top_findings(results)
+    if top:
+        lines.append("")
+        for r in top:
+            sev = str(r.get('severity', 'INFO')).upper()
+            lines.append(f"{_SEV_EMOJI.get(sev, '')} {r.get('technique', '?')} — "
+                         f"{(r.get('reason', '') or '')[:140]}")
+    return lines
+
+
+def format_discord(target: str, results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Build a Discord webhook payload (content capped at Discord's 2000 chars)."""
+    text = '\n'.join(_summary_lines(target, results))
+    return {'content': text[:1990]}
+
+
+def send_discord(webhook_url: str, target: str, results: List[Dict[str, Any]],
+                 session=None) -> bool:
+    """POST a scan summary to a Discord webhook."""
+    try:
+        import requests
+        sess = session or requests
+        resp = sess.post(webhook_url, json=format_discord(target, results), timeout=10)
+        ok = getattr(resp, 'status_code', 0) < 400
+        if not ok:
+            logger.warning(f"Discord push returned {getattr(resp, 'status_code', '?')}")
+        return ok
+    except Exception as e:
+        logger.error(f"Discord push failed: {e}")
+        return False
+
+
+def format_teams(target: str, results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Build a Microsoft Teams MessageCard payload (Office 365 connector format)."""
+    counts = _counts(results)
+    facts = [{'name': s, 'value': str(counts.get(s, 0))}
+             for s in ('CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO') if counts.get(s)]
+    top = _top_findings(results)
+    detail = '\n\n'.join(f"**{r.get('technique', '?')}** — {(r.get('reason', '') or '')[:160]}"
+                         for r in top) or "_no confirmed bypasses_"
+    crit = counts.get('CRITICAL', 0) + counts.get('HIGH', 0)
+    return {
+        '@type': 'MessageCard',
+        '@context': 'http://schema.org/extensions',
+        'themeColor': 'D7263D' if crit else '0078D7',
+        'summary': f"WAFPierce scan of {target}",
+        'sections': [{
+            'activityTitle': f"WAFPierce scan — {target}",
+            'facts': facts or [{'name': 'findings', 'value': '0'}],
+            'text': detail,
+            'markdown': True,
+        }],
+    }
+
+
+def send_teams(webhook_url: str, target: str, results: List[Dict[str, Any]],
+               session=None) -> bool:
+    """POST a scan summary to a Microsoft Teams incoming webhook."""
+    try:
+        import requests
+        sess = session or requests
+        resp = sess.post(webhook_url, json=format_teams(target, results), timeout=10)
+        ok = getattr(resp, 'status_code', 0) < 400
+        if not ok:
+            logger.warning(f"Teams push returned {getattr(resp, 'status_code', '?')}")
+        return ok
+    except Exception as e:
+        logger.error(f"Teams push failed: {e}")
+        return False
+
+
 def format_generic(target: str, results: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Generic JSON payload for arbitrary webhooks / SIEM ingestion."""
     return {

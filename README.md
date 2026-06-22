@@ -134,6 +134,19 @@ Without installing, the equivalent is `python3 -m wafpierce <command> ...`.
 Helpful flags: `--dry-run`, `--list-categories`, `--list-techniques`, `-q/--quiet`,
 `--no-color` (also honors the `NO_COLOR` env var).
 
+**CI / reporting / safety:**
+- `--export-format` now also supports `junit` and `csv` (alongside `sarif`,
+  `nuclei`, `html`, `json`, `pdf`).
+- `--fail-on <critical|high|medium|low|info>` — exit code `10` when a finding
+  reaches that severity (build gating).
+- `--slack-webhook`, `--discord-webhook`, `--teams-webhook` — push a findings
+  summary to chat.
+- `--authorize <file>` — allowlist of authorized hosts/URL patterns (globs ok);
+  the target must match before any test runs (fail-closed). Every scan is
+  recorded to `audit.log` in the config dir.
+- Reports **redact** cookies/tokens/auth by default; pass `--no-redact` to keep
+  raw values.
+
 ---
 
 ## 🤝 Contributing

@@ -10338,6 +10338,12 @@ def main(argv=None):
                        help='Never test discovered URLs matching this regex (repeatable)')
     parser.add_argument('--safe-mode', action='store_true',
                        help='Skip noisy/DoS-flavored and state-changing techniques')
+    parser.add_argument('--authorize', metavar='FILE',
+                       help='Path to an allowlist of authorized hosts/URL patterns (one per '
+                            'line, globs ok). The target must match before any test runs.')
+    parser.add_argument('--no-redact', action='store_true',
+                       help='Do NOT redact secrets (cookies/tokens/auth) from saved reports '
+                            '(redaction is on by default)')
     parser.add_argument('--resume', action='store_true',
                        help='Resume an interrupted scan of this target from its checkpoint')
     # Exports
@@ -10356,6 +10362,8 @@ def main(argv=None):
     parser.add_argument('--import-burp', help='Seed the scan from a Burp items XML export')
     # Integrations
     parser.add_argument('--slack-webhook', help='Post a findings summary to a Slack incoming webhook')
+    parser.add_argument('--discord-webhook', help='Post a findings summary to a Discord webhook')
+    parser.add_argument('--teams-webhook', help='Post a findings summary to a Microsoft Teams incoming webhook')
     # AI (opt-in)
     parser.add_argument('--ai-triage', action='store_true', help='Run AI false-positive triage (needs ANTHROPIC_API_KEY)')
     parser.add_argument('--ai-report', help='Write an AI-generated markdown report to this path (needs ANTHROPIC_API_KEY)')
@@ -10409,6 +10417,15 @@ def main(argv=None):
     if args.dry_run:
         _print_dry_run_plan(args, no_color=no_color)
         return 0
+
+    # Authorization gate: when an allowlist is supplied, the target's host must
+    # match before any active test runs (fail-closed on empty/unreadable list).
+    if args.authorize:
+        from .authorization import load_allowlist, is_authorized
+        if not is_authorized(args.target, load_allowlist(args.authorize)):
+            print(f"[!] '{args.target}' is not in the authorization allowlist "
+                  f"({args.authorize}); refusing to scan.")
+            return 5
 
     # In --json/pipeline mode, keep stdout clean for machine consumption.
     if args.json:
@@ -10518,11 +10535,37 @@ def main(argv=None):
         scanner.oob_wait = max(0, args.oob_wait)
         scanner.resume = args.resume
 
+        # Audit record: a scan against this target is starting.
+        try:
+            from .authorization import audit_log
+            audit_log('scan_start', target=args.target, categories=selected_categories,
+                      safe_mode=args.safe_mode, authorized=bool(args.authorize))
+        except Exception:
+            pass
+
         # Run scan with selected categories
         results = scanner.scan(selected_categories)
 
         # CI gating: optionally exit non-zero (10) when findings reach a severity.
         fail_exit = _fail_on_exit(results, args.fail_on)
+
+        # Redact secrets (cookies/tokens/auth) from anything persisted or sent,
+        # unless explicitly disabled. The console summary uses raw `results`.
+        if args.no_redact:
+            out_results = results
+        else:
+            try:
+                from .redaction import redact_findings
+                out_results = redact_findings(results)
+            except Exception:
+                out_results = results
+
+        try:
+            from .authorization import audit_log
+            audit_log('scan_end', target=args.target, findings=len(results),
+                      bypasses=sum(1 for r in results if r.get('bypass')))
+        except Exception:
+            pass
 
         # Opt-in AI triage (annotates results with false-positive likelihood).
         if args.ai_triage:
@@ -10540,27 +10583,33 @@ def main(argv=None):
         if args.export:
             try:
                 from .exporters import export as _export
-                _export(results, args.target, args.export_format, args.export)
+                _export(out_results, args.target, args.export_format, args.export)
                 print(f"[+] Exported {args.export_format.upper()} to {args.export}")
             except Exception as e:
                 print(f"[!] Export failed: {e}")
 
-        # Push a findings summary to Slack.
-        if args.slack_webhook:
+        # Push a findings summary to chat integrations.
+        for _flag, _sender, _label in (
+            (args.slack_webhook, 'send_slack', 'Slack'),
+            (args.discord_webhook, 'send_discord', 'Discord'),
+            (args.teams_webhook, 'send_teams', 'Teams'),
+        ):
+            if not _flag:
+                continue
             try:
-                from .integrations import send_slack
-                if send_slack(args.slack_webhook, args.target, results):
-                    print("[+] Posted findings summary to Slack")
+                import wafpierce.integrations as _integ
+                if getattr(_integ, _sender)(_flag, args.target, out_results):
+                    print(f"[+] Posted findings summary to {_label}")
                 else:
-                    print("[!] Slack push failed (see logs)")
+                    print(f"[!] {_label} push failed (see logs)")
             except Exception as e:
-                logger.debug(f"Slack push error: {e}")
+                logger.debug(f"{_label} push error: {e}")
 
         # AI-written markdown report.
         if args.ai_report:
             try:
                 from .ai_triage import write_report
-                md = write_report(args.target, results, api_key=args.ai_key, model=args.ai_model)
+                md = write_report(args.target, out_results, api_key=args.ai_key, model=args.ai_model)
                 if md:
                     with open(args.ai_report, 'w', encoding='utf-8') as f:
                         f.write(md)
@@ -10572,10 +10621,10 @@ def main(argv=None):
 
         # Pipeline mode: emit machine-readable JSON to the real stdout and exit.
         if args.json:
-            _emit_json_stdout(results)
+            _emit_json_stdout(out_results)
             if args.output:
                 with open(args.output, 'w', encoding='utf-8') as f:
-                    json.dump(results, f, indent=2)
+                    json.dump(out_results, f, indent=2)
             sys.exit(fail_exit if fail_exit is not None else (0 if len(results) == 0 else 1))
 
         # Continuous monitoring: diff against the previous scan of this target.
@@ -10640,7 +10689,7 @@ def main(argv=None):
         # Save results
         if args.output:
             with open(args.output, 'w') as f:
-                json.dump(results, f, indent=2)
+                json.dump(out_results, f, indent=2)
             if not quiet:
                 print(f"\n[+] Results saved to {args.output}")
 
