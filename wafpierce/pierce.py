@@ -10146,15 +10146,145 @@ def create_scanner(target: str, db=None, use_db_extras: bool = True,
     return scanner
 
 
-def main():
-    """Standalone scanner with comprehensive error handling"""
+def _pretty_technique(method_name: str) -> str:
+    """Turn '_test_host_header_injection' into 'host header injection'."""
+    name = method_name
+    for prefix in ('_test_', '_'):
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+            break
+    return name.replace('_', ' ')
+
+
+def _resolve_categories(raw):
+    """Validate a comma-separated category string against SCAN_CATEGORIES.
+
+    Returns (selected_keys_or_None, invalid_list).
+    """
+    if not raw:
+        return None, []
+    requested = [c.strip() for c in raw.split(',') if c.strip()]
+    valid = list(SCAN_CATEGORIES.keys())
+    invalid = [c for c in requested if c not in valid]
+    selected = [c for c in requested if c in valid]
+    return (selected or None), invalid
+
+
+def _print_category_list() -> None:
+    print("Scan categories (use -c key1,key2 ...):\n")
+    for key, cat in SCAN_CATEGORIES.items():
+        n = len(cat.get('techniques', []))
+        print(f"  {key:<22} {n:>3} techniques   {cat.get('name', '')}")
+    print(f"\n  {len(SCAN_CATEGORIES)} categories total. "
+          f"`wafpierce scan --list-techniques` for the full breakdown.")
+
+
+def _print_technique_list() -> None:
+    skip = getattr(CloudFrontBypasser, 'SAFE_MODE_SKIP', set())
+    total = 0
+    print("Techniques by category ('*' = skipped under --safe-mode):\n")
+    for key, cat in SCAN_CATEGORIES.items():
+        techs = cat.get('techniques', [])
+        total += len(techs)
+        print(f"[{key}] {cat.get('name', '')}")
+        for t in techs:
+            mark = ' *' if t in skip else ''
+            print(f"    - {_pretty_technique(t)}{mark}")
+        print()
+    print(f"{total} techniques across {len(SCAN_CATEGORIES)} categories.")
+
+
+def _print_dry_run_plan(args, no_color: bool = False) -> None:
+    """Show the technique plan + effective settings for the given flags, no I/O."""
+    selected, invalid = _resolve_categories(getattr(args, 'categories', None))
+    if invalid:
+        print(f"[!] Unknown categories ignored: {', '.join(invalid)}")
+    cats = selected or list(SCAN_CATEGORIES.keys())
+    skip = getattr(CloudFrontBypasser, 'SAFE_MODE_SKIP', set()) if args.safe_mode else set()
+
+    proxies = []
+    if getattr(args, 'proxy_pool', None):
+        proxies = [p.strip() for p in args.proxy_pool.split(',') if p.strip()]
+    if getattr(args, 'tor', False):
+        proxies.append('socks5h://127.0.0.1:9050')
+    has_auth = any(getattr(args, k, None) for k in
+                   ('cookie', 'header', 'bearer', 'basic_auth', 'login_url'))
+    imports = [s for s in (getattr(args, 'import_har', None),
+                           getattr(args, 'import_postman', None),
+                           getattr(args, 'import_burp', None)) if s]
+
+    print(f"DRY RUN - plan for {args.target}\n")
+    print("Settings:")
+    print(f"  threads={args.threads}  delay={args.delay}s  timeout={args.timeout}s"
+          f"  jitter={args.jitter}s")
+    print(f"  impersonate={args.impersonate or 'off'}  oob={args.oob}"
+          f"  safe_mode={'on' if args.safe_mode else 'off'}  resume={'on' if args.resume else 'off'}")
+    print(f"  crawl={'off' if args.no_crawl else 'on'}  schema={'off' if args.no_schema else 'on'}"
+          f"  reconfirm={'off' if args.no_reconfirm else f'on(x{args.reconfirm_samples})'}"
+          f"  db_extras={'off' if args.no_db_extras else 'on'}")
+    print(f"  proxies={len(proxies)}  auth={'yes' if has_auth else 'no'}"
+          f"  imports={len(imports)}")
+    if args.scope_include:
+        print(f"  scope-include: {', '.join(args.scope_include)}")
+    if args.scope_exclude:
+        print(f"  scope-exclude: {', '.join(args.scope_exclude)}")
+
+    print("\nCategories & techniques that would run:")
+    total = 0
+    skipped = 0
+    for key in cats:
+        cat = SCAN_CATEGORIES.get(key)
+        if not cat:
+            continue
+        techs = cat.get('techniques', [])
+        running = [t for t in techs if t not in skip]
+        skipped += len(techs) - len(running)
+        total += len(running)
+        print(f"  [{key}] {cat.get('name', '')} - {len(running)} run"
+              + (f", {len(techs) - len(running)} skipped(safe-mode)" if (len(techs) - len(running)) else ""))
+        for t in running:
+            print(f"      - {_pretty_technique(t)}")
+
+    print(f"\nTotal: {total} techniques would run"
+          + (f" ({skipped} skipped by --safe-mode)" if skipped else "")
+          + f" across {len([k for k in cats if k in SCAN_CATEGORIES])} categories.")
+    print("(dry run - no requests were sent)")
+
+
+def main(argv=None):
+    """Standalone scanner with comprehensive error handling.
+
+    Accepts an explicit ``argv`` (list of args *after* the subcommand) so the
+    unified :mod:`wafpierce.cli` dispatcher can route ``wafpierce scan ...`` here;
+    falls back to ``sys.argv[1:]`` when run directly.
+    """
     from argparse import ArgumentParser
     import json
+    import os
     import sys
     from .error_handler import setup_logging
-    
-    parser = ArgumentParser(description='WAFPierce WAF Bypass Scanner')
+
+    if argv is None:
+        argv = sys.argv[1:]
+
+    no_color_env = bool(os.environ.get('NO_COLOR'))
+
+    # Pre-parse the informational flags that must work without a target.
+    if '-V' in argv or '--version' in argv:
+        from .diagnostics import print_version
+        print_version(no_color=('--no-color' in argv) or no_color_env)
+        return 0
+    if '--list-categories' in argv:
+        _print_category_list()
+        return 0
+    if '--list-techniques' in argv:
+        _print_technique_list()
+        return 0
+
+    parser = ArgumentParser(prog='wafpierce scan', description='WAFPierce WAF Bypass Scanner')
     parser.add_argument('target', help='Target URL')
+    parser.add_argument('-V', '--version', action='store_true',
+                       help='Show version + installed optional components, then exit')
     parser.add_argument('-t', '--threads', type=int, default=10, help='Number of threads')
     parser.add_argument('-d', '--delay', type=float, default=0.2, help='Delay between requests')
     parser.add_argument('--timeout', type=int, default=5, help='Request timeout in seconds')
@@ -10233,7 +10363,33 @@ def main():
     parser.add_argument('--login-url', help='Login URL to authenticate before scanning')
     parser.add_argument('--login-data', help='Login form data as urlencoded string (e.g. "user=a&pass=b")')
     parser.add_argument('--login-success', help='Substring expected in a successful login response')
-    args = parser.parse_args()
+    # Usability / output
+    parser.add_argument('--dry-run', action='store_true',
+                       help='Print the technique plan for the given flags/scope/safe-mode and exit '
+                            '(no requests sent)')
+    parser.add_argument('-q', '--quiet', action='store_true',
+                       help='Suppress per-finding output; print only a one-line summary')
+    parser.add_argument('--no-color', action='store_true',
+                       help='Disable emoji/colored decoration (also honors the NO_COLOR env var)')
+    parser.add_argument('--list-categories', action='store_true',
+                       help='List available scan categories and exit')
+    parser.add_argument('--list-techniques', action='store_true',
+                       help='List every technique grouped by category and exit')
+    args = parser.parse_args(argv)
+
+    # Late catch for informational flags (also handled pre-parse for no-target use).
+    if getattr(args, 'version', False):
+        from .diagnostics import print_version
+        print_version(no_color=args.no_color or no_color_env)
+        return 0
+
+    no_color = args.no_color or no_color_env
+    quiet = args.quiet
+
+    # Dry run: show exactly what would execute, then stop before any network I/O.
+    if args.dry_run:
+        _print_dry_run_plan(args, no_color=no_color)
+        return 0
 
     # In --json/pipeline mode, keep stdout clean for machine consumption.
     if args.json:
@@ -10410,69 +10566,62 @@ def main():
             except Exception as e:
                 logger.debug(f"Monitor error: {e}")
 
-        # Display results
-        print(f"\n{'='*60}")
-        print(f"[+] Scan Complete: Found {len(results)} findings")
-        print(f"{'='*60}\n")
-        
-        if results:
-            # Group by severity
-            critical = [r for r in results if r.get('severity') == 'CRITICAL']
-            high = [r for r in results if r.get('severity') == 'HIGH']
-            medium = [r for r in results if r.get('severity') == 'MEDIUM']
-            low = [r for r in results if r.get('severity') == 'LOW']
-            info = [r for r in results if r.get('severity') == 'INFO']
-            
-            # Count actual bypasses
-            bypasses = [r for r in results if r.get('bypass', False)]
-            detections = [r for r in results if r.get('category') in ['WAF_DETECTION', 'CDN_DETECTION', 'API_DISCOVERY']]
-            
-            print(f"📊 Summary:")
-            print(f"   Total Findings: {len(results)}")
-            print(f"   Actual Bypasses: {len(bypasses)}")
-            print(f"   WAF/CDN Detections: {len(detections)}")
-            print()
-            
-            if critical:
-                print(f"🔴 CRITICAL ({len(critical)}):")
-                for r in critical:
-                    print(f"  - {r['technique']}")
-                    print(f"    Reason: {r['reason']}")
-            
-            if high:
-                print(f"\n🟠 HIGH ({len(high)}):")
-                for r in high:
-                    print(f"  - {r['technique']}")
-                    print(f"    Reason: {r['reason']}")
-            
-            if medium:
-                print(f"\n🟡 MEDIUM ({len(medium)}):")
-                for r in medium:
-                    print(f"  - {r['technique']}")
-                    print(f"    Reason: {r['reason']}")
-            
-            if low:
-                print(f"\n🔵 LOW ({len(low)}):")
-                for r in low:
-                    print(f"  - {r['technique']}")
-                    if r.get('reason'):
-                        print(f"    Reason: {r['reason']}")
-            
-            if info:
-                print(f"\nℹ️  INFO ({len(info)}):")
-                for r in info:
-                    print(f"  - {r['technique']}")
-                    if r.get('reason'):
-                        print(f"    Reason: {r['reason']}")
+        # Group by severity (needed for both quiet and verbose summaries).
+        critical = [r for r in results if r.get('severity') == 'CRITICAL']
+        high = [r for r in results if r.get('severity') == 'HIGH']
+        medium = [r for r in results if r.get('severity') == 'MEDIUM']
+        low = [r for r in results if r.get('severity') == 'LOW']
+        info = [r for r in results if r.get('severity') == 'INFO']
+        bypasses = [r for r in results if r.get('bypass', False)]
+        detections = [r for r in results if r.get('category') in ['WAF_DETECTION', 'CDN_DETECTION', 'API_DISCOVERY']]
+
+        if quiet:
+            # One-line, pipe-friendly summary.
+            print(f"Found {len(results)} findings "
+                  f"(CRITICAL={len(critical)} HIGH={len(high)} MEDIUM={len(medium)} "
+                  f"LOW={len(low)} INFO={len(info)}; bypasses={len(bypasses)})")
         else:
-            print("✅ No bypasses found - target is properly protected")
-        
+            # Emoji decoration unless --no-color / NO_COLOR.
+            sev_icon = {
+                'summary': '' if no_color else '📊 ',
+                'CRITICAL': '[CRIT] ' if no_color else '🔴 ',
+                'HIGH': '[HIGH] ' if no_color else '🟠 ',
+                'MEDIUM': '[MED]  ' if no_color else '🟡 ',
+                'LOW': '[LOW]  ' if no_color else '🔵 ',
+                'INFO': '[INFO] ' if no_color else 'ℹ️  ',
+                'clean': '[OK] ' if no_color else '✅ ',
+            }
+            print(f"\n{'='*60}")
+            print(f"[+] Scan Complete: Found {len(results)} findings")
+            print(f"{'='*60}\n")
+
+            if results:
+                print(f"{sev_icon['summary']}Summary:")
+                print(f"   Total Findings: {len(results)}")
+                print(f"   Actual Bypasses: {len(bypasses)}")
+                print(f"   WAF/CDN Detections: {len(detections)}")
+                print()
+                for label, group, always_reason in (
+                    ('CRITICAL', critical, True), ('HIGH', high, True),
+                    ('MEDIUM', medium, True), ('LOW', low, False), ('INFO', info, False),
+                ):
+                    if not group:
+                        continue
+                    print(f"\n{sev_icon[label]}{label} ({len(group)}):")
+                    for r in group:
+                        print(f"  - {r['technique']}")
+                        if always_reason or r.get('reason'):
+                            print(f"    Reason: {r.get('reason', '')}")
+            else:
+                print(f"{sev_icon['clean']}No bypasses found - target is properly protected")
+
         # Save results
         if args.output:
             with open(args.output, 'w') as f:
                 json.dump(results, f, indent=2)
-            print(f"\n[+] Results saved to {args.output}")
-        
+            if not quiet:
+                print(f"\n[+] Results saved to {args.output}")
+
         # Return appropriate exit code
         sys.exit(0 if len(results) == 0 else 1)
     
@@ -10508,4 +10657,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

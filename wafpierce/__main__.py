@@ -1,7 +1,9 @@
-"""Package entrypoint for `python -m wafpierce`."""
+"""Package entrypoint for `python -m wafpierce` (routes through the unified CLI)."""
 
-from .chain import main
+import sys
+
+from .cli import main
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

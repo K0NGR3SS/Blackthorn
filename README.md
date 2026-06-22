@@ -105,10 +105,34 @@ pip3 install -e .
 
 ## 🖥️ Usage
 
-### Run UI
+### Run the GUI
 ```bash
-python3 run_gui.py  
+python3 run_gui.py
 ```
+
+### Command line
+
+After `pip install -e .` the unified `wafpierce` command exposes subcommands
+(all the documented scanner flags live under `scan`):
+
+```bash
+wafpierce scan https://target            # full technique scanner
+wafpierce scan https://target --impersonate chrome --oob interactsh
+wafpierce scan https://target --dry-run --safe-mode      # plan only, no requests
+wafpierce chain https://target           # bypass -> enum -> scan -> recon chain
+wafpierce doctor                         # environment preflight
+wafpierce gui                            # launch the desktop GUI
+wafpierce --version                      # version + which optional deps are installed
+```
+
+A bare `wafpierce https://target` (no subcommand) is treated as `scan`. Run
+`wafpierce scan -h` for the full flag list, or `wafpierce scan --list-techniques`
+to see every technique grouped by category.
+
+Without installing, the equivalent is `python3 -m wafpierce <command> ...`.
+
+Helpful flags: `--dry-run`, `--list-categories`, `--list-techniques`, `-q/--quiet`,
+`--no-color` (also honors the `NO_COLOR` env var).
 
 ---
 

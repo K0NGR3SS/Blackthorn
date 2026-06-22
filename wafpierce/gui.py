@@ -28,6 +28,7 @@ LOGO_PATH = os.path.join(os.path.dirname(__file__), 'logo_Temp', 'logo_wafpierce
 
 # Use shared config module
 from .config import get_gui_prefs_path
+from . import __version__
 
 
 # default settings, change if you want different ones for the application
@@ -1852,7 +1853,7 @@ def main() -> None:
             name_box.setSpacing(0)
             name_lbl = QLabel('WAFPierce')
             name_lbl.setObjectName('BrandName')
-            tag_lbl = QLabel('v1.5')
+            tag_lbl = QLabel(f"v{'.'.join(__version__.split('.')[:2])}")
             tag_lbl.setObjectName('BrandTag')
             name_box.addWidget(name_lbl)
             name_box.addWidget(tag_lbl)
@@ -1884,7 +1885,7 @@ def main() -> None:
                 lay.addWidget(btn)
 
             lay.addStretch()
-            ver = QLabel('v1.5.0')
+            ver = QLabel(f'v{__version__}')
             ver.setObjectName('SidebarVersion')
             lay.addWidget(ver)
             return bar

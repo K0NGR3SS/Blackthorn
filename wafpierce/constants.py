@@ -3,6 +3,8 @@ WAFPierce Application Constants
 Centralized constants for the entire application
 """
 
+from . import __version__
+
 # Timeouts (seconds)
 DEFAULT_TIMEOUT = 30
 SCAN_TIMEOUT = 60
@@ -29,7 +31,7 @@ QT_GEOMETRY = '1000x640'
 DEFAULT_FONT_SIZE = 12
 
 # Network
-DEFAULT_USER_AGENT = 'WAFPierce/1.5 (https://github.com/DrWAFPierce/WAFPierce)'
+DEFAULT_USER_AGENT = f'WAFPierce/{__version__} (https://github.com/K0NGR3SS/WAFPierce)'
 MAX_REDIRECTS = 5
 CONNECTION_POOL_CONNECTIONS = 10
 CONNECTION_POOL_MAXSIZE = 20

@@ -14,6 +14,8 @@ import html
 import datetime
 from typing import List, Dict, Any
 
+from . import __version__
+
 _SEV_TO_SARIF = {
     'CRITICAL': 'error', 'HIGH': 'error', 'MEDIUM': 'warning',
     'LOW': 'note', 'INFO': 'note',
@@ -69,7 +71,7 @@ def to_sarif(target: str, results: List[Dict[str, Any]]) -> str:
             'tool': {'driver': {
                 'name': 'WAFPierce',
                 'informationUri': 'https://github.com/K0NGR3SS/WAFPierce',
-                'version': '1.5',
+                'version': __version__,
                 'rules': list(rules.values()),
             }},
             'results': sarif_results,
