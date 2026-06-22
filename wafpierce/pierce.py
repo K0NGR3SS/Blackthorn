@@ -10411,6 +10411,10 @@ def main(argv=None):
     # Monitoring
     parser.add_argument('--monitor', action='store_true', help='After scanning, diff against the previous scan of this target')
     parser.add_argument('--webhook', help='Webhook URL for monitoring alerts')
+    parser.add_argument('--diff-against', metavar='PREV.json',
+                       help='Compare this scan against a previous results JSON and write an HTML diff')
+    parser.add_argument('--diff-out', metavar='OUT.html', default='wafpierce-diff.html',
+                       help='Output path for the --diff-against HTML diff (default: wafpierce-diff.html)')
     # Authenticated scanning
     parser.add_argument('--cookie', help='Cookie string to send on every request (e.g. "session=abc; csrf=xyz")')
     parser.add_argument('--header', action='append', default=[], help='Extra header "Name: value" (repeatable)')
@@ -10624,6 +10628,18 @@ def main(argv=None):
                 print(f"[+] Exported {args.export_format.upper()} to {args.export}")
             except Exception as e:
                 print(f"[!] Export failed: {e}")
+
+        # Standalone diff report against a previous scan's results JSON.
+        if args.diff_against:
+            try:
+                from .exporters import to_html_diff
+                with open(args.diff_against, 'r', encoding='utf-8') as f:
+                    prev = json.load(f)
+                with open(args.diff_out, 'w', encoding='utf-8') as f:
+                    f.write(to_html_diff(args.target, prev, out_results))
+                print(f"[+] Wrote scan diff to {args.diff_out}")
+            except Exception as e:
+                print(f"[!] Diff failed: {e}")
 
         # Push a findings summary to chat integrations.
         for _flag, _sender, _label in (

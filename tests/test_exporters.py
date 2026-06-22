@@ -3,7 +3,10 @@ import json
 
 import pytest
 
-from wafpierce.exporters import export, to_html, to_sarif, to_nuclei, to_junit, to_csv
+from wafpierce.exporters import (
+    export, to_html, to_sarif, to_nuclei, to_junit, to_csv,
+    diff_results, to_html_diff,
+)
 
 SAMPLE = [
     {
@@ -38,6 +41,45 @@ def test_html_includes_repro_and_confidence():
     assert 'Reproduce' in out          # the new column header
     assert 'curl -i -s -k' in out      # the repro command rendered
     assert 'conf-high' in out          # confidence badge
+
+
+def test_html_has_exec_summary_filters_and_copy():
+    out = to_html('https://t.example', SAMPLE)
+    assert 'Executive summary' in out
+    assert 'Confirmed bypasses' in out
+    assert "id=\"q\"" in out or "id='q'" in out      # search box
+    assert 'applyFilters' in out                      # filter script
+    assert 'copyRepro' in out                         # copy-curl button handler
+    assert "data-sev='HIGH'" in out                   # filterable row
+
+
+def test_html_cvss_tooltip_when_present():
+    findings = [{'severity': 'HIGH', 'technique': 'SQLi', 'category': 'injection',
+                 'cvss_score': '8.6', 'cvss_vector': 'AV:N/AC:L', 'cwe': 'CWE-89'}]
+    out = to_html('https://t', findings)
+    assert 'CVSS 8.6' in out
+    assert 'AV:N/AC:L' in out
+    assert 'CWE-89' in out
+
+
+# -------------------------------------------------------------------- diff report
+def test_diff_results_classifies():
+    old = [{'technique': 'A', 'category': 'c', 'path': '/'},
+           {'technique': 'B', 'category': 'c', 'path': '/'}]
+    new = [{'technique': 'B', 'category': 'c', 'path': '/'},
+           {'technique': 'C', 'category': 'c', 'path': '/'}]
+    d = diff_results(old, new)
+    assert [r['technique'] for r in d['new']] == ['C']
+    assert [r['technique'] for r in d['resolved']] == ['A']
+    assert [r['technique'] for r in d['unchanged']] == ['B']
+
+
+def test_html_diff_renders_counts():
+    old = [{'technique': 'A', 'category': 'c', 'path': '/', 'severity': 'HIGH'}]
+    new = [{'technique': 'C', 'category': 'c', 'path': '/', 'severity': 'LOW'}]
+    out = to_html_diff('https://t', old, new)
+    assert '+1 new' in out and '-1 resolved' in out
+    assert 'New findings (1)' in out and 'Resolved findings (1)' in out
 
 
 def test_json_export_survives_bytes_body():

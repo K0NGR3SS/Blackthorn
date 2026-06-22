@@ -139,6 +139,10 @@ Helpful flags: `--dry-run`, `--list-categories`, `--list-techniques`, `-q/--quie
   `nuclei`, `html`, `json`, `pdf`).
 - `--fail-on <critical|high|medium|low|info>` — exit code `10` when a finding
   reaches that severity (build gating).
+- `--diff-against prev.json [--diff-out diff.html]` — standalone HTML diff vs a
+  previous scan, highlighting new vs resolved findings.
+- The HTML report includes an executive summary, live search + severity/category
+  filters, CVSS hover tooltips, and copy-curl buttons.
 - `--slack-webhook`, `--discord-webhook`, `--teams-webhook` — push a findings
   summary to chat.
 - `--authorize <file>` — allowlist of authorized hosts/URL patterns (globs ok);
