@@ -103,6 +103,49 @@ def test_dry_run_bare_url_defaults_to_scan(capsys):
     assert 'categories' in out
 
 
+# ------------------------------------------------------------------ --profile
+def _ns(**kw):
+    import argparse
+    base = dict(profile=None, threads=10, delay=0.2, jitter=0.0,
+                safe_mode=False, impersonate=None)
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def test_profile_stealth_applies_when_defaults():
+    from wafpierce.pierce import _apply_profile
+    args = _ns(profile='stealth')
+    _apply_profile(args)
+    assert args.threads == 3 and args.jitter == 1.5
+    assert args.safe_mode is True and args.impersonate == 'chrome'
+
+
+def test_profile_does_not_override_explicit_flags():
+    from wafpierce.pierce import _apply_profile
+    # User explicitly set threads=50 and impersonate; profile must not clobber.
+    args = _ns(profile='aggressive', threads=50, impersonate='safari17_0')
+    _apply_profile(args)
+    assert args.threads == 50               # user value kept
+    assert args.impersonate == 'safari17_0'  # user value kept
+    assert args.delay == 0.0                # filled from preset (was default)
+
+
+def test_profile_dry_run_reflects_preset(capsys):
+    rc = cli.main(['scan', 'https://example.invalid', '--profile', 'stealth',
+                   '--dry-run', '-c', 'detection_recon'])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert 'threads=3' in out and 'jitter=1.5' in out
+    assert 'safe_mode=on' in out
+    assert 'impersonate=chrome' in out
+
+
+def test_seed_is_accepted(capsys):
+    rc = cli.main(['scan', 'https://example.invalid', '--seed', '42', '--dry-run'])
+    assert rc == 0
+    assert 'DRY RUN' in capsys.readouterr().out
+
+
 # -------------------------------------------------------------- --fail-on gate
 def test_fail_on_gating():
     from wafpierce.pierce import _fail_on_exit

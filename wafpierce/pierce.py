@@ -10194,6 +10194,30 @@ def _print_technique_list() -> None:
     print(f"{total} techniques across {len(SCAN_CATEGORIES)} categories.")
 
 
+# Per-profile presets. Each entry is applied only to args still at their CLI
+# default, so anything the user passes explicitly always wins.
+_PROFILE_PRESETS = {
+    'stealth':    {'threads': 3,  'delay': 1.0, 'jitter': 1.5, 'safe_mode': True,
+                   'impersonate': 'chrome'},
+    'normal':     {'threads': 10, 'delay': 0.2, 'jitter': 0.0, 'safe_mode': False},
+    'aggressive': {'threads': 30, 'delay': 0.0, 'jitter': 0.0, 'safe_mode': False},
+}
+# argparse defaults used to detect "user didn't set this".
+_ARG_DEFAULTS = {'threads': 10, 'delay': 0.2, 'jitter': 0.0, 'safe_mode': False,
+                 'impersonate': None}
+
+
+def _apply_profile(args) -> None:
+    """Fill in threads/delay/jitter/safe-mode/impersonate from --profile, but only
+    where the user left the CLI default (explicit flags take precedence)."""
+    preset = _PROFILE_PRESETS.get(getattr(args, 'profile', None) or '')
+    if not preset:
+        return
+    for key, value in preset.items():
+        if getattr(args, key, None) == _ARG_DEFAULTS.get(key):
+            setattr(args, key, value)
+
+
 def _fail_on_exit(results, fail_on) -> 'Optional[int]':
     """CI gating: return exit code 10 if any finding is at or above ``fail_on``
     severity, else ``None`` (caller uses its normal exit code)."""
@@ -10327,6 +10351,11 @@ def main(argv=None):
                             'target like chrome124 / safari17_0')
     parser.add_argument('--jitter', type=float, default=0.0, metavar='SECONDS',
                        help='Add up to N random seconds per request (rate-WAF evasion)')
+    parser.add_argument('--profile', choices=['stealth', 'normal', 'aggressive'],
+                       help='Bundle threads/delay/jitter/safe-mode (and impersonate for stealth) '
+                            'into one knob. Explicit flags you pass still win.')
+    parser.add_argument('--seed', type=int, metavar='N',
+                       help='Seed the RNG (jitter, UA/proxy rotation, mutations) for reproducible scans')
     parser.add_argument('--proxy-pool', help='Comma-separated proxy URLs to rotate per request '
                                              '(e.g. "http://a:8080,socks5h://b:1080")')
     parser.add_argument('--tor', action='store_true',
@@ -10412,6 +10441,14 @@ def main(argv=None):
 
     no_color = args.no_color or no_color_env
     quiet = args.quiet
+
+    # Resolve --profile presets (explicit flags win) before anything reads them.
+    _apply_profile(args)
+
+    # Deterministic RNG for reproducible scans (jitter/UA/proxy/mutation choices).
+    if args.seed is not None:
+        import random
+        random.seed(args.seed)
 
     # Dry run: show exactly what would execute, then stop before any network I/O.
     if args.dry_run:
