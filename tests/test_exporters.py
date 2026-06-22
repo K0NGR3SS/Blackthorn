@@ -5,7 +5,7 @@ import pytest
 
 from wafpierce.exporters import (
     export, to_html, to_sarif, to_nuclei, to_junit, to_csv,
-    diff_results, to_html_diff,
+    diff_results, to_html_diff, to_prometheus, to_har,
 )
 
 SAMPLE = [
@@ -100,10 +100,27 @@ def test_nuclei_is_nonempty_yaml_text():
     assert 'id:' in out or 'info:' in out
 
 
-@pytest.mark.parametrize('fmt', ['junit', 'csv'])
+@pytest.mark.parametrize('fmt', ['junit', 'csv', 'prometheus', 'har'])
 def test_new_formats_export_nonempty(fmt):
     out = export(SAMPLE, 'https://t.example', fmt)
     assert isinstance(out, str) and out.strip()
+
+
+def test_prometheus_exposition():
+    out = to_prometheus('https://t.example', SAMPLE)
+    assert '# TYPE wafpierce_findings_total gauge' in out
+    assert 'wafpierce_findings_total{target="https://t.example",severity="HIGH"} 1' in out
+    assert 'wafpierce_bypasses_total{target="https://t.example"} 1' in out
+
+
+def test_har_is_valid_and_importable():
+    out = to_har('https://t.example', SAMPLE)
+    doc = json.loads(out)
+    assert doc['log']['version'] == '1.2'
+    assert doc['log']['entries']
+    e = doc['log']['entries'][0]
+    assert e['request']['url'].startswith('https://t.example')
+    assert 'method' in e['request']
 
 
 def test_junit_is_wellformed_xml_with_failures():

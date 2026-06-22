@@ -162,8 +162,9 @@ oob = "interactsh"
 ```
 
 **CI / reporting / safety:**
-- `--export-format` now also supports `junit` and `csv` (alongside `sarif`,
-  `nuclei`, `html`, `json`, `pdf`).
+- `--export-format` now also supports `junit`, `csv`, `prometheus` (monitor-mode
+  textfile collector), and `har` (Burp/ZAP-importable) — alongside `sarif`,
+  `nuclei`, `html`, `json`, `pdf`.
 - `--fail-on <critical|high|medium|low|info>` — exit code `10` when a finding
   reaches that severity (build gating).
 - `--diff-against prev.json [--diff-out diff.html]` — standalone HTML diff vs a

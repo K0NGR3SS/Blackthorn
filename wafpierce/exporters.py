@@ -421,6 +421,69 @@ def to_csv(target: str, results: List[Dict[str, Any]]) -> str:
     return buf.getvalue()
 
 
+# ----------------------------------------------------------------- Prometheus
+def to_prometheus(target: str, results: List[Dict[str, Any]]) -> str:
+    """OpenMetrics/Prometheus text exposition for monitor-mode textfile collector."""
+    def esc(v: str) -> str:
+        return str(v).replace('\\', '\\\\').replace('"', '\\"')
+
+    counts = {s: 0 for s in _SEV_RANK}
+    for r in results:
+        sev = (r.get('severity') or 'INFO').upper()
+        counts[sev] = counts.get(sev, 0) + 1
+    bypasses = sum(1 for r in results if r.get('bypass'))
+    t = esc(target)
+    lines = [
+        '# HELP wafpierce_findings_total Findings from the last scan, by severity.',
+        '# TYPE wafpierce_findings_total gauge',
+    ]
+    for s in ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO']:
+        lines.append(f'wafpierce_findings_total{{target="{t}",severity="{s}"}} {counts.get(s, 0)}')
+    lines += [
+        '# HELP wafpierce_bypasses_total Confirmed bypasses from the last scan.',
+        '# TYPE wafpierce_bypasses_total gauge',
+        f'wafpierce_bypasses_total{{target="{t}"}} {bypasses}',
+        '# HELP wafpierce_findings All findings, total.',
+        '# TYPE wafpierce_findings gauge',
+        f'wafpierce_findings{{target="{t}"}} {len(results)}',
+    ]
+    return '\n'.join(lines) + '\n'
+
+
+# ------------------------------------------------------------- HAR (Burp/ZAP)
+def to_har(target: str, results: List[Dict[str, Any]]) -> str:
+    """HAR 1.2 log of the findings' requests — importable by Burp and ZAP."""
+    base = target.rstrip('/')
+    entries = []
+    for r in results:
+        method = str(r.get('method') or 'GET').upper()
+        url = base + (r.get('path') or '/')
+        entries.append({
+            'startedDateTime': datetime.datetime.now().isoformat(),
+            'time': 0,
+            'request': {
+                'method': method, 'url': url, 'httpVersion': 'HTTP/1.1',
+                'headers': [], 'queryString': [], 'cookies': [], 'headersSize': -1,
+                'bodySize': -1,
+            },
+            'response': {
+                'status': int(r.get('status') or 0), 'statusText': '',
+                'httpVersion': 'HTTP/1.1', 'headers': [], 'cookies': [],
+                'content': {'size': 0, 'mimeType': 'text/html'},
+                'redirectURL': '', 'headersSize': -1, 'bodySize': -1,
+            },
+            'cache': {},
+            'timings': {'send': 0, 'wait': 0, 'receive': 0},
+            'comment': f"{r.get('severity', 'INFO')} | {r.get('technique', '')} | {r.get('reason', '')}",
+        })
+    doc = {'log': {
+        'version': '1.2',
+        'creator': {'name': 'WAFPierce', 'version': __version__},
+        'entries': entries,
+    }}
+    return json.dumps(doc, indent=2, default=str)
+
+
 # ------------------------------------------------------------------ diff report
 def _finding_key(r: Dict[str, Any]):
     """Stable identity for a finding across two scans of the same target."""
@@ -511,6 +574,10 @@ def export(results: List[Dict[str, Any]], target: str, fmt: str, path: str = Non
         content = to_junit(target, results)
     elif fmt == 'csv':
         content = to_csv(target, results)
+    elif fmt in ('prometheus', 'metrics', 'openmetrics'):
+        content = to_prometheus(target, results)
+    elif fmt == 'har':
+        content = to_har(target, results)
     else:
         content = json.dumps(results, indent=2, default=str)
     if path:

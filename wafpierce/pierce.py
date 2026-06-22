@@ -10398,7 +10398,8 @@ def main(argv=None):
     # Exports
     parser.add_argument('--export', help='Write an extra export to this path (format from --export-format)')
     parser.add_argument('--export-format', default='html',
-                       choices=['sarif', 'nuclei', 'html', 'json', 'pdf', 'junit', 'csv'],
+                       choices=['sarif', 'nuclei', 'html', 'json', 'pdf', 'junit', 'csv',
+                                'prometheus', 'har'],
                        help='Format for --export (default: html)')
     parser.add_argument('--json', action='store_true', help='Print results as JSON to stdout (pipeline mode)')
     parser.add_argument('--fail-on', choices=['critical', 'high', 'medium', 'low', 'info'],
