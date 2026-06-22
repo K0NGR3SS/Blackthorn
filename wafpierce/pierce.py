@@ -1423,7 +1423,10 @@ class CloudFrontBypasser(ExtraTechniques):
         """
         logger.info(f"Starting scan of {self.target}")
         print(f"[*] Scanning {self.target}")
-        
+
+        # Start the clock for the optional --max-time budget.
+        self._scan_start = time.monotonic()
+
         # Establish baseline first
         print("[*] Establishing baseline...")
         try:
@@ -1740,9 +1743,18 @@ class CloudFrontBypasser(ExtraTechniques):
         # pool, so total in-flight requests never exceed self.threads (no nested
         # pool explosion). The adaptive limiter throttles further under WAF pushback.
         error_count = 0
+        max_time = getattr(self, 'max_time', 0) or 0
         self._executor = ThreadPoolExecutor(max_workers=self.threads)
         try:
-            for technique in techniques:
+            for idx, technique in enumerate(techniques):
+                # Overall scan budget: stop launching new techniques past the deadline.
+                if max_time and (time.monotonic() - self._scan_start) > max_time:
+                    remaining = len(techniques) - idx
+                    msg = (f"--max-time {max_time}s reached after {idx} technique(s); "
+                           f"skipping {remaining} remaining")
+                    logger.warning(msg)
+                    print(f"\n[!] {msg}")
+                    break
                 tname = getattr(technique, '__name__', '?')
                 if self.resume and tname in self._completed_techniques:
                     continue
@@ -10343,6 +10355,9 @@ def main(argv=None):
                        help='Skip the bypass re-confirmation pass (faster, more false positives)')
     parser.add_argument('--reconfirm-samples', type=int, default=2,
                        help='Replays per candidate bypass during re-confirmation (default: 2)')
+    parser.add_argument('--max-time', type=int, default=0, metavar='SECONDS',
+                       help='Overall scan budget: stop launching new techniques after N seconds '
+                            '(0 = no limit). Findings so far are still reported.')
     # Evasion: TLS/HTTP2 fingerprint impersonation (needs curl_cffi)
     parser.add_argument('--impersonate', nargs='?', const='chrome', default=None,
                        metavar='BROWSER',
@@ -10575,6 +10590,7 @@ def main(argv=None):
         scanner.reconfirm_samples = max(1, args.reconfirm_samples)
         scanner.oob_wait = max(0, args.oob_wait)
         scanner.resume = args.resume
+        scanner.max_time = max(0, args.max_time)
 
         # Audit record: a scan against this target is starting.
         try:

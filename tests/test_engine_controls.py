@@ -63,6 +63,26 @@ def test_safe_mode_flag_stored(mock_waf):
     assert s.safe_mode is True
 
 
+# -- max-time budget ------------------------------------------------------ #
+def test_max_time_stops_before_techniques(mock_waf, capsys):
+    # A microscopic budget expires before the technique loop starts, so it
+    # breaks on the first iteration and reports the remaining count.
+    s = CloudFrontBypasser(mock_waf, threads=2, delay=0, timeout=3)
+    s.reconfirm = False
+    s.max_time = 1e-6
+    results = s.scan(['injection_testing', 'header_manipulation'])
+    out = capsys.readouterr().out
+    assert '--max-time' in out and 'reached' in out
+    assert 'skipping' in out
+    assert isinstance(results, list)
+
+
+def test_max_time_zero_is_unlimited(mock_waf):
+    # Default (0) must not impose any limit / break early.
+    s = CloudFrontBypasser(mock_waf, threads=2, delay=0, timeout=3)
+    assert getattr(s, 'max_time', 0) in (0, None)
+
+
 # -- jitter / proxy pool -------------------------------------------------- #
 def test_jitter_attribute(mock_waf):
     s = CloudFrontBypasser(mock_waf, threads=2, delay=0, timeout=3, jitter=0.05)
