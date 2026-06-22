@@ -31,6 +31,59 @@ from .config import get_gui_prefs_path
 from . import __version__
 
 
+# --------------------------------------------------------------------------- #
+# Pure helpers (no Qt dependency) — kept at module scope so they're unit-testable
+# without importing PySide6.
+# --------------------------------------------------------------------------- #
+def _finding_url(finding: dict) -> str:
+    """Best-effort absolute URL for a finding."""
+    url = finding.get('url') or finding.get('request_url')
+    if url:
+        return str(url)
+    target = (finding.get('target') or '').rstrip('/')
+    path = finding.get('path') or '/'
+    return f"{target}{path}" if target else str(path)
+
+
+def _finding_to_curl(finding: dict) -> str:
+    """Reproduction curl for a finding — prefer the engine's recorded one."""
+    curl = finding.get('curl')
+    if curl:
+        return str(curl)
+    method = str(finding.get('method') or 'GET').upper()
+    headers = finding.get('request_headers') or finding.get('headers') or {}
+    parts = ['curl', '-i', '-s', '-k', '-X', method]
+    if isinstance(headers, dict):
+        for k, v in headers.items():
+            parts.append('-H')
+            parts.append(f"'{k}: {v}'")
+    parts.append(f"'{_finding_url(finding)}'")
+    return ' '.join(parts)
+
+
+def _finding_to_python(finding: dict) -> str:
+    """A copy-pasteable Python `requests` snippet reproducing the finding."""
+    method = str(finding.get('method') or 'GET').upper()
+    url = _finding_url(finding)
+    headers = finding.get('request_headers') or finding.get('headers') or {}
+    headers = headers if isinstance(headers, dict) else {}
+    body = finding.get('request_body') or finding.get('data')
+    lines = [
+        "import requests",
+        "",
+        "resp = requests.request(",
+        f"    {method!r}, {url!r},",
+    ]
+    if headers:
+        lines.append(f"    headers={headers!r},")
+    if body:
+        lines.append(f"    data={body!r},")
+    lines.append("    verify=False, allow_redirects=False, timeout=20,")
+    lines.append(")")
+    lines.append("print(resp.status_code, len(resp.content))")
+    return '\n'.join(lines)
+
+
 # default settings, change if you want different ones for the application
 def _load_prefs() -> dict:
     path = get_gui_prefs_path()
@@ -1873,6 +1926,7 @@ def main() -> None:
                 ('scan', '◉', 'Scan', lambda: self.target_edit.setFocus(), True),
                 ('dashboard', '▦', 'Dashboard', self._show_dashboard, False),
                 ('results', '◆', 'Results', self.show_results_summary, False),
+                ('repeater', '↻', 'Repeater', self._show_repeater_dialog, False),
                 ('payloads', '⚑', 'Payloads', self._show_payloads_dialog, False),
                 ('schedule', '◷', 'Schedule', self._show_scheduled_scans_dialog, False),
                 ('timeline', '☰', 'Timeline', self._show_timeline_viewer, False),
@@ -4448,6 +4502,38 @@ def main() -> None:
             def collapse_all():
                 results_tree.collapseAll()
             
+            # Right-click a finding: copy-as-curl / copy-as-Python / send to Repeater.
+            def _results_context_menu(point):
+                from PySide6.QtWidgets import QMenu
+                from PySide6.QtGui import QGuiApplication
+                item = results_tree.itemAt(point)
+                if not item or item.childCount() > 0:
+                    return
+                r = item.data(0, 257)
+                if not r:
+                    return
+                menu = QMenu(results_tree)
+                a_curl = menu.addAction('Copy as curl')
+                a_py = menu.addAction('Copy as Python requests')
+                a_reason = menu.addAction('Copy reason')
+                menu.addSeparator()
+                a_rep = menu.addAction('Send to Repeater')
+                chosen = menu.exec(results_tree.viewport().mapToGlobal(point))
+                if chosen is None:
+                    return
+                cb = QGuiApplication.clipboard()
+                if chosen == a_curl:
+                    cb.setText(_finding_to_curl(r))
+                elif chosen == a_py:
+                    cb.setText(_finding_to_python(r))
+                elif chosen == a_reason:
+                    cb.setText(str(r.get('reason', '')))
+                elif chosen == a_rep:
+                    self._show_repeater_dialog(prefill=r)
+
+            results_tree.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+            results_tree.customContextMenuRequested.connect(_results_context_menu)
+
             # Connect signals
             site_list.currentItemChanged.connect(on_site_selected)
             sort_combo.currentIndexChanged.connect(lambda: update_results_tree())
@@ -4512,6 +4598,153 @@ def main() -> None:
             except Exception as e:
                 QMessageBox.critical(self, _t('export_failed', self._lang), str(e))
         
+        def _show_repeater_dialog(self, prefill: Optional[dict] = None):
+            """A built-in Repeater: craft a request, send it, inspect the response.
+
+            Requests run on a worker thread; the UI polls the future with a QTimer
+            so the window never freezes during a slow request.
+            """
+            from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QComboBox,
+                                           QLineEdit, QPlainTextEdit, QPushButton, QLabel,
+                                           QSplitter)
+            from PySide6.QtCore import Qt, QTimer
+
+            dlg = QDialog(self)
+            dlg.setWindowTitle('↻ Repeater')
+            dlg.resize(1040, 760)
+            dlg.setStyleSheet("""
+                QDialog { background-color: #0f1112; }
+                QLabel { color: #9aa4b2; font-size: 11px; }
+                QComboBox, QLineEdit, QPlainTextEdit { background-color: #16181a; color: #d7e1ea;
+                    border: 1px solid #2b2f33; border-radius: 4px; padding: 6px;
+                    font-family: 'Consolas','Menlo',monospace; }
+                QPushButton { background-color: #1f6feb; color: #fff; border: none;
+                    padding: 8px 18px; border-radius: 4px; }
+                QPushButton:hover { background-color: #388bfd; }
+                QPushButton:disabled { background-color: #2b2f33; color: #6b7280; }
+            """)
+            root = QVBoxLayout(dlg)
+
+            # Request line: method + URL + send
+            row = QHBoxLayout()
+            method = QComboBox()
+            method.addItems(['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'])
+            url = QLineEdit()
+            url.setPlaceholderText('https://target/path')
+            send_btn = QPushButton('Send')
+            row.addWidget(method)
+            row.addWidget(url, 1)
+            row.addWidget(send_btn)
+            root.addLayout(row)
+
+            # Prefill from a finding or the current scan target.
+            try:
+                if prefill:
+                    method.setCurrentText(str(prefill.get('method') or 'GET').upper())
+                    url.setText(_finding_url(prefill))
+                else:
+                    t = self.target_edit.text().strip()
+                    if t:
+                        url.setText(t)
+            except Exception:
+                pass
+
+            splitter = QSplitter(Qt.Vertical)
+
+            req_box = QtWidgets.QWidget()
+            req_lay = QVBoxLayout(req_box)
+            req_lay.setContentsMargins(0, 0, 0, 0)
+            req_lay.addWidget(QLabel('REQUEST HEADERS  (one per line: Name: value)'))
+            headers_edit = QPlainTextEdit()
+            headers_edit.setPlaceholderText('User-Agent: WAFPierce-Repeater\nX-Forwarded-For: 127.0.0.1')
+            headers_edit.setMaximumHeight(150)
+            req_lay.addWidget(headers_edit)
+            req_lay.addWidget(QLabel('REQUEST BODY  (optional)'))
+            body_edit = QPlainTextEdit()
+            body_edit.setMaximumHeight(120)
+            req_lay.addWidget(body_edit)
+            splitter.addWidget(req_box)
+
+            resp_box = QtWidgets.QWidget()
+            resp_lay = QVBoxLayout(resp_box)
+            resp_lay.setContentsMargins(0, 0, 0, 0)
+            status_label = QLabel('Ready.')
+            status_label.setStyleSheet('color:#d7e1ea; font-size:12px; padding:2px;')
+            resp_lay.addWidget(status_label)
+            response_edit = QPlainTextEdit()
+            response_edit.setReadOnly(True)
+            resp_lay.addWidget(response_edit, 1)
+            splitter.addWidget(resp_box)
+            splitter.setSizes([300, 400])
+            root.addWidget(splitter, 1)
+
+            pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+            state = {'fut': None}
+            timer = QTimer(dlg)
+
+            def _send():
+                m = method.currentText()
+                u = url.text().strip()
+                # Tolerate a pasted "URL:" label and a missing scheme.
+                if u.lower().startswith('url:'):
+                    u = u[4:].strip()
+                if u and '://' not in u:
+                    u = 'https://' + u
+                    url.setText(u)
+                if not u:
+                    status_label.setText('Enter a URL first.')
+                    return
+                hdrs = {}
+                for line in headers_edit.toPlainText().splitlines():
+                    if ':' in line:
+                        k, v = line.split(':', 1)
+                        if k.strip():
+                            hdrs[k.strip()] = v.strip()
+                data = body_edit.toPlainText() or None
+
+                def _work():
+                    import time as _time
+                    import requests
+                    try:
+                        import urllib3
+                        urllib3.disable_warnings()
+                    except Exception:
+                        pass
+                    t0 = _time.monotonic()
+                    r = requests.request(m, u, headers=hdrs or None,
+                                         data=data.encode() if data else None,
+                                         timeout=20, verify=False, allow_redirects=False)
+                    return r, (_time.monotonic() - t0)
+
+                send_btn.setEnabled(False)
+                status_label.setText(f'Sending {m} {u} …')
+                response_edit.clear()
+                state['fut'] = pool.submit(_work)
+                timer.start(100)
+
+            def _poll():
+                fut = state.get('fut')
+                if not fut or not fut.done():
+                    return
+                timer.stop()
+                send_btn.setEnabled(True)
+                try:
+                    r, dt = fut.result()
+                    status_label.setText(
+                        f"HTTP {r.status_code} {r.reason}   •   {len(r.content)} bytes   •   {dt*1000:.0f} ms")
+                    hdr_txt = '\n'.join(f"{k}: {v}" for k, v in r.headers.items())
+                    body_txt = r.text if len(r.text) <= 200000 else r.text[:200000] + '\n…(truncated)'
+                    response_edit.setPlainText(f"{hdr_txt}\n\n{body_txt}")
+                except Exception as e:
+                    status_label.setText('Request failed.')
+                    response_edit.setPlainText(f"{type(e).__name__}: {e}")
+
+            timer.timeout.connect(_poll)
+            send_btn.clicked.connect(_send)
+            url.returnPressed.connect(_send)
+            dlg.finished.connect(lambda *_: (timer.stop(), pool.shutdown(wait=False)))
+            dlg.exec()
+
         def _show_http_log_dialog(self):
             """Show HTTP request/response log in a dialog."""
             if not self._http_log:
