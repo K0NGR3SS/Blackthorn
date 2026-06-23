@@ -1957,6 +1957,7 @@ def main() -> None:
                 ('scan', '◉', 'Scan', lambda: self.target_edit.setFocus(), True),
                 ('dashboard', '▦', 'Dashboard', self._show_dashboard, False),
                 ('results', '◆', 'Results', self.show_results_summary, False),
+                ('live', '◰', 'Live', self._show_live_findings, False),
                 ('repeater', '↻', 'Repeater', self._show_repeater_dialog, False),
                 ('payloads', '⚑', 'Payloads', self._show_payloads_dialog, False),
                 ('schedule', '◷', 'Schedule', self._show_scheduled_scans_dialog, False),
@@ -3303,6 +3304,12 @@ def main() -> None:
                                 self._db.add_result(self._current_scan_id, result)
                             except Exception:
                                 pass
+                    # Live findings window: refresh whenever it exists (per-target).
+                    try:
+                        if getattr(self, '_live_window', None) is not None:
+                            self._live_refresh()
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
@@ -3348,6 +3355,12 @@ def main() -> None:
             self.start_btn.setEnabled(True)
             self.stop_btn.setEnabled(False)
             self._notify_scan_complete()
+            # Make sure the live findings window reflects the final results.
+            try:
+                if getattr(self, '_live_window', None) is not None:
+                    self._live_refresh()
+            except Exception:
+                pass
             try:
                 self.threads_spin.setEnabled(True)
                 self.delay_spin.setEnabled(True)
@@ -4754,6 +4767,98 @@ def main() -> None:
             except Exception as e:
                 QMessageBox.critical(self, _t('export_failed', self._lang), str(e))
         
+        # severity palette shared by the live findings window
+        _LIVE_COLORS = {'CRITICAL': '#dc2626', 'HIGH': '#ea580c', 'MEDIUM': '#ca8a04',
+                        'LOW': '#2563eb', 'INFO': '#6b7280'}
+        _LIVE_ICONS = {'CRITICAL': '\U0001F534', 'HIGH': '\U0001F7E0', 'MEDIUM': '\U0001F7E1',
+                       'LOW': '\U0001F535', 'INFO': 'ℹ️'}
+        _LIVE_ORDER = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3, 'INFO': 4}
+
+        def _live_refresh(self):
+            """Rebuild the live findings tree from self._results honoring the filter."""
+            tree = getattr(self, '_live_tree', None)
+            if tree is None:
+                return
+            from PySide6.QtWidgets import QTreeWidgetItem
+            from PySide6.QtGui import QBrush, QColor
+            flt = self._live_filter.currentText() if getattr(self, '_live_filter', None) else 'All'
+
+            def keep(r):
+                sev = str(r.get('severity', 'INFO')).upper()
+                if flt == 'All':
+                    return True
+                if flt == 'Bypasses only':
+                    return bool(r.get('bypass'))
+                return sev == flt
+
+            rows = list(self._results)
+            shown = sorted((r for r in rows if keep(r)),
+                           key=lambda r: self._LIVE_ORDER.get(str(r.get('severity', 'INFO')).upper(), 5))
+            tree.clear()
+            for r in shown:
+                sev = str(r.get('severity', 'INFO')).upper()
+                tech = r.get('technique', '')
+                if r.get('bypass'):
+                    tech = '✅ ' + str(tech)
+                item = QTreeWidgetItem([f"{self._LIVE_ICONS.get(sev, '')} {sev}", str(tech),
+                                        str(r.get('category', '')), str(r.get('reason', ''))])
+                try:
+                    item.setForeground(0, QBrush(QColor(self._LIVE_COLORS.get(sev, '#ffffff'))))
+                except Exception:
+                    pass
+                item.setData(0, 257, r)  # for the context menu / send-to-repeater
+                tree.addTopLevelItem(item)
+            if getattr(self, '_live_count_lbl', None):
+                byp = sum(1 for r in rows if r.get('bypass'))
+                self._live_count_lbl.setText(
+                    f"{len(rows)} findings  •  {byp} bypasses  •  showing {len(shown)}")
+
+        def _show_live_findings(self):
+            """Open (or focus) a live, color-coded, filterable findings window."""
+            from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QComboBox,
+                                           QLabel, QTreeWidget, QHeaderView)
+            from PySide6.QtCore import Qt
+            if getattr(self, '_live_window', None) is None:
+                win = QDialog(self)
+                win.setWindowTitle('◰ Live Findings')
+                win.resize(940, 620)
+                win.setWindowModality(Qt.NonModal)
+                win.setStyleSheet("""
+                    QDialog { background-color: #0f1112; }
+                    QLabel { color: #d7e1ea; font-size: 12px; }
+                    QComboBox { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33;
+                        border-radius: 4px; padding: 4px 8px; }
+                    QTreeWidget { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; }
+                    QTreeWidget::item { padding: 3px; }
+                    QTreeWidget::item:selected { background-color: #3b82f6; }
+                """)
+                v = QVBoxLayout(win)
+                top = QHBoxLayout()
+                self._live_count_lbl = QLabel('0 findings')
+                top.addWidget(self._live_count_lbl)
+                top.addStretch()
+                top.addWidget(QLabel('Filter:'))
+                self._live_filter = QComboBox()
+                self._live_filter.addItems(['All', 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO',
+                                            'Bypasses only'])
+                self._live_filter.currentIndexChanged.connect(lambda *_: self._live_refresh())
+                top.addWidget(self._live_filter)
+                v.addLayout(top)
+                self._live_tree = QTreeWidget()
+                self._live_tree.setColumnCount(4)
+                self._live_tree.setHeaderLabels(['Severity', 'Technique', 'Category', 'Reason'])
+                self._live_tree.setAlternatingRowColors(True)
+                try:
+                    self._live_tree.header().setSectionResizeMode(3, QHeaderView.Stretch)
+                except Exception:
+                    pass
+                v.addWidget(self._live_tree, 1)
+                self._live_window = win
+            self._live_refresh()
+            self._live_window.show()
+            self._live_window.raise_()
+            self._live_window.activateWindow()
+
         def _show_repeater_dialog(self, prefill: Optional[dict] = None):
             """A built-in Repeater: craft a request, send it, inspect the response.
 
