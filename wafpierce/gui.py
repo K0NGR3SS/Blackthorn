@@ -1394,6 +1394,9 @@ def main() -> None:
                 flags.append('--ai-triage')
             if opts.get('ai_model'):
                 flags.extend(['--ai-model', str(opts['ai_model'])])
+            # Caido proxy passthrough — route every scan request through Caido.
+            if opts.get('caido_proxy'):
+                flags.extend(['--proxy-pool', str(opts['caido_proxy'])])
             # NB: the API key is passed via the ANTHROPIC_API_KEY env var (set in
             # run()), never as a CLI flag (which would be visible in the process list).
             return flags
@@ -1725,14 +1728,14 @@ def main() -> None:
             except Exception:
                 self._prefs = {'theme': 'dark', 'font_size': 11}
             try:
-                size = self._prefs.get('qt_geometry', '1000x640')
+                size = self._prefs.get('qt_geometry', '1240x780')
                 if isinstance(size, str) and 'x' in size:
                     w, h = size.split('x', 1)
                     self.resize(int(float(w)), int(float(h)))
                 else:
-                    self.resize(1000, 640)
+                    self.resize(1240, 780)
             except Exception:
-                self.resize(1000, 640)
+                self.resize(1240, 780)
             self._build_ui()
             self._setup_keyboard_shortcuts()
             try:
@@ -1767,16 +1770,16 @@ def main() -> None:
                 QShortcut(QKeySequence('Ctrl+I'), self, self._import_targets_dialog)
                 
                 # Ctrl+D - Dashboard
-                QShortcut(QKeySequence('Ctrl+D'), self, self._show_dashboard)
+                QShortcut(QKeySequence('Ctrl+D'), self, lambda: self._navigate('dashboard'))
                 
                 # Ctrl+E - Results explorer
-                QShortcut(QKeySequence('Ctrl+E'), self, self.show_results_summary)
+                QShortcut(QKeySequence('Ctrl+E'), self, lambda: self._navigate('results'))
                 
                 # Ctrl+, - Settings
-                QShortcut(QKeySequence('Ctrl+,'), self, self._open_qt_settings)
+                QShortcut(QKeySequence('Ctrl+,'), self, lambda: self._navigate('settings'))
                 
                 # Ctrl+P - Custom Payloads
-                QShortcut(QKeySequence('Ctrl+P'), self, self._show_payloads_dialog)
+                QShortcut(QKeySequence('Ctrl+P'), self, lambda: self._navigate('payloads'))
                 
                 # Escape - Stop scan
                 QShortcut(QKeySequence('Escape'), self, self.stop_scan)
@@ -1785,10 +1788,10 @@ def main() -> None:
                 QShortcut(QKeySequence('F5'), self, self.start_scan)
                 
                 # Ctrl+L - Timeline
-                QShortcut(QKeySequence('Ctrl+L'), self, self._show_timeline_viewer)
-                
+                QShortcut(QKeySequence('Ctrl+L'), self, lambda: self._navigate('timeline'))
+
                 # Ctrl+M - Plugin Manager
-                QShortcut(QKeySequence('Ctrl+M'), self, self._show_plugin_manager)
+                QShortcut(QKeySequence('Ctrl+M'), self, lambda: self._navigate('plugins'))
                 
             except Exception:
                 pass
@@ -1953,20 +1956,32 @@ def main() -> None:
 
             # Nav items map to existing actions/dialogs.
             self._nav_buttons = {}
+            # (key, glyph, label, active) — every button routes through
+            # _navigate(key), which swaps the central page in place.
             nav_items = [
-                ('scan', '◉', 'Scan', lambda: self.target_edit.setFocus(), True),
-                ('dashboard', '▦', 'Dashboard', self._show_dashboard, False),
-                ('results', '◆', 'Results', self.show_results_summary, False),
-                ('live', '◰', 'Live', self._show_live_findings, False),
-                ('repeater', '↻', 'Repeater', self._show_repeater_dialog, False),
-                ('payloads', '⚑', 'Payloads', self._show_payloads_dialog, False),
-                ('schedule', '◷', 'Schedule', self._show_scheduled_scans_dialog, False),
-                ('timeline', '☰', 'Timeline', self._show_timeline_viewer, False),
-                ('plugins', '❖', 'Plugins', self._show_plugin_manager, False),
-                ('settings', '⚙', 'Settings', self._open_qt_settings, False),
+                ('scan', '◉', 'Scan', True),
+                ('pipeline', '⛓', 'Pipeline', False),
+                ('recon', '◈', 'Recon', False),
+                ('browser', '◍', 'Browser', False),
+                ('fuzzer', '⌗', 'Fuzzer', False),
+                ('secrets', '⚷', 'Secrets', False),
+                ('sqli', '⛁', 'SQLi', False),
+                ('dashboard', '▦', 'Dashboard', False),
+                ('results', '◆', 'Results', False),
+                ('live', '◰', 'Live', False),
+                ('repeater', '↻', 'Repeater', False),
+                ('payloads', '⚑', 'Payloads', False),
+                ('schedule', '◷', 'Schedule', False),
+                ('timeline', '☰', 'Timeline', False),
+                ('plugins', '❖', 'Plugins', False),
+                ('settings', '⚙', 'Settings', False),
             ]
-            for key, glyph, label, slot, active in nav_items:
-                btn = self._nav_button(glyph, label, slot, active)
+            for key, glyph, label, active in nav_items:
+                # All sections route through the single-page navigator so the
+                # central panel swaps in place instead of opening dialogs.
+                btn = self._nav_button(glyph, label,
+                                       (lambda checked=False, k=key: self._navigate(k)),
+                                       active)
                 self._nav_buttons[key] = btn
                 lay.addWidget(btn)
 
@@ -1988,11 +2003,29 @@ def main() -> None:
 
             content = QWidget()
             content.setObjectName('Content')
-            v = QVBoxLayout(content)
+            content_outer = QVBoxLayout(content)
+            content_outer.setContentsMargins(0, 0, 0, 0)
+            content_outer.setSpacing(0)
+            root.addWidget(content, 1)
+
+            # Single-page shell: every nav section is a page in this stack, so
+            # switching sections never tears down a running scan/recon — the
+            # worker thread and recon QProcess live on the app, not the page.
+            self._stack = QtWidgets.QStackedWidget()
+            content_outer.addWidget(self._stack)
+            self._pages = {}          # key -> built page widget (cached)
+            self._page_keys = []      # nav order (for reference)
+
+            # Page 0 = the Scan view (the existing scan UI builds into `v`).
+            scan_page = QWidget()
+            scan_page.setObjectName('ScanPage')
+            v = QVBoxLayout(scan_page)
             v.setContentsMargins(22, 20, 22, 20)
             v.setSpacing(14)
             self._layout_main = v
-            root.addWidget(content, 1)
+            scan_holder = self._wrap_scroll(scan_page)
+            self._stack.addWidget(scan_holder)
+            self._pages['scan'] = scan_holder
 
             # top controls
             top = QHBoxLayout()
@@ -2234,7 +2267,7 @@ def main() -> None:
                 }
             '''
             self.results_btn.setStyleSheet(self._results_btn_base_style)
-            self.results_btn.clicked.connect(self.show_results_summary)
+            self.results_btn.clicked.connect(lambda: self._navigate('results'))
             right_v.addWidget(self.results_btn)
             
             # Setup pulsating animation for Results button
@@ -2287,6 +2320,120 @@ def main() -> None:
             bottom.addWidget(self.save_btn)
             bottom.addWidget(self.clean_btn)
             v.addLayout(bottom)
+
+            # Scheduler: poll once a minute for due scheduled jobs (scan or recon).
+            try:
+                self._sched_timer = QTimer(self)
+                self._sched_timer.timeout.connect(self._check_due_schedules)
+                self._sched_timer.start(60000)
+            except Exception:
+                pass
+
+        # ------------------------------------------------------------------ #
+        # Single-page navigation framework
+        # ------------------------------------------------------------------ #
+        def _page_builders(self):
+            """key -> zero-arg builder returning a QWidget page. Resolved by
+            convention (`_build_<key>_page`); only implemented builders register,
+            so any section without one falls back to its legacy dialog. This lets
+            sections migrate to in-place pages one at a time without breakage."""
+            keys = ['pipeline', 'recon', 'browser', 'fuzzer', 'secrets', 'sqli',
+                    'repeater', 'payloads', 'plugins', 'schedule', 'timeline',
+                    'dashboard', 'results', 'live', 'settings']
+            out = {}
+            for k in keys:
+                fn = getattr(self, f'_build_{k}_page', None)
+                if callable(fn):
+                    out[k] = fn
+            return out
+
+        def _legacy_actions(self):
+            """Fallback dialog openers for any section without a page builder.
+
+            Every nav section now has a `_build_<key>_page`, so this is normally
+            empty; it remains as a safety net (resolved by getattr) for any future
+            section added before its page builder exists."""
+            mapping = {}
+            out = {}
+            for key, name in mapping.items():
+                fn = getattr(self, name, None)
+                if callable(fn):
+                    out[key] = fn
+            return out
+
+        def _navigate(self, key):
+            """Switch the central panel to section ``key`` without disturbing any
+            background work. Pages are built once and cached."""
+            if key == 'scan':
+                page = self._pages.get('scan')
+                if page is not None:
+                    self._stack.setCurrentWidget(page)
+                self._highlight_nav('scan')
+                try:
+                    self.target_edit.setFocus()
+                except Exception:
+                    pass
+                return
+
+            # Data-driven sections rebuild fresh each visit so they never show
+            # stale content; stateful sections (a running recon process, the live
+            # feed, an in-progress repeater request, the settings form) persist.
+            dynamic = {'dashboard', 'results', 'timeline', 'plugins',
+                       'schedule', 'payloads'}
+            page = self._pages.get(key)
+            if page is not None and key in dynamic:
+                try:
+                    self._stack.removeWidget(page)
+                    page.deleteLater()
+                except Exception:
+                    pass
+                page = None
+                self._pages.pop(key, None)
+            if page is None:
+                builder = self._page_builders().get(key)
+                if builder is not None:
+                    try:
+                        page = builder()
+                    except Exception as e:
+                        try:
+                            self.append_log(f"[!] Could not open '{key}': {e}\n")
+                        except Exception:
+                            pass
+                        return
+                    if page is not None:
+                        holder = self._wrap_scroll(page)
+                        self._stack.addWidget(holder)
+                        self._pages[key] = holder
+            if page is not None:
+                self._stack.setCurrentWidget(self._pages[key])
+                self._highlight_nav(key)
+            else:
+                # No page builder -> legacy dialog (still keeps scans running).
+                fn = self._legacy_actions().get(key)
+                if fn is not None:
+                    fn()
+
+        def _wrap_scroll(self, widget):
+            """Wrap a page in a frameless, resizable scroll area so content that is
+            taller/wider than the window scrolls instead of clipping (several
+            sections began life as wider dialogs)."""
+            from PySide6.QtWidgets import QScrollArea, QFrame
+            sa = QScrollArea()
+            sa.setObjectName('PageScroll')
+            sa.setFrameShape(QFrame.NoFrame)
+            sa.setWidgetResizable(True)
+            sa.setWidget(widget)
+            return sa
+
+        def _highlight_nav(self, key):
+            """Mark the active nav button (drives the QSS [active] selector)."""
+            for k, btn in (getattr(self, '_nav_buttons', None) or {}).items():
+                try:
+                    btn.setProperty('active', 'true' if k == key else 'false')
+                    btn.style().unpolish(btn)
+                    btn.style().polish(btn)
+                except Exception:
+                    pass
 
         def append_log(self, text: str):
             self.log.append(text)
@@ -2863,6 +3010,15 @@ def main() -> None:
             except Exception:
                 pass
             advanced_opts = getattr(self, '_pending_advanced', None) or {}
+            # Caido proxy passthrough: route all scan traffic through Caido when
+            # enabled in Settings -> Integrations (so requests land in Caido).
+            try:
+                if (self._prefs or {}).get('caido_route_scans'):
+                    advanced_opts = dict(advanced_opts)
+                    advanced_opts['caido_proxy'] = (self._prefs or {}).get(
+                        'caido_proxy_url', 'http://127.0.0.1:8080')
+            except Exception:
+                pass
             self._worker = QtWorker(targets, threads, delay, concurrent_val, use_concurrent, retry_failed, selected_categories, proxy_config=self._proxy_config, enable_http_logging=self._enable_http_logging, enable_ssl_analysis=self._enable_ssl_analysis, advanced_opts=advanced_opts)
             self._worker_thread = QtCore.QThread()
             self._worker.moveToThread(self._worker_thread)
@@ -3459,11 +3615,2372 @@ def main() -> None:
             except Exception:
                 pass
 
-        def _open_qt_settings(self):
+        # ------------------------------------------------------------------ #
+        # Recon section
+        # ------------------------------------------------------------------ #
+        def _recon_worker_cmd(self, target, tmp_path, timeout, top_ports, no_ports=False,
+                              opts=None):
+            """argv to run the recon engine, mirroring the scan-worker pattern
+            (frozen --recon-worker vs `python -m wafpierce.recon`).
+
+            ``opts`` is the per-stage customization from the recon page; when it is
+            None (e.g. the scheduler) the engine defaults apply (tls + gau + nmap).
+            """
+            opts = opts or {}
+            if IS_FROZEN:
+                cmd = [sys.executable, '--recon-worker', '--target', target,
+                       '--output', tmp_path]
+            else:
+                cmd = [sys.executable, '-u', '-m', 'wafpierce.recon', target,
+                       '-o', tmp_path]
+            cmd += ['--timeout', str(timeout), '--top-ports', str(top_ports)]
+            cmd += ['--max-hosts', str(opts.get('max_hosts', 1000))]
+            cmd += ['--crawl-depth', str(opts.get('crawl_depth', 2))]
+            if no_ports or not opts.get('do_ports', True):
+                cmd.append('--no-ports')
+            if not opts.get('do_tls', True):
+                cmd.append('--no-tls')
+            if not opts.get('do_historical', True):
+                cmd.append('--no-historical')
+            if opts.get('do_naabu'):
+                cmd.append('--naabu')
+            if opts.get('do_crawl'):
+                cmd.append('--crawl')
+            if opts.get('do_nuclei'):
+                cmd.append('--nuclei')
+            if opts.get('do_xss'):
+                cmd.append('--xss')
+            if opts.get('nuclei_severity'):
+                cmd += ['--nuclei-severity', str(opts['nuclei_severity'])]
+            if opts.get('nuclei_tags'):
+                cmd += ['--nuclei-tags', str(opts['nuclei_tags'])]
+            return cmd
+
+        def _build_recon_page(self):
+            """The Recon section as an in-place page: run subfinder/amass/dnsx/
+            httpx/nmap in a subprocess, stream output, and collect findings into a
+            tree that can be merged into Results or handed off to Metasploit /
+            Caido. The QProcess is parented to this cached page, so switching to
+            another section never interrupts a running recon."""
+            from PySide6 import QtWidgets, QtCore
+            from PySide6.QtWidgets import (
+                QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QSpinBox,
+                QCheckBox, QPushButton, QPlainTextEdit, QTreeWidget,
+                QTreeWidgetItem, QSplitter, QMessageBox, QFileDialog)
+            from PySide6.QtCore import Qt, QProcess, QProcessEnvironment
+            from PySide6.QtGui import QTextCursor
+            import tempfile
+
+            dlg = QtWidgets.QWidget()
+            dlg.setObjectName('ReconPage')
+            lay = QVBoxLayout(dlg)
+            lay.setContentsMargins(22, 20, 22, 20)
+            _hdr = QLabel('Recon  —  recon & light pentest')
+            _hdr.setStyleSheet('font-size:18px; font-weight:bold; color:#58a6ff;')
+            _hdr.setToolTip('subfinder · amass · dnsx · httpx · nmap  +  tlsx · gau · katana · nuclei · naabu · dalfox')
+            lay.addWidget(_hdr)
+
+            from PySide6.QtWidgets import QGridLayout, QGroupBox, QComboBox
+
+            # Target + core options
+            row = QHBoxLayout()
+            row.addWidget(QLabel('Target:'))
+            target_edit = QLineEdit()
+            target_edit.setPlaceholderText('example.com or https://example.com')
             try:
-                dlg = QtWidgets.QDialog(self)
-                dlg.setWindowTitle(_t('settings ⚙️', self._lang))
+                target_edit.setText((self.target_edit.text() or '').strip())
+            except Exception:
+                pass
+            row.addWidget(target_edit, 1)
+            row.addWidget(QLabel('Timeout(s):'))
+            timeout_spin = QSpinBox(); timeout_spin.setRange(10, 3600); timeout_spin.setValue(300)
+            row.addWidget(timeout_spin)
+            row.addWidget(QLabel('Max hosts:'))
+            maxhosts_spin = QSpinBox(); maxhosts_spin.setRange(1, 100000); maxhosts_spin.setValue(1000)
+            maxhosts_spin.setToolTip('Cap on how many resolved hosts to actively probe (httpx).')
+            row.addWidget(maxhosts_spin)
+            row.addWidget(QLabel('Top ports:'))
+            ports_spin = QSpinBox(); ports_spin.setRange(10, 65535); ports_spin.setValue(100)
+            row.addWidget(ports_spin)
+            lay.addLayout(row)
+
+            # Stages — each one is individually switchable. ☑ = on by default.
+            stages_box = QGroupBox('Stages  (✓ = run; tools install on demand)')
+            sg = QGridLayout(stages_box)
+            stage_chks = {}
+
+            def _stage(key, label, tip, on, r, c):
+                chk = QCheckBox(label); chk.setChecked(on); chk.setToolTip(tip)
+                stage_chks[key] = chk
+                sg.addWidget(chk, r, c)
+
+            _stage('tls', 'TLS / SAN (tlsx)', 'Grab TLS certs and harvest extra subdomains from SANs.', True, 0, 0)
+            _stage('historical', 'Historical URLs (gau)', 'Pull URLs from wayback / commoncrawl / otx.', True, 0, 1)
+            _stage('ports', 'Ports (nmap)', 'nmap -sV service/version scan.', True, 0, 2)
+            _stage('naabu', 'Fast ports (naabu)', 'Fast TCP connect port discovery across many hosts.', False, 1, 0)
+            _stage('crawl', 'Crawl (katana)', 'Crawl live sites (incl. JS) for endpoints.', False, 1, 1)
+            _stage('nuclei', 'Vuln scan (nuclei)', 'Run nuclei templates against live web services.', False, 1, 2)
+            _stage('xss', 'XSS (dalfox)', 'Test URLs that carry parameters for XSS.', False, 2, 0)
+
+            # nuclei + crawl tuning (compact 3-column grid)
+            sg.addWidget(QLabel('nuclei sev:'), 3, 0)
+            nuclei_sev_combo = QComboBox()
+            nuclei_sev_combo.addItems(['low,medium,high,critical', 'medium,high,critical',
+                                       'high,critical', 'critical',
+                                       'info,low,medium,high,critical'])
+            sg.addWidget(nuclei_sev_combo, 3, 1, 1, 2)
+            sg.addWidget(QLabel('nuclei tags:'), 4, 0)
+            nuclei_tags_edit = QLineEdit()
+            nuclei_tags_edit.setPlaceholderText('blank = all  ·  e.g. cve,xss,sqli,rce')
+            sg.addWidget(nuclei_tags_edit, 4, 1, 1, 2)
+            sg.addWidget(QLabel('crawl depth:'), 5, 0)
+            depth_spin = QSpinBox(); depth_spin.setRange(1, 5); depth_spin.setValue(2)
+            sg.addWidget(depth_spin, 5, 1)
+
+            # Presets
+            preset_row = QHBoxLayout()
+            fast_btn = QPushButton('Preset: Fast')
+            full_btn = QPushButton('Preset: Full pentest')
+            fast_btn.setToolTip('subfinder/amass + dnsx + httpx only')
+            full_btn.setToolTip('Enable every stage (slower, deepest coverage)')
+            preset_row.addWidget(QLabel('Presets:'))
+            preset_row.addWidget(fast_btn); preset_row.addWidget(full_btn)
+            preset_row.addStretch()
+            sg.addLayout(preset_row, 6, 0, 1, 3)
+
+            def _apply_preset(full):
+                # Full = every stage on. Fast = the light defaults only.
+                for k, chk in stage_chks.items():
+                    chk.setChecked(True if full else k in ('tls', 'historical', 'ports'))
+            fast_btn.clicked.connect(lambda: _apply_preset(False))
+            full_btn.clicked.connect(lambda: _apply_preset(True))
+
+            lay.addWidget(stages_box)
+
+            def _collect_opts():
+                return {
+                    'max_hosts': maxhosts_spin.value(),
+                    'crawl_depth': depth_spin.value(),
+                    'nuclei_severity': nuclei_sev_combo.currentText(),
+                    'nuclei_tags': nuclei_tags_edit.text().strip(),
+                    'do_tls': stage_chks['tls'].isChecked(),
+                    'do_historical': stage_chks['historical'].isChecked(),
+                    'do_naabu': stage_chks['naabu'].isChecked(),
+                    'do_crawl': stage_chks['crawl'].isChecked(),
+                    'do_nuclei': stage_chks['nuclei'].isChecked(),
+                    'do_xss': stage_chks['xss'].isChecked(),
+                    'do_ports': stage_chks['ports'].isChecked(),
+                }
+
+            # Actions — two compact rows so the buttons never overflow a narrow
+            # window (run controls on top, output actions below).
+            run_row = QHBoxLayout()
+            run_btn = QPushButton('▶  Run Recon')
+            stop_btn = QPushButton('■  Stop'); stop_btn.setEnabled(False)
+            tools_btn = QPushButton('⬇  Tools')
+            tools_btn.setToolTip('Install optional recon tools: tlsx, gau, katana, nuclei, naabu, dalfox')
+            run_row.addWidget(run_btn)
+            run_row.addWidget(stop_btn)
+            run_row.addStretch()
+            run_row.addWidget(tools_btn)
+            lay.addLayout(run_row)
+
+            out_row = QHBoxLayout()
+            merge_btn = QPushButton('＋ Merge to Results'); merge_btn.setEnabled(False)
+            msf_btn = QPushButton('→ Metasploit'); msf_btn.setEnabled(False)
+            caido_btn = QPushButton('→ Caido'); caido_btn.setEnabled(False)
+            save_btn = QPushButton('Save JSON…'); save_btn.setEnabled(False)
+            for b in (merge_btn, msf_btn, caido_btn, save_btn):
+                out_row.addWidget(b)
+            out_row.addStretch()
+            lay.addLayout(out_row)
+            tools_btn.clicked.connect(lambda: self._download_tools_dialog(
+                ['tlsx', 'gau', 'katana', 'nuclei', 'naabu', 'dalfox'],
+                'Optional recon tools — each one that installs adds a richer stage:\n'
+                '  tlsx   — TLS certs + extra subdomains from SAN entries\n'
+                '  gau    — historical URLs (wayback / commoncrawl / otx)\n'
+                '  katana — crawl live sites for endpoints\n'
+                '  nuclei — vulnerability / misconfiguration scan\n'
+                '  naabu  — fast port discovery\n'
+                '  dalfox — XSS scanning of URLs with parameters\n',
+                title='Install optional recon tools'))
+
+            # Results tree (top) + streaming log (bottom)
+            split = QSplitter(Qt.Vertical)
+            tree = QTreeWidget()
+            tree.setHeaderLabels(['Technique', 'Target', 'Severity', 'Detail'])
+            tree.setColumnWidth(0, 190); tree.setColumnWidth(1, 250); tree.setColumnWidth(2, 80)
+            split.addWidget(tree)
+            log = QPlainTextEdit(); log.setReadOnly(True)
+            log.setStyleSheet('background:#0f1112; color:#cfe3f0; '
+                              'font-family:Consolas,monospace; font-size:12px;')
+            split.addWidget(log)
+            split.setSizes([370, 250])
+            lay.addWidget(split, 1)
+
+            state = {'proc': None, 'tmp': None, 'findings': []}
+
+            def _append(text):
+                if not text:
+                    return
+                log.moveCursor(QTextCursor.End)
+                log.insertPlainText(text)
+                log.moveCursor(QTextCursor.End)
+
+            def _populate(findings):
+                tree.clear()
+                sev_color = {'CRITICAL': '#ff5d6c', 'HIGH': '#ff9f43',
+                             'MEDIUM': '#f6e05e', 'LOW': '#63b3ed', 'INFO': '#9aa7b2'}
+                from PySide6.QtGui import QBrush, QColor
+                for f in findings:
+                    sev = str(f.get('severity', 'INFO')).upper()
+                    it = QTreeWidgetItem([
+                        str(f.get('technique', '')), str(f.get('target', '')),
+                        sev, str(f.get('reason', ''))[:240]])
+                    try:
+                        it.setForeground(2, QBrush(QColor(sev_color.get(sev, '#9aa7b2'))))
+                    except Exception:
+                        pass
+                    tree.addTopLevelItem(it)
+
+            def _set_outputs_enabled(on):
+                for b in (merge_btn, msf_btn, caido_btn, save_btn):
+                    b.setEnabled(on)
+
+            def _on_stdout():
+                proc = state['proc']
+                if proc is not None:
+                    _append(bytes(proc.readAllStandardOutput()).decode('utf-8', 'replace'))
+
+            def _on_finished(code=0, status=None):
+                run_btn.setEnabled(True); stop_btn.setEnabled(False)
+                findings = []
+                tmp = state['tmp']
+                if tmp and os.path.exists(tmp):
+                    try:
+                        with open(tmp, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                        findings = data if isinstance(data, list) else []
+                    except Exception as e:
+                        _append(f"\n[!] could not parse recon output: {e}\n")
+                    finally:
+                        try:
+                            os.unlink(tmp)
+                        except Exception:
+                            pass
+                state['findings'] = findings
+                _populate(findings)
+                _set_outputs_enabled(bool(findings))
+                _append(f"\n[recon] finished (exit {code}) — {len(findings)} finding(s)\n")
+
+            def _run():
+                import shutil
+                target = target_edit.text().strip()
+                if not target:
+                    QMessageBox.warning(dlg, 'Recon', 'Enter a target first.')
+                    return
+                opts = _collect_opts()
+                # Hard preflight: recon requires the core tools. Offer to download
+                # them instead of leaving the user at a dead end.
+                try:
+                    from .recon import preflight, format_preflight_error, STAGE_TOOL
+                    missing = [t for t in preflight()
+                               if not (t[0] == 'nmap' and not opts.get('do_ports', True))]
+                    if missing:
+                        _append(format_preflight_error(missing) + '\n')
+                        self._show_recon_tools_dialog(missing)
+                        return
+                    # Prompt to install tools for any ENABLED optional stage that
+                    # is missing its binary (this is the "it didn't prompt me" fix).
+                    want = []
+                    for key, tool in STAGE_TOOL.items():
+                        if opts.get(f'do_{key}') and not shutil.which(tool):
+                            want.append(tool)
+                    if want:
+                        ret = QMessageBox.question(
+                            dlg, 'Install recon tools?',
+                            'These enabled stages need tools that aren’t installed yet:\n\n'
+                            '    ' + ', '.join(want) + '\n\n'
+                            'Download them now?  (No = run anyway; those stages are skipped.)',
+                            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+                            QMessageBox.Yes)
+                        if ret == QMessageBox.Cancel:
+                            return
+                        if ret == QMessageBox.Yes:
+                            self._download_tools_dialog(
+                                want, 'Installing tools for the enabled recon stages…',
+                                title='Install recon tools')
+                except Exception:
+                    pass
+                tmpf = tempfile.NamedTemporaryFile(delete=False, suffix='.json')
+                tmpf.close()
+                state['tmp'] = tmpf.name
+                log.clear(); tree.clear(); _set_outputs_enabled(False)
+                cmd = self._recon_worker_cmd(
+                    target, state['tmp'], timeout_spin.value(),
+                    ports_spin.value(), opts=opts)
+                proc = QProcess(dlg)
+                proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+                env = QProcessEnvironment.systemEnvironment()
+                env.insert('PYTHONIOENCODING', 'utf-8')
+                env.insert('PYTHONUNBUFFERED', '1')
+                proc.setProcessEnvironment(env)
+                proc.readyReadStandardOutput.connect(_on_stdout)
+                proc.finished.connect(_on_finished)
+                state['proc'] = proc
+                _append('[recon] $ ' + ' '.join(cmd) + '\n\n')
+                run_btn.setEnabled(False); stop_btn.setEnabled(True)
+                proc.start(cmd[0], cmd[1:])
+
+            def _stop():
+                proc = state['proc']
+                if proc is not None:
+                    proc.kill()
+                    _append('\n[recon] stopped by user\n')
+
+            def _merge():
+                if state['findings']:
+                    self._results.extend(state['findings'])
+                    try:
+                        self._refresh_tree_display()
+                    except Exception:
+                        pass
+                    QMessageBox.information(
+                        dlg, 'Recon',
+                        f"Merged {len(state['findings'])} recon finding(s) into Results.")
+
+            def _save():
+                path, _ = QFileDialog.getSaveFileName(
+                    dlg, 'Save recon findings', 'recon.json', 'JSON files (*.json)')
+                if path:
+                    try:
+                        with open(path, 'w', encoding='utf-8') as f:
+                            json.dump(state['findings'], f, indent=2, default=str)
+                        _append(f"\n[recon] saved {len(state['findings'])} finding(s) to {path}\n")
+                    except Exception as e:
+                        QMessageBox.warning(dlg, 'Save failed', str(e))
+
+            def _run_handoff(cmd, env_extra, label):
+                """Run an msf/caido CLI subcommand against the recon findings."""
+                if not state['findings']:
+                    return
+                tmpf = tempfile.NamedTemporaryFile(delete=False, suffix='.json')
+                try:
+                    json.dump(state['findings'], open(tmpf.name, 'w', encoding='utf-8'),
+                              default=str)
+                finally:
+                    tmpf.close()
+                full = cmd + [tmpf.name]
+                proc = QProcess(dlg)
+                proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+                env = QProcessEnvironment.systemEnvironment()
+                for k, v in (env_extra or {}).items():
+                    if v:
+                        env.insert(k, str(v))
+                proc.setProcessEnvironment(env)
+                proc.readyReadStandardOutput.connect(
+                    lambda: _append(bytes(proc.readAllStandardOutput()).decode('utf-8', 'replace')))
+                proc.finished.connect(lambda c, s=None: _append(f"\n[{label}] done (exit {c})\n"))
+                self._handoff_procs = getattr(self, '_handoff_procs', [])
+                self._handoff_procs.append(proc)  # keep ref
+                _append(f"\n[{label}] $ {' '.join(full)}\n")
+                proc.start(full[0], full[1:])
+
+            def _send_msf():
+                prefs = self._prefs or {}
+                pw = prefs.get('msf_password', '') or os.environ.get('MSF_RPC_PASSWORD', '')
+                if not pw:
+                    QMessageBox.information(
+                        dlg, 'Metasploit',
+                        'Set the msfrpcd password in Settings → Integrations first '
+                        '(and start `msfrpcd -P <pw> -p 55553`).')
+                    return
+                if IS_FROZEN:
+                    base = [sys.executable, '--msf-worker', 'push']
+                else:
+                    base = [sys.executable, '-u', '-m', 'wafpierce.msf', 'push']
+                # recon findings are informational -> push them all, not just confirmed
+                base += ['--all', '--workspace', str(prefs.get('msf_workspace', 'wafpierce'))]
+                if prefs.get('msf_host'):
+                    base += ['--msf-host', str(prefs['msf_host'])]
+                if prefs.get('msf_port'):
+                    base += ['--msf-port', str(prefs['msf_port'])]
+                if prefs.get('msf_no_ssl'):
+                    base += ['--msf-no-ssl']
+                _run_handoff(base, {'MSF_RPC_PASSWORD': pw}, 'msf')
+
+            def _send_caido():
+                prefs = self._prefs or {}
+                proxy_url = prefs.get('caido_proxy_url', 'http://127.0.0.1:8080')
+                if IS_FROZEN:
+                    base = [sys.executable, '--caido-worker', '--proxy-url', proxy_url, 'push', '--all']
+                else:
+                    base = [sys.executable, '-u', '-m', 'wafpierce.caido',
+                            '--proxy-url', proxy_url, 'push', '--all']
+                _run_handoff(base, {}, 'caido')
+
+            run_btn.clicked.connect(_run)
+            stop_btn.clicked.connect(_stop)
+            merge_btn.clicked.connect(_merge)
+            save_btn.clicked.connect(_save)
+            msf_btn.clicked.connect(_send_msf)
+            caido_btn.clicked.connect(_send_caido)
+
+            # Keep a handle so other code (e.g. abort on quit) can reach the proc.
+            self._recon_state = state
+            return dlg
+
+        def _show_recon_tools_dialog(self, missing):
+            """Recon preflight failed: offer to download the missing required tools."""
+            from .recon import format_preflight_error
+            self._download_tools_dialog(
+                [t[0] for t in missing],
+                format_preflight_error(missing),
+                title='Recon tools missing')
+
+        def _download_tools_dialog(self, names, intro, title='Recon tools'):
+            """Generic tool installer: shows ``intro``, downloads ``names`` on a
+            worker thread, streams progress, then reports which are now on PATH.
+            Used for both the required-tools preflight and the optional extras."""
+            from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
+                                           QPlainTextEdit, QPushButton, QLabel)
+            from PySide6.QtCore import QTimer
+            import threading
+            import queue
+            import shutil
+
+            dlg = QDialog(self)
+            dlg.setWindowTitle(title)
+            dlg.resize(760, 560)
+            v = QVBoxLayout(dlg)
+
+            log = QPlainTextEdit()
+            log.setReadOnly(True)
+            log.setStyleSheet('font-family:Consolas,monospace; font-size:12px;')
+            log.setPlainText(intro)
+            v.addWidget(log, 1)
+
+            status = QLabel('')
+            status.setStyleSheet('color:#8b949e;')
+            v.addWidget(status)
+
+            row = QHBoxLayout()
+            dl_btn = QPushButton('⬇  Download all')
+            dl_btn.setObjectName('PrimaryButton')
+            close_btn = QPushButton('Close')
+            row.addStretch()
+            row.addWidget(dl_btn)
+            row.addWidget(close_btn)
+            v.addLayout(row)
+            close_btn.clicked.connect(dlg.accept)
+
+            q = queue.Queue()
+
+            def _drain():
+                drained_done = False
+                try:
+                    while True:
+                        kind, payload = q.get_nowait()
+                        if kind == 'log':
+                            log.appendPlainText(payload)
+                        elif kind == 'status':
+                            status.setText(payload)
+                        elif kind == 'done':
+                            drained_done = True
+                except queue.Empty:
+                    pass
+                if drained_done:
+                    timer.stop()
+                    try:
+                        from . import recon_install as _ri
+                        left = [n for n in names if not _ri.is_installed(n)]
+                    except Exception:
+                        left = [n for n in names if not shutil.which(n)]
+                    if not left:
+                        status.setText('✓ All installed — they are on PATH now.')
+                        dl_btn.setText('✓ Installed')
+                    else:
+                        dl_btn.setEnabled(True)
+                        dl_btn.setText('⬇  Retry download')
+                        status.setText('Still missing: ' + ', '.join(left) + '  (see log above)')
+
+            timer = QTimer(dlg)
+            timer.timeout.connect(_drain)
+
+            def _start():
+                dl_btn.setEnabled(False)
+                dl_btn.setText('Downloading…')
+                status.setText('Starting download…')
+                log.appendPlainText('\n──────── downloading tools ────────')
+
+                def _work():
+                    try:
+                        from . import recon_install
+                        recon_install.download_all(
+                            only=list(names),
+                            log=lambda m: q.put(('log', m)),
+                            status=lambda m: q.put(('status', m)))
+                    except Exception as e:
+                        q.put(('log', f'[!] installer error: {type(e).__name__}: {e}'))
+                    finally:
+                        q.put(('done', None))
+
+                threading.Thread(target=_work, daemon=True).start()
+                timer.start(150)
+
+            dl_btn.clicked.connect(_start)
+            dlg.exec()
+
+        def _build_browser_page(self):
+            """Embedded browser that captures all of its HTTP(S) traffic.
+
+            Capture is two-pronged: a request interceptor logs every request
+            (breadth — page loads, images, scripts …) while an injected JS hook
+            wraps fetch/XMLHttpRequest to capture full request+response with
+            headers and bodies (depth — the API/AJAX calls). Captured rows land in
+            a sortable / filterable / searchable table below the browser; select a
+            row for detail or Expand for the full transaction.
+            """
+            from PySide6 import QtWidgets
+            from PySide6.QtWidgets import (
+                QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox,
+                QTableWidget, QTableWidgetItem, QSplitter, QPlainTextEdit,
+                QHeaderView, QAbstractItemView, QTabWidget, QMenu)
+            from PySide6.QtCore import Qt, Signal, QUrl
+            from PySide6.QtGui import QBrush, QColor
+            from datetime import datetime
+            from urllib.parse import urlparse, parse_qs
+            import json as _json
+            import re as _re
+
+            # QtWebEngine is an optional (large) component; degrade gracefully.
+            try:
+                from PySide6.QtWebEngineWidgets import QWebEngineView
+                from PySide6.QtWebEngineCore import (
+                    QWebEnginePage, QWebEngineProfile, QWebEngineScript, QWebEngineSettings,
+                    QWebEngineUrlRequestInterceptor, QWebEngineUrlRequestInfo)
+            except Exception as e:
+                page = QWidget()
+                pv = QVBoxLayout(page)
+                pv.setContentsMargins(22, 20, 22, 20)
+                hdr = QLabel('◍  Browser')
+                hdr.setStyleSheet('font-size:18px; font-weight:bold; color:#58a6ff;')
+                msg = QLabel('The Browser section needs QtWebEngine, which is not '
+                             'installed.\n\nInstall it with:\n    pip install PySide6-Addons\n\n'
+                             f'(import error: {e})')
+                msg.setStyleSheet('color:#8b949e;')
+                pv.addWidget(hdr); pv.addWidget(msg); pv.addStretch()
+                return page
+
+            if not hasattr(self, '_browser_txns'):
+                self._browser_txns = []
+            if not hasattr(self, '_browser_issues'):
+                self._browser_issues = []
+            state = {'seq': 0, 'paused': False}
+
+            # Resource-type id -> short name, and the XHR id we skip (JS captures it).
+            _RT = {}
+            _XHR_INT = None
+            try:
+                RTenum = QWebEngineUrlRequestInfo.ResourceType
+                for nm in dir(RTenum):
+                    if nm.startswith('ResourceType'):
+                        try:
+                            _RT[int(getattr(RTenum, nm))] = nm[len('ResourceType'):] or 'Other'
+                        except Exception:
+                            pass
+                _XHR_INT = int(getattr(RTenum, 'ResourceTypeXhr'))
+            except Exception:
+                pass
+            _RT_BY_NAME = {v.lower(): k for k, v in _RT.items()}  # 'image'->id, etc.
+
+            HOOK_JS = r"""
+            (function(){
+              if (window.__wpcapInstalled) return;
+              window.__wpcapInstalled = true;
+              var MAX = 200000;
+              function send(rec){
+                try {
+                  if (rec.respBody && rec.respBody.length > MAX) rec.respBody = rec.respBody.slice(0,MAX) + ' ...(truncated)';
+                  if (rec.reqBody && rec.reqBody.length > MAX) rec.reqBody = rec.reqBody.slice(0,MAX) + ' ...(truncated)';
+                  console.log('__WPCAP__' + JSON.stringify(rec));
+                } catch(e){}
+              }
+              var of = window.fetch;
+              if (of){
+                window.fetch = function(input, init){
+                  var url = (typeof input === 'string') ? input : (input && input.url) || '';
+                  var method = (init && init.method) || (typeof input==='object' && input && input.method) || 'GET';
+                  var reqBody = (init && init.body) ? String(init.body) : '';
+                  var reqHeaders = {};
+                  try { if (init && init.headers){ new Headers(init.headers).forEach(function(v,k){reqHeaders[k]=v;}); } } catch(e){}
+                  var t0 = Date.now();
+                  return of.apply(this, arguments).then(function(resp){
+                    try {
+                      resp.clone().text().then(function(body){
+                        var rh = {}; try { resp.headers.forEach(function(v,k){rh[k]=v;}); } catch(e){}
+                        send({kind:'fetch', method:method, url:url, reqHeaders:reqHeaders, reqBody:reqBody,
+                              status:resp.status, respHeaders:rh, respBody:body, ms:Date.now()-t0});
+                      }).catch(function(){});
+                    } catch(e){}
+                    return resp;
+                  });
+                };
+              }
+              var OX = window.XMLHttpRequest;
+              if (OX){
+                window.XMLHttpRequest = function(){
+                  var xhr = new OX();
+                  var _m='GET', _u='', _b='', _rh={};
+                  var op = xhr.open;
+                  xhr.open = function(m,u){ _m=m; _u=u; return op.apply(xhr, arguments); };
+                  var sh = xhr.setRequestHeader;
+                  xhr.setRequestHeader = function(k,v){ _rh[k]=v; return sh.apply(xhr, arguments); };
+                  var sn = xhr.send;
+                  xhr.send = function(b){
+                    _b = b ? String(b) : '';
+                    xhr.addEventListener('loadend', function(){
+                      var rh = {};
+                      try { (xhr.getAllResponseHeaders()||'').trim().split(/\r?\n/).forEach(function(l){ var i=l.indexOf(':'); if(i>0) rh[l.slice(0,i).trim()]=l.slice(i+1).trim(); }); } catch(e){}
+                      var body=''; try { body = (xhr.responseType===''||xhr.responseType==='text') ? xhr.responseText : ('['+xhr.responseType+']'); } catch(e){}
+                      send({kind:'xhr', method:_m, url:_u, reqHeaders:_rh, reqBody:_b, status:xhr.status, respHeaders:rh, respBody:body});
+                    });
+                    return sn.apply(xhr, arguments);
+                  };
+                  return xhr;
+                };
+              }
+            })();
+            """
+
+            class _Interceptor(QWebEngineUrlRequestInterceptor):
+                captured = Signal(object)
+
+                def __init__(self, parent=None):
+                    super().__init__(parent)
+                    self.extra_headers = {}   # injected into every request
+                    self.block_types = set()  # resource-type ids to block
+                    self.scope = ''           # only capture hosts containing this (blank=all)
+
+                def interceptRequest(self, info):
+                    try:
+                        # Inject user-configured headers into every request.
+                        for hk, hv in self.extra_headers.items():
+                            try:
+                                info.setHttpHeader(hk.encode('latin-1', 'ignore'),
+                                                   str(hv).encode('latin-1', 'ignore'))
+                            except Exception:
+                                pass
+                        rt = int(info.resourceType())
+                        if rt in self.block_types:
+                            info.block(True)
+                            return
+                        if _XHR_INT is not None and rt == _XHR_INT:
+                            return  # fetch/XHR captured in full via the JS hook
+                        url = info.requestUrl().toString()
+                        if self.scope and self.scope.lower() not in (info.requestUrl().host() or '').lower():
+                            return
+                        self.captured.emit({
+                            'method': bytes(info.requestMethod()).decode('ascii', 'replace'),
+                            'url': url,
+                            'type': _RT.get(rt, 'Other'),
+                        })
+                    except Exception:
+                        pass
+
+            class _CapturePage(QWebEnginePage):
+                consoleMsg = Signal(str)
+
+                def javaScriptConsoleMessage(self, level, message, lineNumber, sourceID):
+                    try:
+                        if isinstance(message, str) and message.startswith('__WPCAP__'):
+                            self.consoleMsg.emit(message[9:])
+                            return
+                    except Exception:
+                        pass
+
+            # ---- page widgets ----
+            page = QWidget()
+            page.setObjectName('BrowserPage')
+            v = QVBoxLayout(page)
+            v.setContentsMargins(22, 20, 22, 20)
+            hdr = QLabel('◍  Browser  —  live traffic capture')
+            hdr.setStyleSheet('font-size:18px; font-weight:bold; color:#58a6ff;')
+            v.addWidget(hdr)
+
+            # Navigation bar
+            navrow = QHBoxLayout()
+            back_btn = QPushButton('◀'); fwd_btn = QPushButton('▶'); reload_btn = QPushButton('↻')
+            for b in (back_btn, fwd_btn, reload_btn):
+                # padding:0 overrides the global 16px button padding — otherwise the
+                # 34px-wide button has no room left and the glyph is clipped away.
+                b.setFixedSize(40, 32)
+                b.setStyleSheet('QPushButton { padding: 0px; font-size: 15px; font-weight: bold; }')
+            url_edit = QLineEdit(); url_edit.setPlaceholderText('https://example.com')
+            go_btn = QPushButton('Go')
+            settings_btn = QPushButton('⚙ Settings')
+            settings_btn.setToolTip('User-Agent, header injection, upstream proxy, scope, blocking, JS…')
+            export_btn = QPushButton('⭳ HAR')
+            export_btn.setToolTip('Export captured traffic as a HAR file')
+            navrow.addWidget(back_btn); navrow.addWidget(fwd_btn); navrow.addWidget(reload_btn)
+            navrow.addWidget(url_edit, 1); navrow.addWidget(go_btn)
+            navrow.addWidget(settings_btn); navrow.addWidget(export_btn)
+            v.addLayout(navrow)
+
+            # Browser view + profile/page wired for capture. Creating the Chromium
+            # view can fail at runtime (no GPU/GL context); degrade gracefully.
+            script = None
+            try:
+                profile = QWebEngineProfile(page)               # off-the-record
+                interceptor = _Interceptor(page)
+                profile.setUrlRequestInterceptor(interceptor)
+                wpage = _CapturePage(profile, page)
+                try:
+                    script = QWebEngineScript()
+                    script.setName('wpcap')
+                    script.setSourceCode(HOOK_JS)
+                    script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentCreation)
+                    script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
+                    script.setRunsOnSubFrames(True)
+                    wpage.scripts().insert(script)
+                except Exception:
+                    pass
+                view = QWebEngineView(page)
+                view.setPage(wpage)
+                view.setUrl(QUrl('about:blank'))
+            except Exception as e:
+                fb = QWidget()
+                fbv = QVBoxLayout(fb)
+                fbv.setContentsMargins(22, 20, 22, 20)
+                fh = QLabel('◍  Browser')
+                fh.setStyleSheet('font-size:18px; font-weight:bold; color:#58a6ff;')
+                fm = QLabel('The embedded browser could not start (no GPU/OpenGL '
+                            f'context).\n\n{type(e).__name__}: {e}')
+                fm.setStyleSheet('color:#8b949e;')
+                fbv.addWidget(fh); fbv.addWidget(fm); fbv.addStretch()
+                return fb
+
+            # Filter / search bar
+            filt = QHBoxLayout()
+            search_edit = QLineEdit(); search_edit.setPlaceholderText('search url / method / status…')
+            method_combo = QComboBox()
+            method_combo.addItems(['All', 'GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'])
+            type_combo = QComboBox()
+            type_combo.addItems(['All', 'fetch', 'xhr', 'MainFrame', 'SubFrame', 'Script',
+                                 'Stylesheet', 'Image', 'Font', 'Media', 'Other'])
+            pause_btn = QPushButton('⏸ Pause'); pause_btn.setCheckable(True)
+            clear_btn = QPushButton('🗑 Clear')
+            rep_btn = QPushButton('Send to Repeater')
+            expand_btn = QPushButton('⤢ Expand')
+            count_lbl = QLabel('0')
+            filt.addWidget(QLabel('Filter:')); filt.addWidget(search_edit, 1)
+            filt.addWidget(method_combo); filt.addWidget(type_combo)
+            filt.addWidget(pause_btn); filt.addWidget(clear_btn)
+            filt.addWidget(rep_btn); filt.addWidget(expand_btn)
+            filt.addWidget(QLabel('captured:')); filt.addWidget(count_lbl)
+
+            # Traffic table
+            cols = ['#', 'Time', 'Method', 'Status', 'Host', 'Path', 'Type', 'Length']
+            table = QTableWidget(0, len(cols))
+            table.setHorizontalHeaderLabels(cols)
+            table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+            table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+            table.setSortingEnabled(True)
+            try:
+                table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+            except Exception:
+                pass
+
+            detail = QPlainTextEdit(); detail.setReadOnly(True)
+            detail.setStyleSheet('font-family:Consolas,monospace; font-size:12px;')
+
+            # Traffic tab (capture table + detail)
+            traffic_w = QWidget()
+            tw = QVBoxLayout(traffic_w); tw.setContentsMargins(0, 0, 0, 0)
+            tw.addLayout(filt)
+            inner = QSplitter(Qt.Vertical)
+            inner.addWidget(table); inner.addWidget(detail)
+            inner.setSizes([320, 220])
+            tw.addWidget(inner, 1)
+
+            # Issues tab (passive scanner findings + detail)
+            issues_w = QWidget()
+            iw = QVBoxLayout(issues_w); iw.setContentsMargins(0, 0, 0, 0)
+
+            # Issues toolbar: severity filter + search + counts + actions
+            ibar = QHBoxLayout()
+            isev_combo = QComboBox()
+            isev_combo.addItems(['All', 'HIGH', 'MEDIUM', 'LOW', 'INFO'])
+            isearch_edit = QLineEdit(); isearch_edit.setPlaceholderText('search type / host / detail…')
+            icount_lbl = QLabel('no issues')
+            iscan_btn = QPushButton('⚡ Scan all (nuclei)')
+            iscan_btn.setToolTip('Run nuclei against every unique captured (in-scope) URL')
+            iclear_btn = QPushButton('🗑 Clear')
+            iexport_btn = QPushButton('⭳ Export')
+            ibar.addWidget(QLabel('Severity:')); ibar.addWidget(isev_combo)
+            ibar.addWidget(isearch_edit, 1)
+            ibar.addWidget(icount_lbl)
+            ibar.addWidget(iscan_btn); ibar.addWidget(iclear_btn); ibar.addWidget(iexport_btn)
+            iw.addLayout(ibar)
+
+            issues_table = QTableWidget(0, 4)
+            issues_table.setHorizontalHeaderLabels(['Severity', 'Type', 'Host', 'Detail'])
+            issues_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+            issues_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+            issues_table.setSortingEnabled(True)
+            try:
+                issues_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+                issues_table.setColumnWidth(0, 90)
+            except Exception:
+                pass
+            issue_detail = QPlainTextEdit(); issue_detail.setReadOnly(True)
+            issue_detail.setStyleSheet('font-family:Consolas,monospace; font-size:12px;')
+            isplit = QSplitter(Qt.Vertical)
+            isplit.addWidget(issues_table); isplit.addWidget(issue_detail)
+            isplit.setSizes([320, 220])
+            iw.addWidget(isplit, 1)
+
+            tabs = QTabWidget()
+            tabs.addTab(traffic_w, 'Traffic')
+            tabs.addTab(issues_w, 'Issues (0)')
+
+            outer = QSplitter(Qt.Vertical)
+            outer.addWidget(view); outer.addWidget(tabs)
+            outer.setSizes([300, 420])   # "a little window" on top, capture below
+            v.addWidget(outer, 1)
+
+            # ---- helpers ----
+            def _now():
+                return datetime.now().strftime('%H:%M:%S')
+
+            def _next_id():
+                state['seq'] += 1
+                return state['seq']
+
+            def _passes(t):
+                q = search_edit.text().strip().lower()
+                if q:
+                    hay = f"{t.get('url','')} {t.get('method','')} {t.get('status','')}".lower()
+                    if q not in hay:
+                        return False
+                m = method_combo.currentText()
+                if m != 'All' and (t.get('method', '') or '').upper() != m:
+                    return False
+                ty = type_combo.currentText()
+                if ty != 'All' and (t.get('type', '') or '').lower() != ty.lower():
+                    return False
+                return True
+
+            def _num_item(n):
+                it = QTableWidgetItem()
+                it.setData(Qt.ItemDataRole.DisplayRole, int(n) if n not in (None, '') else 0)
+                return it
+
+            def _add_row(t):
+                table.setSortingEnabled(False)
+                r = table.rowCount()
+                table.insertRow(r)
+                id_item = _num_item(t['id'])
+                id_item.setData(Qt.ItemDataRole.UserRole, t['id'])
+                table.setItem(r, 0, id_item)
+                table.setItem(r, 1, QTableWidgetItem(t.get('time', '')))
+                table.setItem(r, 2, QTableWidgetItem(t.get('method', '')))
+                st = t.get('status')
+                table.setItem(r, 3, _num_item(st) if st is not None else QTableWidgetItem('—'))
+                table.setItem(r, 4, QTableWidgetItem(t.get('host', '')))
+                table.setItem(r, 5, QTableWidgetItem(t.get('path', '')))
+                table.setItem(r, 6, QTableWidgetItem(t.get('type', '')))
+                ln = t.get('length')
+                table.setItem(r, 7, _num_item(ln) if ln is not None else QTableWidgetItem('—'))
+                table.setSortingEnabled(True)
+
+            def _refresh():
+                table.setRowCount(0)
+                for t in self._browser_txns:
+                    if _passes(t):
+                        _add_row(t)
+
+            def _record(t):
+                self._browser_txns.append(t)
+                count_lbl.setText(str(len(self._browser_txns)))
+                if not state['paused'] and _passes(t):
+                    _add_row(t)
+                try:
+                    _passive(t)
+                except Exception:
+                    pass
+
+            def _on_meta(rec):
+                if state['paused']:
+                    return
+                u = urlparse(rec.get('url', ''))
+                _record({
+                    'id': _next_id(), 'time': _now(), 'method': rec.get('method', 'GET'),
+                    'status': None, 'url': rec.get('url', ''), 'host': u.netloc,
+                    'path': (u.path or '/') + (('?' + u.query) if u.query else ''),
+                    'type': rec.get('type', 'Other'), 'length': None,
+                    'reqHeaders': {}, 'reqBody': '', 'respHeaders': {}, 'respBody': '',
+                    'source': 'request',
+                })
+
+            def _on_console(payload):
+                if state['paused']:
+                    return
+                try:
+                    rec = _json.loads(payload)
+                except Exception:
+                    return
+                u = urlparse(rec.get('url', ''))
+                if interceptor.scope and interceptor.scope.lower() not in (u.netloc or '').lower():
+                    return  # respect the scope filter for JS-captured traffic too
+                body = rec.get('respBody') or ''
+                _record({
+                    'id': _next_id(), 'time': _now(), 'method': (rec.get('method') or 'GET').upper(),
+                    'status': rec.get('status'), 'url': rec.get('url', ''), 'host': u.netloc,
+                    'path': (u.path or '/') + (('?' + u.query) if u.query else ''),
+                    'type': rec.get('kind', 'fetch'), 'length': len(body),
+                    'reqHeaders': rec.get('reqHeaders') or {}, 'reqBody': rec.get('reqBody') or '',
+                    'respHeaders': rec.get('respHeaders') or {}, 'respBody': body,
+                    'source': 'js',
+                })
+
+            def _selected_txn():
+                items = table.selectedItems()
+                if not items:
+                    return None
+                id_item = table.item(items[0].row(), 0)
+                tid = id_item.data(Qt.ItemDataRole.UserRole) if id_item else None
+                for t in self._browser_txns:
+                    if t['id'] == tid:
+                        return t
+                return None
+
+            def _format_txn(t):
+                out = [f"{t.get('method')} {t.get('url')}",
+                       f"Status: {t.get('status') if t.get('status') is not None else '—'}"
+                       f"   Type: {t.get('type')}"
+                       f"   Length: {t.get('length') if t.get('length') is not None else '—'}", '']
+                rh = t.get('reqHeaders') or {}
+                if rh:
+                    out.append('— REQUEST HEADERS —')
+                    out += [f"{k}: {val}" for k, val in rh.items()]
+                    out.append('')
+                if t.get('reqBody'):
+                    out += ['— REQUEST BODY —', str(t['reqBody']), '']
+                sh = t.get('respHeaders') or {}
+                if sh:
+                    out.append('— RESPONSE HEADERS —')
+                    out += [f"{k}: {val}" for k, val in sh.items()]
+                    out.append('')
+                if t.get('respBody'):
+                    out += ['— RESPONSE BODY —', str(t['respBody'])]
+                if t.get('source') == 'request':
+                    out += ['', '(request-level capture: response body/headers are not available '
+                            'for this resource type — fetch/XHR API calls are captured in full)']
+                return '\n'.join(out)
+
+            def _show_detail():
+                t = _selected_txn()
+                if t:
+                    detail.setPlainText(_format_txn(t))
+
+            def _expand():
+                t = _selected_txn()
+                if not t:
+                    return
+                d = QtWidgets.QDialog(self)
+                d.setWindowTitle(f"{t.get('method')} {t.get('host')}")
+                d.resize(960, 720)
+                dv = QVBoxLayout(d)
+                te = QPlainTextEdit(); te.setReadOnly(True)
+                te.setStyleSheet('font-family:Consolas,monospace; font-size:12px;')
+                te.setPlainText(_format_txn(t))
+                dv.addWidget(te)
+                d.exec()
+
+            def _to_repeater():
+                t = _selected_txn()
+                if not t:
+                    return
+                self._repeater_load({'method': t.get('method'), 'url': t.get('url'),
+                                     'headers': t.get('reqHeaders') or {}, 'data': t.get('reqBody')})
+
+            def _clear():
+                self._browser_txns = []
+                self._browser_issues = []
+                state['seq'] = 0
+                table.setRowCount(0)
+                issues_table.setRowCount(0)
+                detail.clear()
+                issue_detail.clear()
+                count_lbl.setText('0')
+                _update_issue_counts()
+
+            def _go():
+                u = url_edit.text().strip()
+                if not u:
+                    return
+                if '://' not in u and not u.startswith('about:'):
+                    u = 'https://' + u
+                    url_edit.setText(u)
+                view.setUrl(QUrl(u))
+
+            # ---- pentest: passive scanner + issues ----
+            _SEV_COLOR = {'HIGH': '#ef4444', 'MEDIUM': '#f59e0b', 'LOW': '#9aa5b5', 'INFO': '#6b7585'}
+            _SECRETS = [
+                ('AWS Access Key', _re.compile(r'AKIA[0-9A-Z]{16}'), 'HIGH'),
+                ('Google API Key', _re.compile(r'AIza[0-9A-Za-z\-_]{35}'), 'HIGH'),
+                ('Slack Token', _re.compile(r'xox[baprs]-[0-9A-Za-z-]{10,}'), 'HIGH'),
+                ('GitHub Token', _re.compile(r'gh[pousr]_[0-9A-Za-z]{36,}'), 'HIGH'),
+                ('Private Key', _re.compile(r'-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----'), 'HIGH'),
+                ('JWT', _re.compile(r'eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}'), 'MEDIUM'),
+                ('Generic Secret', _re.compile(
+                    r'''(?i)(?:api[_-]?key|secret|access[_-]?token|client[_-]?secret|password)["']?\s*[:=]\s*["'][^"']{8,}["']'''), 'MEDIUM'),
+            ]
+            _ERRORS = [
+                ('SQL Error', _re.compile(r'(?i)SQL syntax|mysql_fetch|valid MySQL result|ORA-\d{5}|Unclosed quotation|SQLSTATE|PostgreSQL.{0,40}ERROR')),
+                ('Stack Trace', _re.compile(r'Traceback \(most recent call last\)|Exception in thread|at [\w\.$]+\(\w+\.(?:java|kt):\d+\)|\.py", line \d+')),
+            ]
+            _SEC_HEADERS = [
+                ('content-security-policy', 'Content-Security-Policy'),
+                ('x-content-type-options', 'X-Content-Type-Options'),
+                ('x-frame-options', 'X-Frame-Options'),
+                ('referrer-policy', 'Referrer-Policy'),
+                ('strict-transport-security', 'Strict-Transport-Security (HSTS)'),
+            ]
+
+            _SEV_RANK = {'HIGH': 0, 'MEDIUM': 1, 'LOW': 2, 'INFO': 3}
+            _SEV_BG = {'HIGH': QColor(239, 68, 68, 40), 'MEDIUM': QColor(245, 158, 11, 30),
+                       'LOW': QColor(99, 102, 241, 20), 'INFO': QColor(120, 130, 145, 12)}
+
+            def _issue_passes(it):
+                sv = isev_combo.currentText()
+                if sv != 'All' and it.get('sev') != sv:
+                    return False
+                q = isearch_edit.text().strip().lower()
+                if q and q not in f"{it.get('type','')} {it.get('host','')} {it.get('detail','')}".lower():
+                    return False
+                return True
+
+            def _issue_row(it, idx):
+                issues_table.setSortingEnabled(False)
+                r = issues_table.rowCount(); issues_table.insertRow(r)
+                sev = it.get('sev', 'INFO')
+                sv = QTableWidgetItem(sev)
+                sv.setForeground(QBrush(QColor(_SEV_COLOR.get(sev, '#9aa5b5'))))
+                sv.setData(Qt.ItemDataRole.UserRole, idx)   # index into self._browser_issues
+                issues_table.setItem(r, 0, sv)
+                issues_table.setItem(r, 1, QTableWidgetItem(it.get('type', '')))
+                issues_table.setItem(r, 2, QTableWidgetItem(it.get('host', '') or ''))
+                issues_table.setItem(r, 3, QTableWidgetItem(it.get('detail', '')))
+                bg = _SEV_BG.get(sev)
+                if bg is not None:
+                    for c in range(4):
+                        issues_table.item(r, c).setBackground(QBrush(bg))
+                issues_table.setSortingEnabled(True)
+
+            def _update_issue_counts():
+                counts = {}
+                for it in self._browser_issues:
+                    counts[it['sev']] = counts.get(it['sev'], 0) + 1
+                parts = [f'{em} {counts[s]}' for s, em in
+                         (('HIGH', '🔴'), ('MEDIUM', '🟠'), ('LOW', '🔵'), ('INFO', '⚪'))
+                         if counts.get(s)]
+                icount_lbl.setText('   '.join(parts) or 'no issues')
+                tabs.setTabText(1, f'Issues ({len(self._browser_issues)})')
+
+            def _issues_refresh():
+                issues_table.setRowCount(0)
+                order = sorted(range(len(self._browser_issues)),
+                               key=lambda i: (_SEV_RANK.get(self._browser_issues[i]['sev'], 9), i))
+                for idx in order:
+                    if _issue_passes(self._browser_issues[idx]):
+                        _issue_row(self._browser_issues[idx], idx)
+                _update_issue_counts()
+
+            def _add_issue(sev, typ, host, detail, txn_id):
+                it = {'sev': sev, 'type': typ, 'host': host, 'detail': detail, 'txn': txn_id}
+                self._browser_issues.append(it)
+                if _issue_passes(it):
+                    _issue_row(it, len(self._browser_issues) - 1)
+                _update_issue_counts()
+
+            def _passive(t):
+                if t.get('source') != 'js':
+                    return  # only JS-captured txns carry full response bodies/headers
+                body = t.get('respBody') or ''
+                rh = {str(k).lower(): str(vv) for k, vv in (t.get('respHeaders') or {}).items()}
+                host = t.get('host', ''); url = t.get('url', '')
+                seen = set()
+
+                def _emit(sev, typ, detail):
+                    if (typ, detail) in seen:
+                        return
+                    seen.add((typ, detail))
+                    _add_issue(sev, typ, host, detail, t['id'])
+
+                for name, rx, sev in _SECRETS:
+                    if body and rx.search(body):
+                        _emit(sev, f'Secret: {name}', f'{name} in response body of {url}')
+                for name, rx in _ERRORS:
+                    if body and rx.search(body):
+                        _emit('MEDIUM', name, f'{name} leaked in response of {url}')
+                ctype = rh.get('content-type', '')
+                if 'html' in ctype or 'json' in ctype:
+                    for hk, label in _SEC_HEADERS:
+                        if hk == 'strict-transport-security' and not url.lower().startswith('https'):
+                            continue
+                        if hk not in rh:
+                            _emit('LOW', 'Missing Security Header', f'Missing {label} on {url}')
+                if rh.get('set-cookie'):
+                    low = rh['set-cookie'].lower()
+                    miss = [f for f in ('secure', 'httponly', 'samesite') if f not in low]
+                    if miss:
+                        _emit('LOW', 'Insecure Cookie', f'Set-Cookie missing {", ".join(miss)} on {url}')
+                try:
+                    for p, vals in parse_qs(urlparse(url).query).items():
+                        for val in vals:
+                            if len(val) >= 4 and body and val in body:
+                                _emit('MEDIUM', 'Reflected Parameter',
+                                      f"Param '{p}' reflected in response (possible XSS) at {url}")
+                                break
+                except Exception:
+                    pass
+
+            def _selected_issue():
+                items = issues_table.selectedItems()
+                if not items:
+                    return None
+                ci = issues_table.item(items[0].row(), 0)
+                idx = ci.data(Qt.ItemDataRole.UserRole) if ci else None
+                if idx is None or idx >= len(self._browser_issues):
+                    return None
+                return self._browser_issues[idx]
+
+            def _issue_txn(it):
+                for t in self._browser_txns:
+                    if t['id'] == (it or {}).get('txn'):
+                        return t
+                return None
+
+            def _issue_selected():
+                it = _selected_issue()
+                if not it:
+                    return
+                t = _issue_txn(it)
+                head = f"[{it['sev']}]  {it['type']}\n{it['detail']}\n\n"
+                issue_detail.setPlainText(head + (_format_txn(t) if t else '(no captured request linked)'))
+
+            def _issue_ctx(pos):
+                it = _selected_issue()
+                if not it:
+                    return
+                t = _issue_txn(it)
+                m = QMenu(issues_table)
+                a_open = m.addAction('Open URL in browser')
+                a_rep = m.addAction('Send request to Repeater')
+                a_copy = m.addAction('Copy detail')
+                a_nuc = m.addAction('Scan host with nuclei')
+                chosen = m.exec(issues_table.viewport().mapToGlobal(pos))
+                if chosen == a_open and t and t.get('url'):
+                    view.setUrl(QUrl(t['url']))
+                elif chosen == a_rep and t:
+                    self._repeater_load({'method': t.get('method'), 'url': t.get('url'),
+                                         'headers': t.get('reqHeaders') or {}, 'data': t.get('reqBody')})
+                elif chosen == a_copy:
+                    try:
+                        QtWidgets.QApplication.clipboard().setText(
+                            f"[{it['sev']}] {it['type']} — {it['detail']}")
+                    except Exception:
+                        pass
+                elif chosen == a_nuc and t:
+                    _nuclei_scan(t)
+
+            def _clear_issues():
+                self._browser_issues = []
+                issues_table.setRowCount(0)
+                issue_detail.clear()
+                _update_issue_counts()
+
+            def _export_issues():
+                from PySide6.QtWidgets import QFileDialog
+                path, _ = QFileDialog.getSaveFileName(self, 'Export issues',
+                                                      'browser_issues.json', 'JSON (*.json);;CSV (*.csv)')
+                if not path:
+                    return
+                try:
+                    if path.lower().endswith('.csv'):
+                        import csv
+                        with open(path, 'w', newline='', encoding='utf-8') as f:
+                            w = csv.writer(f); w.writerow(['severity', 'type', 'host', 'detail'])
+                            for it in self._browser_issues:
+                                w.writerow([it['sev'], it['type'], it['host'], it['detail']])
+                    else:
+                        with open(path, 'w', encoding='utf-8') as f:
+                            _json.dump(self._browser_issues, f, indent=2, default=str)
+                except Exception as e:
+                    QMessageBox.warning(self, 'Export', f'Failed: {e}')
+
+            def _scan_all_nuclei():
+                import shutil
+                from PySide6.QtCore import QProcess
+                if not shutil.which('nuclei'):
+                    self._download_tools_dialog(['nuclei'],
+                        'nuclei is needed to actively scan the captured URLs.', title='Install nuclei')
+                    if not shutil.which('nuclei'):
+                        return
+                seen = set(); urls = []
+                for t in self._browser_txns:
+                    u = t.get('url')
+                    if not u or u in seen:
+                        continue
+                    if interceptor.scope and interceptor.scope.lower() not in (t.get('host', '') or '').lower():
+                        continue
+                    seen.add(u); urls.append(u)
+                urls = urls[:300]
+                if not urls:
+                    _add_issue('INFO', 'nuclei', '', 'No captured URLs to scan yet.', None)
+                    return
+                _add_issue('INFO', 'nuclei', '', f'Scanning {len(urls)} captured URL(s) with nuclei…', None)
+                buf = {'data': ''}
+                proc = QProcess(page)
+                proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+
+                def _out():
+                    buf['data'] += bytes(proc.readAllStandardOutput()).decode('utf-8', 'replace')
+
+                def _fin(*_a):
+                    n = 0
+                    for line in buf['data'].splitlines():
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            obj = _json.loads(line)
+                        except Exception:
+                            continue
+                        info = obj.get('info') or {}
+                        sev = {'critical': 'HIGH', 'high': 'HIGH', 'medium': 'MEDIUM',
+                               'low': 'LOW', 'info': 'INFO'}.get(
+                                   str(info.get('severity', 'info')).lower(), 'INFO')
+                        matched = obj.get('matched-at') or obj.get('host') or ''
+                        host = ''
+                        try:
+                            host = urlparse(matched).netloc
+                        except Exception:
+                            pass
+                        _add_issue(sev, f"nuclei: {info.get('name', 'finding')}", host, matched, None)
+                        n += 1
+                    _add_issue('INFO', 'nuclei', '', f'nuclei batch finished — {n} finding(s)', None)
+
+                proc.readyReadStandardOutput.connect(_out)
+                proc.finished.connect(_fin)
+                self._browser_procs = getattr(self, '_browser_procs', [])
+                self._browser_procs.append(proc)
+                proc.start('nuclei', ['-silent', '-jsonl'])
+                try:
+                    proc.write(('\n'.join(urls) + '\n').encode('utf-8'))
+                    proc.closeWriteChannel()
+                except Exception:
+                    pass
+
+            # ---- pentest: per-request actions ----
+            def _sh(s):
+                return "'" + str(s).replace("'", "'\\''") + "'"
+
+            def _copy_curl(t):
+                parts = [f"curl -X {t.get('method', 'GET')} {_sh(t.get('url', ''))}"]
+                for k, val in (t.get('reqHeaders') or {}).items():
+                    parts.append(f"-H {_sh(f'{k}: {val}')}")
+                if t.get('reqBody'):
+                    parts.append(f"--data {_sh(str(t['reqBody']))}")
+                try:
+                    QtWidgets.QApplication.clipboard().setText(' '.join(parts))
+                except Exception:
+                    pass
+
+            def _nuclei_scan(t):
+                import shutil
+                from PySide6.QtCore import QProcess
+                url = t.get('url')
+                if not url:
+                    return
+                if not shutil.which('nuclei'):
+                    self._download_tools_dialog(['nuclei'],
+                        'nuclei is needed to scan this URL for vulnerabilities.',
+                        title='Install nuclei')
+                    if not shutil.which('nuclei'):
+                        return
+                tabs.setCurrentIndex(1)
+                _add_issue('INFO', 'nuclei', t.get('host', ''), f'Scanning {url} with nuclei…', t['id'])
+                buf = {'data': ''}
+                proc = QProcess(page)
+                proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+
+                def _out():
+                    buf['data'] += bytes(proc.readAllStandardOutput()).decode('utf-8', 'replace')
+
+                def _fin(*_a):
+                    n = 0
+                    for line in buf['data'].splitlines():
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            obj = _json.loads(line)
+                        except Exception:
+                            continue
+                        info = obj.get('info') or {}
+                        sev = {'critical': 'HIGH', 'high': 'HIGH', 'medium': 'MEDIUM',
+                               'low': 'LOW', 'info': 'INFO'}.get(
+                                   str(info.get('severity', 'info')).lower(), 'INFO')
+                        _add_issue(sev, f"nuclei: {info.get('name', 'finding')}",
+                                   t.get('host', ''), obj.get('matched-at') or url, t['id'])
+                        n += 1
+                    _add_issue('INFO', 'nuclei', t.get('host', ''),
+                               f'nuclei finished — {n} finding(s) for {url}', t['id'])
+
+                proc.readyReadStandardOutput.connect(_out)
+                proc.finished.connect(_fin)
+                self._browser_procs = getattr(self, '_browser_procs', [])
+                self._browser_procs.append(proc)
+                proc.start('nuclei', ['-u', url, '-silent', '-jsonl'])
+
+            def _ctx_menu(pos):
+                t = _selected_txn()
+                if not t:
+                    return
+                m = QMenu(table)
+                a_rep = m.addAction('Send to Repeater')
+                a_curl = m.addAction('Copy as cURL')
+                a_open = m.addAction('Open URL in browser')
+                a_nuc = m.addAction('Scan URL with nuclei')
+                chosen = m.exec(table.viewport().mapToGlobal(pos))
+                if chosen == a_rep:
+                    _to_repeater()
+                elif chosen == a_curl:
+                    _copy_curl(t)
+                elif chosen == a_open and t.get('url'):
+                    view.setUrl(QUrl(t['url']))
+                elif chosen == a_nuc:
+                    _nuclei_scan(t)
+
+            # ---- customization: settings + export ----
+            def _apply_proxy(s):
+                from PySide6.QtNetwork import QNetworkProxy
+                try:
+                    if not s:
+                        QNetworkProxy.setApplicationProxy(QNetworkProxy(QNetworkProxy.ProxyType.NoProxy))
+                        return
+                    host, _, port = s.partition(':')
+                    QNetworkProxy.setApplicationProxy(QNetworkProxy(
+                        QNetworkProxy.ProxyType.HttpProxy, host.strip(), int(port or '8080')))
+                except Exception:
+                    pass
+
+            def _settings():
+                from PySide6.QtWidgets import (QDialog, QFormLayout, QDialogButtonBox, QCheckBox)
+                d = QDialog(self); d.setWindowTitle('Browser settings'); d.resize(580, 540)
+                form = QFormLayout(d)
+                ua_edit = QLineEdit(); ua_edit.setText(profile.httpUserAgent())
+                form.addRow('User-Agent:', ua_edit)
+                hdr_edit = QPlainTextEdit(); hdr_edit.setMaximumHeight(110)
+                hdr_edit.setPlaceholderText('one per line — e.g.  X-Forwarded-For: 127.0.0.1')
+                hdr_edit.setPlainText('\n'.join(f'{k}: {v}' for k, v in interceptor.extra_headers.items()))
+                form.addRow('Inject headers:', hdr_edit)
+                proxy_edit = QLineEdit(); proxy_edit.setText(getattr(self, '_browser_proxy', ''))
+                proxy_edit.setPlaceholderText('host:port (e.g. 127.0.0.1:8080 to chain through Burp/Caido)')
+                form.addRow('Upstream proxy:', proxy_edit)
+                scope_edit = QLineEdit(); scope_edit.setText(interceptor.scope)
+                scope_edit.setPlaceholderText('only capture hosts containing this (blank = all)')
+                form.addRow('Scope host:', scope_edit)
+                block_chk = QCheckBox('Block images / media / fonts (faster, fewer rows)')
+                block_chk.setChecked(bool(interceptor.block_types))
+                form.addRow('', block_chk)
+                js_chk = QCheckBox('Disable JavaScript (also disables fetch/XHR capture)')
+                try:
+                    js_chk.setChecked(not wpage.settings().testAttribute(
+                        QWebEngineSettings.WebAttribute.JavascriptEnabled))
+                except Exception:
+                    pass
+                form.addRow('', js_chk)
+                clear_now = QPushButton('Clear cookies + cache now')
+
+                def _clear_cc():
+                    try:
+                        profile.cookieStore().deleteAllCookies()
+                        profile.clearHttpCache()
+                    except Exception:
+                        pass
+                clear_now.clicked.connect(_clear_cc)
+                form.addRow('', clear_now)
+                bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+                bb.accepted.connect(d.accept); bb.rejected.connect(d.reject)
+                form.addRow(bb)
+                if d.exec() != QDialog.DialogCode.Accepted:
+                    return
+                ua = ua_edit.text().strip()
+                if ua:
+                    try:
+                        profile.setHttpUserAgent(ua)
+                    except Exception:
+                        pass
+                hh = {}
+                for line in hdr_edit.toPlainText().splitlines():
+                    if ':' in line:
+                        k, _, vv = line.partition(':')
+                        if k.strip():
+                            hh[k.strip()] = vv.strip()
+                interceptor.extra_headers = hh
+                interceptor.scope = scope_edit.text().strip()
+                interceptor.block_types = ({i for n, i in _RT_BY_NAME.items()
+                                            if n in ('image', 'media', 'fontresource')}
+                                           if block_chk.isChecked() else set())
+                self._browser_proxy = proxy_edit.text().strip()
+                _apply_proxy(self._browser_proxy)
+                try:
+                    wpage.settings().setAttribute(
+                        QWebEngineSettings.WebAttribute.JavascriptEnabled, not js_chk.isChecked())
+                except Exception:
+                    pass
+
+            def _export():
+                from PySide6.QtWidgets import QFileDialog
+                path, _ = QFileDialog.getSaveFileName(self, 'Export traffic (HAR)',
+                                                      'browser_traffic.har', 'HAR (*.har);;JSON (*.json)')
+                if not path:
+                    return
+                entries = []
+                for t in self._browser_txns:
+                    entries.append({
+                        'startedDateTime': t.get('time', ''),
+                        'request': {'method': t.get('method', ''), 'url': t.get('url', ''),
+                                    'headers': [{'name': k, 'value': str(vv)} for k, vv in (t.get('reqHeaders') or {}).items()],
+                                    'postData': {'text': t.get('reqBody', '')} if t.get('reqBody') else {}},
+                        'response': {'status': t.get('status') or 0,
+                                     'headers': [{'name': k, 'value': str(vv)} for k, vv in (t.get('respHeaders') or {}).items()],
+                                     'content': {'size': t.get('length') or 0, 'text': t.get('respBody', '')}},
+                    })
+                har = {'log': {'version': '1.2', 'creator': {'name': 'WAFPierce', 'version': '1'},
+                               'entries': entries}}
+                try:
+                    with open(path, 'w', encoding='utf-8') as f:
+                        _json.dump(har, f, indent=2, default=str)
+                except Exception as e:
+                    QMessageBox.warning(self, 'Export', f'Failed: {e}')
+
+            # ---- wiring ----
+            interceptor.captured.connect(_on_meta, Qt.QueuedConnection)
+            wpage.consoleMsg.connect(_on_console, Qt.QueuedConnection)
+            table.itemSelectionChanged.connect(_show_detail)
+            table.itemDoubleClicked.connect(lambda *_: _expand())
+            table.setContextMenuPolicy(Qt.CustomContextMenu)
+            table.customContextMenuRequested.connect(_ctx_menu)
+            issues_table.itemSelectionChanged.connect(_issue_selected)
+            issues_table.setContextMenuPolicy(Qt.CustomContextMenu)
+            issues_table.customContextMenuRequested.connect(_issue_ctx)
+            isev_combo.currentIndexChanged.connect(_issues_refresh)
+            isearch_edit.textChanged.connect(_issues_refresh)
+            iscan_btn.clicked.connect(_scan_all_nuclei)
+            iclear_btn.clicked.connect(_clear_issues)
+            iexport_btn.clicked.connect(_export_issues)
+            settings_btn.clicked.connect(_settings)
+            export_btn.clicked.connect(_export)
+            search_edit.textChanged.connect(_refresh)
+            method_combo.currentIndexChanged.connect(_refresh)
+            type_combo.currentIndexChanged.connect(_refresh)
+            pause_btn.toggled.connect(lambda on: state.__setitem__('paused', on))
+            clear_btn.clicked.connect(_clear)
+            rep_btn.clicked.connect(_to_repeater)
+            expand_btn.clicked.connect(_expand)
+            url_edit.returnPressed.connect(_go)
+            go_btn.clicked.connect(_go)
+            back_btn.clicked.connect(view.back)
+            fwd_btn.clicked.connect(view.forward)
+            reload_btn.clicked.connect(view.reload)
+            view.urlChanged.connect(lambda q: url_edit.setText(q.toString()))
+
+            # Keep strong refs so nothing is garbage-collected while the page lives.
+            self._browser_view = view
+            self._browser_page = wpage
+            self._browser_profile = profile
+            self._browser_interceptor = interceptor
+            self._browser_script_obj = locals().get('script')
+            return page
+
+        def _spawn_tool(self, page, cmd, on_stdout, on_finished, env_extra=None):
+            """Run an external tool as a QProcess (merged stdout/stderr), streaming
+            to on_stdout and calling on_finished(code) at the end. The proc is kept
+            alive on self so it survives page switches."""
+            from PySide6.QtCore import QProcess, QProcessEnvironment
+            proc = QProcess(page)
+            proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+            env = QProcessEnvironment.systemEnvironment()
+            env.insert('PYTHONIOENCODING', 'utf-8')
+            env.insert('PYTHONUNBUFFERED', '1')
+            for k, val in (env_extra or {}).items():
+                env.insert(k, val)
+            proc.setProcessEnvironment(env)
+            proc.readyReadStandardOutput.connect(on_stdout)
+            proc.finished.connect(on_finished)
+            self._tool_procs = getattr(self, '_tool_procs', [])
+            self._tool_procs.append(proc)
+            proc.start(cmd[0], cmd[1:])
+            # These tools take args, not stdin; give them EOF so they can never
+            # block waiting for input (e.g. an un-batched interactive prompt).
+            try:
+                proc.closeWriteChannel()
+            except Exception:
+                pass
+            return proc
+
+        def _build_pipeline_page(self):
+            """One-click chained pentest: Recon → content discovery → vuln scan →
+            offensive (exploit-tag nuclei + commix), each phase auto-feeding the
+            next. Offensive phases are gated and target only what you enter."""
+            from PySide6 import QtWidgets
+            from PySide6.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
+                QPushButton, QCheckBox, QPlainTextEdit, QTreeWidget, QTreeWidgetItem,
+                QSplitter, QGroupBox, QGridLayout)
+            from PySide6.QtCore import Qt
+            from PySide6.QtGui import QBrush, QColor
+            import json as _json
+            import os as _os
+            import tempfile
+
+            page = QtWidgets.QWidget(); page.setObjectName('PipelinePage')
+            v = QVBoxLayout(page); v.setContentsMargins(22, 20, 22, 20)
+            hdr = QLabel('⛓  Pipeline — one-click chained pentest')
+            hdr.setStyleSheet('font-size:18px; font-weight:bold; color:#58a6ff;')
+            v.addWidget(hdr)
+
+            row = QHBoxLayout(); row.addWidget(QLabel('Target:'))
+            target_edit = QLineEdit(); target_edit.setPlaceholderText('example.com')
+            try:
+                t = self.target_edit.text().strip()
+                if t:
+                    target_edit.setText(t)
+            except Exception:
+                pass
+            row.addWidget(target_edit, 1); v.addLayout(row)
+
+            box = QGroupBox('Phases (run top-to-bottom; each feeds the next)')
+            pg = QGridLayout(box)
+            recon_chk = QCheckBox('Recon  (subdomains · dns · httpx · tls · gau)'); recon_chk.setChecked(True)
+            ffuf_chk = QCheckBox('Content discovery  (ffuf)'); ffuf_chk.setChecked(True)
+            nuclei_chk = QCheckBox('Vuln scan  (nuclei)'); nuclei_chk.setChecked(True)
+            cmdi_chk = QCheckBox('Command injection  (commix)  ⚠'); cmdi_chk.setChecked(True)
+            offensive_chk = QCheckBox('Offensive mode — run real exploit checks/attacks'); offensive_chk.setChecked(True)
+            offensive_chk.setStyleSheet('color:#ef4444; font-weight:bold;')
+            pg.addWidget(recon_chk, 0, 0); pg.addWidget(ffuf_chk, 0, 1)
+            pg.addWidget(nuclei_chk, 1, 0); pg.addWidget(cmdi_chk, 1, 1)
+            pg.addWidget(offensive_chk, 2, 0, 1, 2)
+            v.addWidget(box)
+
+            warn = QLabel('⚠  Offensive phases launch real attacks (exploit templates, command-injection). '
+                          'Only run against systems you are authorized to test.')
+            warn.setStyleSheet('color:#f59e0b;'); warn.setWordWrap(True)
+            v.addWidget(warn)
+
+            brow = QHBoxLayout()
+            run_btn = QPushButton('▶  Run Pipeline'); run_btn.setObjectName('PrimaryButton')
+            stop_btn = QPushButton('■ Stop'); stop_btn.setEnabled(False)
+            merge_btn = QPushButton('＋ Merge to Results'); merge_btn.setEnabled(False)
+            tools_btn = QPushButton('⬇ Install tools')
+            brow.addWidget(run_btn); brow.addWidget(stop_btn); brow.addWidget(merge_btn)
+            brow.addStretch(); brow.addWidget(tools_btn)
+            v.addLayout(brow)
+            tools_btn.clicked.connect(lambda: self._download_tools_dialog(
+                ['subfinder', 'dnsx', 'httpx', 'ffuf', 'nuclei', 'commix'],
+                'Tools the pipeline chains together.', title='Install pipeline tools'))
+
+            split = QSplitter(Qt.Vertical)
+            tree = QTreeWidget()
+            tree.setHeaderLabels(['Finding', 'Severity', 'Target', 'Detail'])
+            tree.setColumnWidth(0, 220); tree.setColumnWidth(1, 80); tree.setColumnWidth(2, 280)
+            split.addWidget(tree)
+            log = QPlainTextEdit(); log.setReadOnly(True)
+            log.setStyleSheet('font-family:Consolas,monospace; font-size:12px;')
+            split.addWidget(log); split.setSizes([320, 220])
+            v.addWidget(split, 1)
+
+            ctx = {}
+            pstate = {'running': False, 'plan': [], 'i': 0, 'buf': '', 'proc': None}
+
+            def _log(s):
+                log.appendPlainText(s.rstrip())
+
+            def _add_finding(tech, target, sev, detail):
+                f = {'category': 'pipeline', 'recon': True, 'bypass': False, 'technique': tech,
+                     'target': str(target), 'severity': sev, 'reason': str(detail)}
+                ctx.setdefault('findings', []).append(f)
+                it = QTreeWidgetItem([tech, sev, str(target), str(detail)[:200]])
+                col = {'HIGH': '#ef4444', 'MEDIUM': '#f59e0b', 'LOW': '#9aa5b5'}.get(sev)
+                if col:
+                    try:
+                        it.setForeground(1, QBrush(QColor(col)))
+                    except Exception:
+                        pass
+                tree.addTopLevelItem(it)
+
+            def _norm(t):
+                t = (t or '').strip()
+                if '://' in t:
+                    from urllib.parse import urlparse
+                    t = urlparse(t).hostname or t
+                return t
+
+            # ---------- phase builders ----------
+            def _mk_recon():
+                host = _norm(target_edit.text())
+                tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.json'); tmp.close()
+                ctx['tmp_recon'] = tmp.name; ctx.setdefault('tmps', []).append(tmp.name)
+                cmd = self._recon_worker_cmd(host, tmp.name, 120, 100, no_ports=True,
+                                             opts={'max_hosts': 150, 'do_tls': True,
+                                                   'do_historical': True, 'do_ports': False})
+                return cmd, None
+
+            def _done_recon(out):
+                tmp = ctx.get('tmp_recon')
+                data = []
+                if tmp and _os.path.exists(tmp):
+                    try:
+                        with open(tmp, 'r', encoding='utf-8') as f:
+                            data = _json.load(f)
+                    except Exception:
+                        data = []
+                for f in (data if isinstance(data, list) else []):
+                    _add_finding(f.get('technique', '?'), f.get('target', ''),
+                                 f.get('severity', 'INFO'), f.get('reason', ''))
+                    if f.get('technique') == 'HTTP Service':
+                        u = f.get('target') or ''
+                        if u.startswith('http'):
+                            ctx.setdefault('live_urls', []).append(u)
+                    if f.get('technique') in ('Historical URLs', 'Crawled Endpoints'):
+                        for u in (f.get('urls') or f.get('endpoints') or [])[:1000]:
+                            if '?' in u and '=' in u:
+                                ctx.setdefault('param_urls', []).append(u)
+                lu = list(dict.fromkeys(ctx.get('live_urls', [])))
+                if not lu:
+                    lu = ['https://' + _norm(target_edit.text())]
+                ctx['live_urls'] = lu
+                ctx['param_urls'] = list(dict.fromkeys(ctx.get('param_urls', [])))
+                _log(f'  → {len(ctx["live_urls"])} live URL(s), {len(ctx["param_urls"])} parameterized URL(s)')
+
+            def _mk_ffuf():
+                import shutil
+                if not shutil.which('ffuf'):
+                    _log('  (ffuf not installed — skipping)'); return None, None
+                from . import recon_install
+                root = (ctx.get('live_urls') or ['https://' + _norm(target_edit.text())])[0].rstrip('/')
+                wl = recon_install.ensure_builtin_wordlist()
+                tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.json'); tmp.close()
+                ctx['tmp_ffuf'] = tmp.name; ctx.setdefault('tmps', []).append(tmp.name)
+                cmd = ['ffuf', '-w', wl, '-u', root + '/FUZZ', '-mc', '200,204,301,302,307,401,403',
+                       '-t', '40', '-ac', '-of', 'json', '-o', tmp.name, '-s', '-noninteractive']
+                return cmd, None
+
+            def _done_ffuf(out):
+                tmp = ctx.get('tmp_ffuf'); n = 0
+                if tmp and _os.path.exists(tmp):
+                    try:
+                        with open(tmp, 'r', encoding='utf-8') as f:
+                            for res in (_json.load(f).get('results') or []):
+                                _add_finding('Content', res.get('url', ''), 'INFO',
+                                             f"HTTP {res.get('status')} ({res.get('length')} bytes)")
+                                n += 1
+                    except Exception:
+                        pass
+                _log(f'  → {n} path(s)')
+
+            def _mk_nuclei():
+                import shutil
+                if not shutil.which('nuclei'):
+                    _log('  (nuclei not installed — skipping)'); return None, None
+                urls = ctx.get('live_urls') or []
+                if not urls:
+                    return None, None
+                lf = tempfile.NamedTemporaryFile('w', delete=False, suffix='.txt', encoding='utf-8')
+                lf.write('\n'.join(urls)); lf.close(); ctx.setdefault('tmps', []).append(lf.name)
+                cmd = ['nuclei', '-l', lf.name, '-jsonl', '-silent',
+                       '-severity', 'low,medium,high,critical']
+                if offensive_chk.isChecked():
+                    cmd += ['-tags', 'cve,rce,sqli,lfi,ssrf,xxe,injection,exposure']
+                return cmd, None
+
+            def _done_nuclei(out):
+                n = 0
+                for line in out.splitlines():
+                    line = line.strip()
+                    if not line.startswith('{'):
+                        continue
+                    try:
+                        o = _json.loads(line)
+                    except Exception:
+                        continue
+                    info = o.get('info') or {}
+                    sev = {'critical': 'HIGH', 'high': 'HIGH', 'medium': 'MEDIUM',
+                           'low': 'LOW', 'info': 'INFO'}.get(str(info.get('severity', 'info')).lower(), 'INFO')
+                    _add_finding(f"Vuln: {info.get('name', 'finding')}",
+                                 o.get('matched-at') or o.get('host') or '', sev,
+                                 info.get('severity', ''))
+                    n += 1
+                _log(f'  → {n} vuln finding(s)')
+
+            def _mk_commix():
+                from . import recon_install
+                if not recon_install.is_installed('commix'):
+                    _log('  (commix not installed — skipping)'); return None, None
+                params = ctx.get('param_urls') or []
+                if not params:
+                    _log('  (no parameterized URLs to test)'); return None, None
+                pre, env = recon_install.python_tool_cmd('commix')
+                outdir = tempfile.mkdtemp(prefix='wp_commix_')
+                ctx['commix_url'] = params[0]
+                cmd = list(pre) + ['-u', params[0], '--batch', f'--output-dir={outdir}']
+                return cmd, env
+
+            def _done_commix(out):
+                hit = False
+                for line in out.splitlines():
+                    low = line.lower()
+                    if 'is vulnerable' in low or 'command injection' in low or 'injection point' in low:
+                        _add_finding('Command Injection', ctx.get('commix_url', ''), 'HIGH',
+                                     line.strip()[:160]); hit = True
+                if not hit:
+                    _log('  → no command injection confirmed')
+
+            PHASES = {
+                'recon': {'name': 'Recon', 'make': _mk_recon, 'done': _done_recon},
+                'ffuf': {'name': 'Content discovery (ffuf)', 'make': _mk_ffuf, 'done': _done_ffuf},
+                'nuclei': {'name': 'Vuln scan (nuclei)', 'make': _mk_nuclei, 'done': _done_nuclei},
+                'commix': {'name': 'Command injection (commix)', 'make': _mk_commix, 'done': _done_commix},
+            }
+
+            # ---------- runner ----------
+            def _finish():
+                pstate['running'] = False
+                run_btn.setEnabled(True); stop_btn.setEnabled(False)
+                merge_btn.setEnabled(bool(ctx.get('findings')))
+                for t in ctx.get('tmps', []):
+                    try:
+                        _os.unlink(t)
+                    except Exception:
+                        pass
+
+            def _next():
+                if not pstate['running']:
+                    return
+                i = pstate['i']
+                if i >= len(pstate['plan']):
+                    _log('\n══════ Pipeline complete ══════')
+                    _finish(); return
+                phase = pstate['plan'][i]
+                try:
+                    cmd, env = phase['make']()
+                except Exception as e:
+                    _log(f'[!] {phase["name"]}: {e}'); pstate['i'] += 1; _next(); return
+                if not cmd:
+                    pstate['i'] += 1; _next(); return
+                _log(f'\n══ {phase["name"]} ══\n$ ' + ' '.join(str(c) for c in cmd) + '\n')
+                pstate['buf'] = ''
+
+                def _out():
+                    p = pstate.get('proc')
+                    if p:
+                        d = bytes(p.readAllStandardOutput()).decode('utf-8', 'replace')
+                        pstate['buf'] += d
+                        log.appendPlainText(d.rstrip())
+
+                def _fin(code=0, status=None):
+                    try:
+                        phase['done'](pstate['buf'])
+                    except Exception as e:
+                        _log(f'[!] {phase["name"]} parse error: {e}')
+                    pstate['i'] += 1
+                    _next()
+
+                pstate['proc'] = self._spawn_tool(page, cmd, _out, _fin, env_extra=env)
+
+            def _run():
+                if pstate['running']:
+                    return
+                if not _norm(target_edit.text()):
+                    _log('[!] enter a target first.')
+                    return
+                ctx.clear()
+                tree.clear(); log.clear()
+                plan = []
+                if recon_chk.isChecked():
+                    plan.append(PHASES['recon'])
+                if ffuf_chk.isChecked():
+                    plan.append(PHASES['ffuf'])
+                if nuclei_chk.isChecked():
+                    plan.append(PHASES['nuclei'])
+                if cmdi_chk.isChecked() and offensive_chk.isChecked():
+                    plan.append(PHASES['commix'])
+                pstate.update({'running': True, 'plan': plan, 'i': 0, 'buf': ''})
+                run_btn.setEnabled(False); stop_btn.setEnabled(True); merge_btn.setEnabled(False)
+                _log(f'Pipeline: {len(plan)} phase(s) against {_norm(target_edit.text())} '
+                     f'(offensive={"on" if offensive_chk.isChecked() else "off"})')
+                _next()
+
+            def _stop():
+                pstate['running'] = False
+                p = pstate.get('proc')
+                if p:
+                    try:
+                        p.kill()
+                    except Exception:
+                        pass
+                _log('\n[pipeline] stopped by user')
+                _finish()
+
+            def _merge():
+                fs = ctx.get('findings') or []
+                if fs:
+                    self._results.extend(fs)
+                    try:
+                        self._refresh_tree_display()
+                    except Exception:
+                        pass
+                    _log(f'[pipeline] merged {len(fs)} finding(s) into Results.')
+
+            run_btn.clicked.connect(_run)
+            stop_btn.clicked.connect(_stop)
+            merge_btn.clicked.connect(_merge)
+            return page
+
+        def _build_fuzzer_page(self):
+            """ffuf content discovery — dir/file/vhost/parameter fuzzing via FUZZ."""
+            from PySide6 import QtWidgets
+            from PySide6.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
+                QPushButton, QPlainTextEdit, QSpinBox, QCheckBox, QComboBox, QTableWidget,
+                QTableWidgetItem, QSplitter, QHeaderView, QAbstractItemView, QFileDialog)
+            from PySide6.QtCore import Qt
+            import shutil
+            import tempfile
+            import json as _json
+            import os as _os
+            import re as _re
+
+            page = QtWidgets.QWidget(); page.setObjectName('FuzzerPage')
+            v = QVBoxLayout(page); v.setContentsMargins(22, 20, 22, 20)
+            hdr = QLabel('⌗  Fuzzer — ffuf content discovery')
+            hdr.setStyleSheet('font-size:18px; font-weight:bold; color:#58a6ff;')
+            v.addWidget(hdr)
+            v.addWidget(QLabel('Put the FUZZ marker in the URL (or a header). '
+                               'e.g.  https://target/FUZZ   ·   https://target/api?FUZZ=1   ·   Host: FUZZ.target.com'))
+
+            row = QHBoxLayout(); row.addWidget(QLabel('URL:'))
+            url_edit = QLineEdit(); url_edit.setPlaceholderText('https://target/FUZZ')
+            try:
+                t = self.target_edit.text().strip()
+                if t:
+                    url_edit.setText(t.rstrip('/') + '/FUZZ')
+            except Exception:
+                pass
+            row.addWidget(url_edit, 1); v.addLayout(row)
+
+            wrow = QHBoxLayout(); wrow.addWidget(QLabel('Wordlist:'))
+            wl_edit = QLineEdit(); wl_edit.setPlaceholderText('(built-in common.txt used if blank)')
+            browse_btn = QPushButton('Browse')
+            wrow.addWidget(wl_edit, 1); wrow.addWidget(browse_btn); v.addLayout(wrow)
+
+            hdr_edit = QPlainTextEdit(); hdr_edit.setMaximumHeight(56)
+            hdr_edit.setPlaceholderText('extra headers (optional, FUZZ allowed) — e.g.  Host: FUZZ.target.com')
+            v.addWidget(hdr_edit)
+
+            orow = QHBoxLayout()
+            orow.addWidget(QLabel('Engine:'))
+            engine_combo = QComboBox(); engine_combo.addItems(['ffuf', 'feroxbuster', 'gobuster'])
+            engine_combo.setToolTip('ffuf uses the FUZZ marker; feroxbuster/gobuster append the wordlist to the base URL.')
+            orow.addWidget(engine_combo)
+            orow.addWidget(QLabel('Match codes:'))
+            mc_edit = QLineEdit('200,204,301,302,307,401,403,405,500'); mc_edit.setMaximumWidth(240)
+            orow.addWidget(mc_edit)
+            orow.addWidget(QLabel('Threads:'))
+            th_spin = QSpinBox(); th_spin.setRange(1, 200); th_spin.setValue(40); orow.addWidget(th_spin)
+            ac_chk = QCheckBox('Auto-calibrate'); ac_chk.setChecked(True)
+            orow.addWidget(ac_chk); orow.addStretch(); v.addLayout(orow)
+
+            brow = QHBoxLayout()
+            run_btn = QPushButton('▶ Run'); stop_btn = QPushButton('■ Stop'); stop_btn.setEnabled(False)
+            tools_btn = QPushButton('⬇ Install engines')
+            brow.addWidget(run_btn); brow.addWidget(stop_btn); brow.addStretch(); brow.addWidget(tools_btn)
+            v.addLayout(brow)
+            browse_btn.clicked.connect(
+                lambda: (lambda p: wl_edit.setText(p) if p else None)(QFileDialog.getOpenFileName(self, 'Wordlist')[0]))
+            tools_btn.clicked.connect(lambda: self._download_tools_dialog(
+                ['ffuf', 'feroxbuster', 'gobuster'], 'Content-discovery engines.', title='Install fuzzing engines'))
+
+            split = QSplitter(Qt.Vertical)
+            table = QTableWidget(0, 6)
+            table.setHorizontalHeaderLabels(['Status', 'Length', 'Words', 'Lines', 'Input', 'URL'])
+            table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+            table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+            table.setSortingEnabled(True)
+            try:
+                table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+            except Exception:
+                pass
+            split.addWidget(table)
+            log = QPlainTextEdit(); log.setReadOnly(True); log.setMaximumHeight(140)
+            log.setStyleSheet('font-family:Consolas,monospace; font-size:12px;')
+            split.addWidget(log); split.setSizes([360, 140]); v.addWidget(split, 1)
+
+            st = {'proc': None, 'tmp': None, 'engine': 'ffuf', 'base': ''}
+            _GOB_RE = _re.compile(r'^(\S+)\s+\(Status:\s*(\d+)\)(?:\s*\[Size:\s*(\d+)\])?')
+
+            def _ap(s):
+                log.appendPlainText(s.rstrip())
+
+            def _num(n):
+                it = QTableWidgetItem()
+                try:
+                    it.setData(Qt.ItemDataRole.DisplayRole, int(n))
+                except Exception:
+                    it.setText(str(n))
+                return it
+
+            def _add_row(status, length, words, lines, inp, url):
+                table.setSortingEnabled(False)
+                r = table.rowCount(); table.insertRow(r)
+                table.setItem(r, 0, _num(status)); table.setItem(r, 1, _num(length))
+                table.setItem(r, 2, _num(words)); table.setItem(r, 3, _num(lines))
+                table.setItem(r, 4, QTableWidgetItem(str(inp)))
+                table.setItem(r, 5, QTableWidgetItem(str(url)))
+                table.setSortingEnabled(True)
+
+            def _on_out():
+                p = st['proc']
+                if not p:
+                    return
+                txt = bytes(p.readAllStandardOutput()).decode('utf-8', 'replace')
+                eng = st['engine']
+                if eng == 'ffuf':
+                    _ap(txt)   # ffuf results parsed from temp JSON on finish
+                    return
+                for line in txt.splitlines():
+                    line = line.rstrip()
+                    if not line:
+                        continue
+                    if eng == 'feroxbuster' and line.lstrip().startswith('{'):
+                        try:
+                            obj = _json.loads(line)
+                        except Exception:
+                            _ap(line); continue
+                        if obj.get('type') == 'response':
+                            url = obj.get('url', '')
+                            _add_row(obj.get('status', 0), obj.get('content_length', 0),
+                                     obj.get('word_count', 0), obj.get('line_count', 0),
+                                     url.rstrip('/').rsplit('/', 1)[-1], url)
+                        continue
+                    if eng == 'gobuster':
+                        m = _GOB_RE.match(line.strip())
+                        if m:
+                            path, code_, size = m.group(1), m.group(2), (m.group(3) or 0)
+                            _add_row(code_, size, 0, 0, path, st.get('base', '') + path.lstrip('/'))
+                            continue
+                    _ap(line)
+
+            def _on_fin(code=0, status=None):
+                run_btn.setEnabled(True); stop_btn.setEnabled(False)
+                if st['engine'] == 'ffuf':
+                    tmp = st['tmp']
+                    if tmp and _os.path.exists(tmp):
+                        try:
+                            with open(tmp, 'r', encoding='utf-8') as f:
+                                data = _json.load(f)
+                            for res in (data.get('results') or []):
+                                inp = res.get('input') or {}
+                                _add_row(res.get('status', 0), res.get('length', 0),
+                                         res.get('words', 0), res.get('lines', 0),
+                                         inp.get('FUZZ', '') if isinstance(inp, dict) else str(inp),
+                                         res.get('url', ''))
+                        except Exception as e:
+                            _ap(f'[!] parse error: {e}')
+                        finally:
+                            try:
+                                _os.unlink(tmp)
+                            except Exception:
+                                pass
+                _ap(f'\n[{st["engine"]}] finished (exit {code}) — {table.rowCount()} hit(s)')
+
+            def _run():
+                from . import recon_install
+                eng = engine_combo.currentText(); st['engine'] = eng
+                if not shutil.which(eng):
+                    self._download_tools_dialog([eng], f'{eng} is the selected fuzzing engine.',
+                                                title=f'Install {eng}')
+                    if not shutil.which(eng):
+                        return
+                u = url_edit.text().strip()
+                wl = wl_edit.text().strip() or recon_install.ensure_builtin_wordlist()
+                if not _os.path.exists(wl):
+                    _ap(f'[!] wordlist not found: {wl}')
+                    return
+                headers = [ln.strip() for ln in hdr_edit.toPlainText().splitlines()
+                           if ':' in ln and ln.split(':', 1)[0].strip()]
+                th = str(th_spin.value()); mc = mc_edit.text().strip() or 'all'
+                table.setRowCount(0); log.clear()
+                if eng == 'ffuf':
+                    if 'FUZZ' not in (u + hdr_edit.toPlainText()):
+                        _ap('[!] ffuf needs the FUZZ marker in the URL or a header.')
+                        return
+                    tmpf = tempfile.NamedTemporaryFile(delete=False, suffix='.json'); tmpf.close()
+                    st['tmp'] = tmpf.name
+                    cmd = ['ffuf', '-w', wl, '-u', u, '-mc', mc, '-t', th,
+                           '-of', 'json', '-o', tmpf.name, '-s', '-noninteractive']
+                    if ac_chk.isChecked():
+                        cmd.append('-ac')
+                    for h in headers:
+                        cmd += ['-H', h]
+                else:
+                    base = u.replace('/FUZZ', '').replace('FUZZ', '').rstrip('/')
+                    if not base:
+                        _ap('[!] enter a base URL (feroxbuster/gobuster append the wordlist).')
+                        return
+                    st['base'] = base + '/'
+                    if eng == 'feroxbuster':
+                        cmd = ['feroxbuster', '-u', base, '-w', wl, '--json', '--silent', '-t', th]
+                    else:  # gobuster
+                        cmd = ['gobuster', 'dir', '-u', base, '-w', wl, '-q', '--no-error', '-t', th]
+                    for h in headers:
+                        cmd += ['-H', h]
+                _ap('$ ' + ' '.join(cmd) + '\n')
+                run_btn.setEnabled(False); stop_btn.setEnabled(True)
+                st['proc'] = self._spawn_tool(page, cmd, _on_out, _on_fin)
+
+            def _stop():
+                if st['proc']:
+                    st['proc'].kill(); _ap(f'\n[{st["engine"]}] stopped')
+            run_btn.clicked.connect(_run); stop_btn.clicked.connect(_stop)
+            return page
+
+        def _build_secrets_page(self):
+            """trufflehog — scan a git repo or local path for leaked credentials."""
+            from PySide6 import QtWidgets
+            from PySide6.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
+                QPushButton, QPlainTextEdit, QComboBox, QCheckBox, QTableWidget,
+                QTableWidgetItem, QSplitter, QHeaderView, QAbstractItemView, QFileDialog)
+            from PySide6.QtCore import Qt
+            from PySide6.QtGui import QBrush, QColor
+            import shutil
+            import json as _json
+            import os as _os
+
+            page = QtWidgets.QWidget(); page.setObjectName('SecretsPage')
+            v = QVBoxLayout(page); v.setContentsMargins(22, 20, 22, 20)
+            hdr = QLabel('⚷  Secrets — trufflehog')
+            hdr.setStyleSheet('font-size:18px; font-weight:bold; color:#58a6ff;')
+            v.addWidget(hdr)
+            v.addWidget(QLabel('Scan a git repo (clone URL) or a local folder for leaked & verified '
+                               'API keys / tokens / credentials.  Git mode needs git on PATH.'))
+
+            row = QHBoxLayout()
+            row.addWidget(QLabel('Engine:'))
+            engine_combo = QComboBox(); engine_combo.addItems(['trufflehog', 'gitleaks'])
+            engine_combo.setToolTip('trufflehog: git URL or path (verifies live secrets). gitleaks: local path/repo.')
+            row.addWidget(engine_combo)
+            mode_combo = QComboBox(); mode_combo.addItems(['Git repo URL', 'Filesystem path'])
+            row.addWidget(mode_combo)
+            target_edit = QLineEdit()
+            target_edit.setPlaceholderText('https://github.com/org/repo.git   or   C:\\path\\to\\code')
+            browse_btn = QPushButton('Browse')
+            row.addWidget(target_edit, 1); row.addWidget(browse_btn); v.addLayout(row)
+
+            orow = QHBoxLayout()
+            verified_chk = QCheckBox('Only verified secrets (trufflehog)')
+            run_btn = QPushButton('▶ Run'); stop_btn = QPushButton('■ Stop'); stop_btn.setEnabled(False)
+            tools_btn = QPushButton('⬇ Install engines')
+            orow.addWidget(verified_chk); orow.addStretch()
+            orow.addWidget(run_btn); orow.addWidget(stop_btn); orow.addWidget(tools_btn)
+            v.addLayout(orow)
+            browse_btn.clicked.connect(
+                lambda: (lambda p: target_edit.setText(p) if p else None)(
+                    QFileDialog.getExistingDirectory(self, 'Folder to scan')))
+            tools_btn.clicked.connect(lambda: self._download_tools_dialog(
+                ['trufflehog', 'gitleaks'], 'Secret-scanning engines.', title='Install secret scanners'))
+
+            split = QSplitter(Qt.Vertical)
+            table = QTableWidget(0, 4)
+            table.setHorizontalHeaderLabels(['Detector', 'Verified', 'Location', 'Secret'])
+            table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+            table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+            table.setSortingEnabled(True)
+            try:
+                table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+            except Exception:
+                pass
+            split.addWidget(table)
+            log = QPlainTextEdit(); log.setReadOnly(True); log.setMaximumHeight(120)
+            log.setStyleSheet('font-family:Consolas,monospace; font-size:12px;')
+            split.addWidget(log); split.setSizes([380, 120]); v.addWidget(split, 1)
+
+            st = {'proc': None, 'buf': '', 'count': 0, 'engine': 'trufflehog', 'tmp': None}
+
+            def _ap(s):
+                log.appendPlainText(s.rstrip())
+
+            def _add(detector, verified, loc, secret):
+                r = table.rowCount(); table.insertRow(r)
+                table.setItem(r, 0, QTableWidgetItem(detector))
+                vi = QTableWidgetItem('✓ verified' if verified else '—')
+                if verified:
+                    vi.setForeground(QBrush(QColor('#ef4444')))
+                table.setItem(r, 1, vi)
+                table.setItem(r, 2, QTableWidgetItem(loc))
+                table.setItem(r, 3, QTableWidgetItem(secret))
+
+            def _consume(line):
+                line = line.strip()
+                if not line:
+                    return
+                if not line.startswith('{'):
+                    _ap(line)
+                    return
+                try:
+                    obj = _json.loads(line)
+                except Exception:
+                    return
+                det = obj.get('DetectorName') or obj.get('detector_name') or '?'
+                ver = bool(obj.get('Verified') or obj.get('verified'))
+                raw = (obj.get('Raw') or obj.get('raw') or '')[:90]
+                loc = ''
+                meta = ((obj.get('SourceMetadata') or {}).get('Data')) or {}
+                for k in ('Git', 'Filesystem', 'Github', 'Gitlab'):
+                    d = meta.get(k) or {}
+                    if d:
+                        loc = str(d.get('file', '') or d.get('repository', ''))
+                        if d.get('line'):
+                            loc += f":{d.get('line')}"
+                        if d.get('commit'):
+                            loc += f" @{str(d.get('commit'))[:8]}"
+                        break
+                _add(det, ver, loc, raw)
+                st['count'] += 1
+
+            def _on_out():
+                p = st['proc']
+                if not p:
+                    return
+                chunk = bytes(p.readAllStandardOutput()).decode('utf-8', 'replace')
+                if st['engine'] == 'gitleaks':
+                    _ap(chunk)   # gitleaks results parsed from its JSON report on finish
+                    return
+                st['buf'] += chunk
+                while '\n' in st['buf']:
+                    line, st['buf'] = st['buf'].split('\n', 1)
+                    _consume(line)
+
+            def _on_fin(code=0, status=None):
+                if st['engine'] == 'trufflehog':
+                    if st['buf'].strip():
+                        _consume(st['buf']); st['buf'] = ''
+                else:  # gitleaks JSON report
+                    tmp = st.get('tmp')
+                    if tmp and _os.path.exists(tmp):
+                        try:
+                            with open(tmp, 'r', encoding='utf-8') as f:
+                                for g in (_json.load(f) or []):
+                                    loc = str(g.get('File', ''))
+                                    if g.get('StartLine'):
+                                        loc += f":{g.get('StartLine')}"
+                                    _add(g.get('RuleID') or g.get('Description') or 'secret',
+                                         False, loc, (g.get('Secret') or g.get('Match') or '')[:90])
+                                    st['count'] += 1
+                        except Exception as e:
+                            _ap(f'[!] gitleaks parse error: {e}')
+                        finally:
+                            try:
+                                _os.unlink(tmp)
+                            except Exception:
+                                pass
+                run_btn.setEnabled(True); stop_btn.setEnabled(False)
+                _ap(f'\n[{st["engine"]}] finished (exit {code}) — {st["count"]} secret(s)')
+
+            def _run():
+                import tempfile
+                eng = engine_combo.currentText(); st['engine'] = eng
+                if not shutil.which(eng):
+                    self._download_tools_dialog([eng], f'{eng} is the selected secret scanner.',
+                                                title=f'Install {eng}')
+                    if not shutil.which(eng):
+                        return
+                tgt = target_edit.text().strip()
+                if not tgt:
+                    _ap('[!] enter a git URL or folder path.')
+                    return
+                table.setRowCount(0); log.clear(); st['buf'] = ''; st['count'] = 0; st['tmp'] = None
+                if eng == 'trufflehog':
+                    sub = 'git' if mode_combo.currentIndex() == 0 else 'filesystem'
+                    cmd = ['trufflehog', sub, tgt, '--json', '--no-update']
+                    if verified_chk.isChecked():
+                        cmd.append('--only-verified')
+                else:  # gitleaks — scans a local path/repo
+                    tmpf = tempfile.NamedTemporaryFile(delete=False, suffix='.json'); tmpf.close()
+                    st['tmp'] = tmpf.name
+                    sub = 'git' if mode_combo.currentIndex() == 0 else 'dir'
+                    if mode_combo.currentIndex() == 0 and '://' in tgt:
+                        _ap('[!] gitleaks scans local paths — give a folder, or use trufflehog for remote URLs.')
+                    cmd = ['gitleaks', sub, tgt, '-f', 'json', '-r', tmpf.name, '--no-banner', '--exit-code', '0']
+                _ap('$ ' + ' '.join(cmd) + '\n')
+                run_btn.setEnabled(False); stop_btn.setEnabled(True)
+                st['proc'] = self._spawn_tool(page, cmd, _on_out, _on_fin)
+
+            def _stop():
+                if st['proc']:
+                    st['proc'].kill(); _ap(f'\n[{st["engine"]}] stopped')
+            run_btn.clicked.connect(_run); stop_btn.clicked.connect(_stop)
+            return page
+
+        def _build_sqli_page(self):
+            """sqlmap automated SQL injection (run with the bundled Python)."""
+            from PySide6 import QtWidgets
+            from PySide6.QtWidgets import (QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
+                QLineEdit, QPushButton, QPlainTextEdit, QSpinBox, QCheckBox, QComboBox)
+            import tempfile
+
+            page = QtWidgets.QWidget(); page.setObjectName('SqliPage')
+            v = QVBoxLayout(page); v.setContentsMargins(22, 20, 22, 20)
+            hdr = QLabel('⛁  SQLi — sqlmap')
+            hdr.setStyleSheet('font-size:18px; font-weight:bold; color:#58a6ff;')
+            v.addWidget(hdr)
+            v.addWidget(QLabel('Automated SQL injection. Runs in --batch (non-interactive). '
+                               'Use --tamper for WAF evasion. Only test systems you are authorized to.'))
+
+            g = QGridLayout()
+            g.addWidget(QLabel('URL:'), 0, 0)
+            url_edit = QLineEdit(); url_edit.setPlaceholderText('http://target/page.php?id=1')
+            g.addWidget(url_edit, 0, 1, 1, 3)
+            g.addWidget(QLabel('POST data:'), 1, 0)
+            data_edit = QLineEdit(); data_edit.setPlaceholderText('(optional) id=1&name=x  → forces POST')
+            g.addWidget(data_edit, 1, 1, 1, 3)
+            g.addWidget(QLabel('Cookie:'), 2, 0)
+            cookie_edit = QLineEdit(); cookie_edit.setPlaceholderText('(optional) PHPSESSID=…')
+            g.addWidget(cookie_edit, 2, 1, 1, 3)
+            g.addWidget(QLabel('Level:'), 3, 0)
+            level_spin = QSpinBox(); level_spin.setRange(1, 5); level_spin.setValue(1); g.addWidget(level_spin, 3, 1)
+            g.addWidget(QLabel('Risk:'), 3, 2)
+            risk_spin = QSpinBox(); risk_spin.setRange(1, 3); risk_spin.setValue(1); g.addWidget(risk_spin, 3, 3)
+            g.addWidget(QLabel('Tamper:'), 4, 0)
+            tamper_edit = QLineEdit()
+            tamper_edit.setPlaceholderText('WAF bypass scripts — e.g. space2comment,between,randomcase')
+            g.addWidget(tamper_edit, 4, 1, 1, 3)
+            v.addLayout(g)
+
+            trow = QHBoxLayout()
+            rand_chk = QCheckBox('--random-agent'); rand_chk.setChecked(True)
+            dbs_chk = QCheckBox('--dbs')
+            cur_chk = QCheckBox('current db/user')
+            tables_chk = QCheckBox('--tables')
+            trow.addWidget(rand_chk); trow.addWidget(dbs_chk); trow.addWidget(cur_chk)
+            trow.addWidget(tables_chk); trow.addStretch(); v.addLayout(trow)
+
+            brow = QHBoxLayout()
+            brow.addWidget(QLabel('Engine:'))
+            engine_combo = QComboBox(); engine_combo.addItems(['sqlmap', 'ghauri'])
+            engine_combo.setToolTip('sqlmap: full-featured (tamper/risk). ghauri: faster, fewer requests.')
+            brow.addWidget(engine_combo)
+            run_btn = QPushButton('▶ Run'); stop_btn = QPushButton('■ Stop'); stop_btn.setEnabled(False)
+            tools_btn = QPushButton('⬇ Install engines')
+            brow.addWidget(run_btn); brow.addWidget(stop_btn); brow.addStretch(); brow.addWidget(tools_btn)
+            v.addLayout(brow)
+            summary = QLabel(''); summary.setStyleSheet('color:#22c55e; font-weight:bold;')
+            v.addWidget(summary)
+            tools_btn.clicked.connect(lambda: self._download_tools_dialog(
+                ['sqlmap', 'ghauri'], 'SQL-injection engines.', title='Install SQLi engines'))
+
+            log = QPlainTextEdit(); log.setReadOnly(True)
+            log.setStyleSheet('font-family:Consolas,monospace; font-size:12px;')
+            v.addWidget(log, 1)
+
+            st = {'proc': None, 'found': []}
+
+            def _ap(s):
+                log.appendPlainText(s.rstrip())
+
+            def _on_out():
+                p = st['proc']
+                if not p:
+                    return
+                txt = bytes(p.readAllStandardOutput()).decode('utf-8', 'replace')
+                _ap(txt)
+                for line in txt.splitlines():
+                    low = line.lower()
+                    if ('is vulnerable' in low or ('parameter' in low and 'vulnerable' in low)
+                            or 'back-end dbms:' in low):
+                        st['found'].append(line.strip())
+                if st['found']:
+                    summary.setText(('  ·  '.join(dict.fromkeys(st['found'])))[:400])
+
+            def _on_fin(code=0, status=None):
+                run_btn.setEnabled(True); stop_btn.setEnabled(False)
+                _ap(f'\n[{st.get("engine", "sqlmap")}] finished (exit {code})')
+                if not st['found']:
+                    summary.setText('No injection confirmed — try a higher --level/--risk or a --tamper script.')
+
+            def _run():
+                from . import recon_install
+                eng = engine_combo.currentText(); st['engine'] = eng
+                u = url_edit.text().strip()
+                if not u:
+                    _ap('[!] enter a URL.')
+                    return
+                env_extra = None
+                if eng == 'sqlmap':
+                    script = recon_install.sqlmap_script()
+                    if not script:
+                        self._download_tools_dialog(['sqlmap'], 'sqlmap is needed to test for SQL injection.',
+                                                    title='Install sqlmap')
+                        script = recon_install.sqlmap_script()
+                        if not script:
+                            return
+                    outdir = tempfile.mkdtemp(prefix='wp_sqlmap_out_')
+                    cmd = [sys.executable, script, '-u', u, '--batch', '--disable-coloring',
+                           f'--level={level_spin.value()}', f'--risk={risk_spin.value()}',
+                           f'--output-dir={outdir}']
+                    if tamper_edit.text().strip():
+                        cmd += ['--tamper', tamper_edit.text().strip()]
+                    if rand_chk.isChecked():
+                        cmd.append('--random-agent')
+                else:  # ghauri (run as a module from the isolated pylibs dir)
+                    if not recon_install.is_installed('ghauri'):
+                        self._download_tools_dialog(['ghauri'], 'ghauri is a fast SQLi alternative.',
+                                                    title='Install ghauri')
+                        if not recon_install.is_installed('ghauri'):
+                            return
+                    prefix, env_extra = recon_install.python_tool_cmd('ghauri')
+                    cmd = list(prefix) + ['-u', u, '--batch', f'--level={level_spin.value()}']
+                # shared options (both engines understand these)
+                if data_edit.text().strip():
+                    cmd += ['--data', data_edit.text().strip()]
+                if cookie_edit.text().strip():
+                    cmd += ['--cookie', cookie_edit.text().strip()]
+                if dbs_chk.isChecked():
+                    cmd.append('--dbs')
+                if cur_chk.isChecked():
+                    cmd += ['--current-db', '--current-user']
+                if tables_chk.isChecked():
+                    cmd.append('--tables')
+                log.clear(); summary.setText(''); st['found'] = []
+                _ap('$ ' + ' '.join(cmd) + '\n')
+                run_btn.setEnabled(False); stop_btn.setEnabled(True)
+                st['proc'] = self._spawn_tool(page, cmd, _on_out, _on_fin, env_extra=env_extra)
+
+            def _stop():
+                if st['proc']:
+                    st['proc'].kill(); _ap(f'\n[{st.get("engine", "sqlmap")}] stopped')
+            run_btn.clicked.connect(_run); stop_btn.clicked.connect(_stop)
+            return page
+
+        def _build_settings_page(self):
+            try:
+                dlg = QtWidgets.QWidget()
+                dlg.setObjectName('SettingsPage')
                 layout = QtWidgets.QVBoxLayout(dlg)
+                layout.setContentsMargins(22, 20, 22, 20)
 
                 try:
                     prefs = _load_prefs()
@@ -3703,6 +6220,65 @@ def main() -> None:
                 ai_layout.addLayout(model_row)
                 layout.addWidget(ai_group)
 
+                # ========== INTEGRATIONS (Metasploit + Caido) ==========
+                integ_group = QtWidgets.QGroupBox('🧩 Integrations — Metasploit & Caido')
+                integ_layout = QVBoxLayout(integ_group)
+                integ_layout.addWidget(QLabel(
+                    'Used by the Recon section ("Send to …") and the msf/caido CLI. '
+                    'The Metasploit password is stored locally and passed via the '
+                    'MSF_RPC_PASSWORD environment variable, never on the command line.'))
+
+                # -- Metasploit RPC --
+                integ_layout.addWidget(QLabel('Metasploit (msfrpcd):'))
+                msf_row = QtWidgets.QHBoxLayout()
+                msf_row.addWidget(QLabel('Host:'))
+                msf_host_edit = QLineEdit(); msf_host_edit.setPlaceholderText('127.0.0.1')
+                msf_host_edit.setText(str(prefs.get('msf_host', '127.0.0.1') or '127.0.0.1'))
+                msf_row.addWidget(msf_host_edit, 1)
+                msf_row.addWidget(QLabel('Port:'))
+                msf_port_spin = QSpinBox(); msf_port_spin.setRange(1, 65535)
+                try:
+                    msf_port_spin.setValue(int(prefs.get('msf_port', 55553)))
+                except Exception:
+                    msf_port_spin.setValue(55553)
+                msf_row.addWidget(msf_port_spin)
+                integ_layout.addLayout(msf_row)
+
+                msf_row2 = QtWidgets.QHBoxLayout()
+                msf_row2.addWidget(QLabel('Password:'))
+                msf_pw_edit = QLineEdit(); msf_pw_edit.setEchoMode(QLineEdit.EchoMode.Password)
+                msf_pw_edit.setText(str(prefs.get('msf_password', '') or ''))
+                msf_show = QCheckBox('show')
+                msf_show.toggled.connect(lambda on: msf_pw_edit.setEchoMode(
+                    QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password))
+                msf_row2.addWidget(msf_pw_edit, 1)
+                msf_row2.addWidget(msf_show)
+                msf_row2.addWidget(QLabel('Workspace:'))
+                msf_ws_edit = QLineEdit(); msf_ws_edit.setPlaceholderText('wafpierce')
+                msf_ws_edit.setText(str(prefs.get('msf_workspace', 'wafpierce') or 'wafpierce'))
+                msf_row2.addWidget(msf_ws_edit)
+                integ_layout.addLayout(msf_row2)
+
+                msf_nossl_chk = QCheckBox('RPC without SSL (msfrpcd started with -S)')
+                msf_nossl_chk.setChecked(bool(prefs.get('msf_no_ssl', False)))
+                integ_layout.addWidget(msf_nossl_chk)
+
+                # -- Caido --
+                integ_layout.addWidget(QLabel('Caido:'))
+                caido_row = QtWidgets.QHBoxLayout()
+                caido_row.addWidget(QLabel('Proxy URL:'))
+                caido_proxy_edit = QLineEdit(); caido_proxy_edit.setPlaceholderText('http://127.0.0.1:8080')
+                caido_proxy_edit.setText(str(prefs.get('caido_proxy_url', 'http://127.0.0.1:8080')
+                                             or 'http://127.0.0.1:8080'))
+                caido_row.addWidget(caido_proxy_edit, 1)
+                integ_layout.addLayout(caido_row)
+
+                caido_route_chk = QCheckBox('Route scans through Caido (proxy passthrough)')
+                caido_route_chk.setChecked(bool(prefs.get('caido_route_scans', False)))
+                integ_layout.addWidget(caido_route_chk)
+
+                layout.addWidget(integ_group)
+
                 # ========== SCAN PROFILE (export / import) ==========
                 profile_group = QtWidgets.QGroupBox('🗂️ Scan Profile')
                 profile_layout = QVBoxLayout(profile_group)
@@ -3789,6 +6365,15 @@ def main() -> None:
                         # Save AI (Anthropic) settings
                         prefs['anthropic_api_key'] = ai_key_edit.text().strip()
                         prefs['ai_model'] = ai_model_edit.text().strip()
+
+                        # Save Integrations (Metasploit + Caido) settings
+                        prefs['msf_host'] = msf_host_edit.text().strip() or '127.0.0.1'
+                        prefs['msf_port'] = int(msf_port_spin.value())
+                        prefs['msf_password'] = msf_pw_edit.text().strip()
+                        prefs['msf_workspace'] = msf_ws_edit.text().strip() or 'wafpierce'
+                        prefs['msf_no_ssl'] = bool(msf_nossl_chk.isChecked())
+                        prefs['caido_proxy_url'] = caido_proxy_edit.text().strip() or 'http://127.0.0.1:8080'
+                        prefs['caido_route_scans'] = bool(caido_route_chk.isChecked())
                         
                         # Update instance variables
                         self._enable_http_logging = prefs['enable_http_logging']
@@ -3832,8 +6417,8 @@ def main() -> None:
                             else:
                                 prefs['last_targets'] = []
                             _save_prefs(prefs)
-                            
-                            dlg.accept()
+
+                            self._navigate('scan')
                             reply = QMessageBox.question(
                                 self,
                                 _t('restart_confirm', new_lang),
@@ -3867,16 +6452,14 @@ def main() -> None:
                             return
                     except Exception:
                         pass
-                    try:
-                        dlg.accept()
-                    except Exception:
-                        dlg.close()
+                    # Saved — return to the Scan page.
+                    self._navigate('scan')
 
                 save_btn.clicked.connect(_save_qt)
-                cancel_btn.clicked.connect(dlg.reject)
-                dlg.exec()
+                cancel_btn.clicked.connect(lambda: self._navigate('scan'))
+                return dlg
             except Exception:
-                pass
+                return None
 
         def _apply_qt_prefs(self, prefs: dict):
             try:
@@ -4254,12 +6837,22 @@ def main() -> None:
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(html)
 
-        def show_results_summary(self):
-            """Show results organized by severity and target in a separate dialog with site list."""
+        def _build_results_page(self):
+            """Results explorer as an in-place page (rebuilt fresh per visit)."""
             if not self._results:
-                QMessageBox.information(self, _t('no_results', self._lang), _t('no_results_msg', self._lang))
-                return
-            
+                empty = QWidget()
+                empty.setObjectName('ResultsPage')
+                ev = QVBoxLayout(empty)
+                ev.setContentsMargins(22, 20, 22, 20)
+                hdr = QLabel('◆  Results')
+                hdr.setStyleSheet('font-size:18px; font-weight:bold; color:#58a6ff;')
+                msg = QLabel(_t('no_results_msg', self._lang))
+                msg.setStyleSheet('color:#8b949e;')
+                ev.addWidget(hdr)
+                ev.addWidget(msg)
+                ev.addStretch()
+                return empty
+
             # Constants
             severity_order = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO']
             severity_icons = {'CRITICAL': '\U0001F534', 'HIGH': '\U0001F7E0', 'MEDIUM': '\U0001F7E1', 'LOW': '\U0001F535', 'INFO': '\u2139\ufe0f'}
@@ -4286,11 +6879,10 @@ def main() -> None:
                     by_target[target] = []
                 by_target[target].append(r)
             
-            dlg = QtWidgets.QDialog(self)
-            dlg.setWindowTitle(_t('results_explorer', self._lang))
-            dlg.resize(1100, 700)
+            dlg = QtWidgets.QWidget()
+            dlg.setObjectName('ResultsPage')
             dlg.setStyleSheet("""
-                QDialog { background-color: #0f1112; }
+                QWidget#ResultsPage { background-color: #0f1112; }
                 QLabel { color: #d7e1ea; }
                 QListWidget { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; }
                 QListWidget::item { padding: 8px; border-bottom: 1px solid #2b2f33; }
@@ -4698,7 +7290,7 @@ def main() -> None:
                 elif chosen == a_reason:
                     cb.setText(str(r.get('reason', '')))
                 elif chosen == a_rep:
-                    self._show_repeater_dialog(prefill=r)
+                    self._repeater_load(r)
 
             results_tree.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
             results_tree.customContextMenuRequested.connect(_results_context_menu)
@@ -4744,14 +7336,14 @@ def main() -> None:
             bottom_layout.addWidget(export_btn)
             
             close_btn = QPushButton(_t('close', self._lang))
-            close_btn.clicked.connect(dlg.accept)
+            close_btn.clicked.connect(lambda: self._navigate('scan'))
             bottom_layout.addWidget(close_btn)
-            
+
             # Add bottom layout to right panel
             right_panel.addLayout(bottom_layout)
-            
-            dlg.exec()
-        
+
+            return dlg
+
         def _export_results_view(self, results):
             """Export the current filtered/sorted view to JSON."""
             if not results:
@@ -4813,140 +7405,241 @@ def main() -> None:
                 self._live_count_lbl.setText(
                     f"{len(rows)} findings  •  {byp} bypasses  •  showing {len(shown)}")
 
-        def _show_live_findings(self):
-            """Open (or focus) a live, color-coded, filterable findings window."""
-            from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QComboBox,
+        def _build_live_page(self):
+            """Live, color-coded, filterable findings as an in-place page. The page
+            is cached and assigned to self._live_window, so the same background
+            code that pushes new findings keeps refreshing it while it's offscreen."""
+            from PySide6.QtWidgets import (QVBoxLayout, QHBoxLayout, QComboBox,
                                            QLabel, QTreeWidget, QHeaderView)
             from PySide6.QtCore import Qt
-            if getattr(self, '_live_window', None) is None:
-                win = QDialog(self)
-                win.setWindowTitle('◰ Live Findings')
-                win.resize(940, 620)
-                win.setWindowModality(Qt.NonModal)
-                win.setStyleSheet("""
-                    QDialog { background-color: #0f1112; }
-                    QLabel { color: #d7e1ea; font-size: 12px; }
-                    QComboBox { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33;
-                        border-radius: 4px; padding: 4px 8px; }
-                    QTreeWidget { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; }
-                    QTreeWidget::item { padding: 3px; }
-                    QTreeWidget::item:selected { background-color: #3b82f6; }
-                """)
-                v = QVBoxLayout(win)
-                top = QHBoxLayout()
-                self._live_count_lbl = QLabel('0 findings')
-                top.addWidget(self._live_count_lbl)
-                top.addStretch()
-                top.addWidget(QLabel('Filter:'))
-                self._live_filter = QComboBox()
-                self._live_filter.addItems(['All', 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO',
-                                            'Bypasses only'])
-                self._live_filter.currentIndexChanged.connect(lambda *_: self._live_refresh())
-                top.addWidget(self._live_filter)
-                v.addLayout(top)
-                self._live_tree = QTreeWidget()
-                self._live_tree.setColumnCount(4)
-                self._live_tree.setHeaderLabels(['Severity', 'Technique', 'Category', 'Reason'])
-                self._live_tree.setAlternatingRowColors(True)
+            win = QWidget()
+            win.setObjectName('LivePage')
+            win.setStyleSheet("""
+                QWidget#LivePage { background-color: #0f1112; }
+                QLabel { color: #d7e1ea; font-size: 12px; }
+                QComboBox { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33;
+                    border-radius: 4px; padding: 4px 8px; }
+                QTreeWidget { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; }
+                QTreeWidget::item { padding: 3px; }
+                QTreeWidget::item:selected { background-color: #3b82f6; }
+            """)
+            v = QVBoxLayout(win)
+            v.setContentsMargins(22, 20, 22, 20)
+            hdr = QLabel('◰  Live Findings')
+            hdr.setStyleSheet('font-size:18px; font-weight:bold; color:#58a6ff;')
+            v.addWidget(hdr)
+            top = QHBoxLayout()
+            self._live_count_lbl = QLabel('0 findings')
+            top.addWidget(self._live_count_lbl)
+            top.addStretch()
+            top.addWidget(QLabel('Filter:'))
+            self._live_filter = QComboBox()
+            self._live_filter.addItems(['All', 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO',
+                                        'Bypasses only'])
+            self._live_filter.currentIndexChanged.connect(lambda *_: self._live_refresh())
+            top.addWidget(self._live_filter)
+            v.addLayout(top)
+            self._live_tree = QTreeWidget()
+            self._live_tree.setColumnCount(4)
+            self._live_tree.setHeaderLabels(['Severity', 'Technique', 'Category', 'Reason'])
+            self._live_tree.setAlternatingRowColors(True)
+            try:
+                self._live_tree.header().setSectionResizeMode(3, QHeaderView.Stretch)
+            except Exception:
+                pass
+            v.addWidget(self._live_tree, 1)
+            self._live_window = win
+            self._live_refresh()
+            return win
+
+        def _build_repeater_page(self):
+            """Repeater + Intruder + Decoder as an in-place page.
+
+            * Repeater — craft a request, send it (TLS/redirect/timeout/proxy
+              options), inspect the response. Requests run on a worker thread; a
+              QTimer polls the future so the page never freezes.
+            * Intruder — fuzz a FUZZ-marked request with built-in payload sets
+              (XSS/SQLi/LFI/cmd-injection/SSTI/WAF-bypass) or a custom list, with
+              baseline diffing + reflection detection.
+            * Decoder — URL/Base64/HTML/Hex/unicode encode + decode.
+
+            self._repeater_apply(prefill) loads a request into the Repeater tab.
+            """
+            from PySide6.QtWidgets import (QVBoxLayout, QHBoxLayout, QComboBox,
+                                           QLineEdit, QPlainTextEdit, QPushButton, QLabel,
+                                           QSplitter, QCheckBox, QSpinBox, QTabWidget,
+                                           QTableWidget, QTableWidgetItem, QHeaderView,
+                                           QAbstractItemView)
+            from PySide6.QtCore import Qt, QTimer
+            from PySide6.QtGui import QBrush, QColor
+            import urllib.parse as _ulib
+            import base64 as _b64
+            import html as _html
+            import re as _re
+
+            # ---- built-in fuzzing payload sets (WAFPierce is a WAF-bypass tool) ----
+            PAYLOADS = {
+                'XSS': ['<script>alert(1)</script>', '"><script>alert(1)</script>',
+                        "'><script>alert(1)</script>", '<img src=x onerror=alert(1)>',
+                        '<svg/onload=alert(1)>', 'javascript:alert(1)',
+                        '<body onload=alert(1)>', '"><img src=x onerror=alert(document.domain)>',
+                        '<iframe src=javascript:alert(1)>', '<details/open/ontoggle=alert(1)>'],
+                'SQLi': ["'", '"', "' OR '1'='1", "' OR 1=1-- -", '" OR "1"="1',
+                         "admin'-- -", "' OR ''='", "1' UNION SELECT NULL-- -",
+                         "1' AND SLEEP(5)-- -", "'; WAITFOR DELAY '0:0:5'-- -",
+                         "') OR ('1'='1", "1 OR 1=1"],
+                'LFI / Path Traversal': ['../../../../etc/passwd',
+                         '../../../../../../etc/passwd', '....//....//....//etc/passwd',
+                         '..%2f..%2f..%2fetc%2fpasswd', '..%252f..%252fetc%252fpasswd',
+                         '/etc/passwd', 'C:\\Windows\\win.ini', '..\\..\\..\\windows\\win.ini',
+                         'php://filter/convert.base64-encode/resource=index.php', '/etc/passwd%00'],
+                'Command Injection': ['; id', '| id', '|| id', '& id', '&& id', '`id`',
+                         '$(id)', '; sleep 5', '| sleep 5', '%0a id', '; cat /etc/passwd'],
+                'SSTI': ['{{7*7}}', '${7*7}', '#{7*7}', '<%= 7*7 %>', '${{7*7}}',
+                         '{{7*\'7\'}}', '{{config}}', '${T(java.lang.Runtime)}', '*{7*7}'],
+                'WAF Bypass': ['SeLeCt', '/*!50000SELECT*/', 'uni/**/on sel/**/ect',
+                         '1%0aOR%0a1=1', '<scr<script>ipt>alert(1)</scr</script>ipt>',
+                         '<sCrIpT>alert(1)</sCrIpT>', '%253Cscript%253E',
+                         "' /*!OR*/ '1'='1", '+UNION+SELECT+', '%00', '%09', '..%c0%af'],
+            }
+            SQL_ERR_RE = _re.compile(
+                r'(?i)SQL syntax|mysql_fetch|valid MySQL result|ORA-\d{5}|Unclosed quotation|SQLSTATE|PostgreSQL.{0,40}ERROR')
+
+            def _shq(s):
+                return "'" + str(s).replace("'", "'\\''") + "'"
+
+            def _parse_headers(text):
+                hdrs = {}
+                for line in (text or '').splitlines():
+                    if ':' in line:
+                        k, v = line.split(':', 1)
+                        if k.strip():
+                            hdrs[k.strip()] = v.strip()
+                return hdrs
+
+            def _send_request(m, u, hdrs, data, opts):
+                """Blocking HTTP send used by both Repeater and Intruder workers."""
+                import time as _time
+                import requests
                 try:
-                    self._live_tree.header().setSectionResizeMode(3, QHeaderView.Stretch)
+                    import urllib3
+                    urllib3.disable_warnings()
                 except Exception:
                     pass
-                v.addWidget(self._live_tree, 1)
-                self._live_window = win
-            self._live_refresh()
-            self._live_window.show()
-            self._live_window.raise_()
-            self._live_window.activateWindow()
+                proxies = None
+                if opts.get('proxy'):
+                    proxies = {'http': opts['proxy'], 'https': opts['proxy']}
+                t0 = _time.monotonic()
+                r = requests.request(
+                    m, u, headers=hdrs or None,
+                    data=(data.encode() if isinstance(data, str) and data else (data or None)),
+                    timeout=opts.get('timeout', 20), verify=opts.get('verify', False),
+                    allow_redirects=opts.get('redirects', False), proxies=proxies)
+                return r, (_time.monotonic() - t0)
 
-        def _show_repeater_dialog(self, prefill: Optional[dict] = None):
-            """A built-in Repeater: craft a request, send it, inspect the response.
+            def _num_item(n):
+                it = QTableWidgetItem()
+                try:
+                    it.setData(Qt.ItemDataRole.DisplayRole, int(n))
+                except Exception:
+                    it.setText(str(n))
+                return it
 
-            Requests run on a worker thread; the UI polls the future with a QTimer
-            so the window never freezes during a slow request.
-            """
-            from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QComboBox,
-                                           QLineEdit, QPlainTextEdit, QPushButton, QLabel,
-                                           QSplitter)
-            from PySide6.QtCore import Qt, QTimer
-
-            dlg = QDialog(self)
-            dlg.setWindowTitle('↻ Repeater')
-            dlg.resize(1040, 760)
+            dlg = QWidget()
+            dlg.setObjectName('RepeaterPage')
             dlg.setStyleSheet("""
-                QDialog { background-color: #0f1112; }
+                QWidget#RepeaterPage { background-color: #0f1112; }
                 QLabel { color: #9aa4b2; font-size: 11px; }
-                QComboBox, QLineEdit, QPlainTextEdit { background-color: #16181a; color: #d7e1ea;
+                QComboBox, QLineEdit, QPlainTextEdit, QSpinBox { background-color: #16181a; color: #d7e1ea;
                     border: 1px solid #2b2f33; border-radius: 4px; padding: 6px;
                     font-family: 'Consolas','Menlo',monospace; }
                 QPushButton { background-color: #1f6feb; color: #fff; border: none;
-                    padding: 8px 18px; border-radius: 4px; }
+                    padding: 7px 14px; border-radius: 4px; }
                 QPushButton:hover { background-color: #388bfd; }
                 QPushButton:disabled { background-color: #2b2f33; color: #6b7280; }
             """)
             root = QVBoxLayout(dlg)
+            _hdr = QLabel('↻  Repeater · Intruder · Decoder')
+            _hdr.setStyleSheet('font-size:18px; font-weight:bold; color:#58a6ff;')
+            root.addWidget(_hdr)
+            tabs = QTabWidget()
+            root.addWidget(tabs, 1)
 
-            # Request line: method + URL + send
+            # ============================ REPEATER TAB ============================
+            rep = QtWidgets.QWidget()
+            rl = QVBoxLayout(rep)
             row = QHBoxLayout()
             method = QComboBox()
             method.addItems(['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'])
-            url = QLineEdit()
-            url.setPlaceholderText('https://target/path')
+            url = QLineEdit(); url.setPlaceholderText('https://target/path')
             send_btn = QPushButton('Send')
-            row.addWidget(method)
-            row.addWidget(url, 1)
-            row.addWidget(send_btn)
-            root.addLayout(row)
+            curl_btn = QPushButton('Copy cURL')
+            intr_btn = QPushButton('→ Intruder')
+            row.addWidget(method); row.addWidget(url, 1)
+            row.addWidget(send_btn); row.addWidget(curl_btn); row.addWidget(intr_btn)
+            rl.addLayout(row)
 
-            # Prefill from a finding or the current scan target.
+            # request options
+            orow = QHBoxLayout()
+            redir_chk = QCheckBox('Follow redirects')
+            verify_chk = QCheckBox('Verify TLS')
+            timeout_spin = QSpinBox(); timeout_spin.setRange(1, 120); timeout_spin.setValue(20)
+            proxy_edit = QLineEdit()
+            proxy_edit.setPlaceholderText('proxy host:port (chain through Burp/Caido)')
+            orow.addWidget(redir_chk); orow.addWidget(verify_chk)
+            orow.addWidget(QLabel('Timeout:')); orow.addWidget(timeout_spin)
+            orow.addWidget(QLabel('Proxy:')); orow.addWidget(proxy_edit, 1)
+            rl.addLayout(orow)
+
             try:
-                if prefill:
-                    method.setCurrentText(str(prefill.get('method') or 'GET').upper())
-                    url.setText(_finding_url(prefill))
-                else:
-                    t = self.target_edit.text().strip()
-                    if t:
-                        url.setText(t)
+                t = self.target_edit.text().strip()
+                if t:
+                    url.setText(t)
             except Exception:
                 pass
 
-            splitter = QSplitter(Qt.Vertical)
+            def _get_opts():
+                p = proxy_edit.text().strip()
+                if p and '://' not in p:
+                    p = 'http://' + p
+                return {'redirects': redir_chk.isChecked(), 'verify': verify_chk.isChecked(),
+                        'timeout': timeout_spin.value(), 'proxy': p}
 
+            splitter = QSplitter(Qt.Vertical)
             req_box = QtWidgets.QWidget()
-            req_lay = QVBoxLayout(req_box)
-            req_lay.setContentsMargins(0, 0, 0, 0)
+            req_lay = QVBoxLayout(req_box); req_lay.setContentsMargins(0, 0, 0, 0)
             req_lay.addWidget(QLabel('REQUEST HEADERS  (one per line: Name: value)'))
             headers_edit = QPlainTextEdit()
             headers_edit.setPlaceholderText('User-Agent: WAFPierce-Repeater\nX-Forwarded-For: 127.0.0.1')
             headers_edit.setMaximumHeight(150)
             req_lay.addWidget(headers_edit)
             req_lay.addWidget(QLabel('REQUEST BODY  (optional)'))
-            body_edit = QPlainTextEdit()
-            body_edit.setMaximumHeight(120)
+            body_edit = QPlainTextEdit(); body_edit.setMaximumHeight(120)
             req_lay.addWidget(body_edit)
             splitter.addWidget(req_box)
 
             resp_box = QtWidgets.QWidget()
-            resp_lay = QVBoxLayout(resp_box)
-            resp_lay.setContentsMargins(0, 0, 0, 0)
+            resp_lay = QVBoxLayout(resp_box); resp_lay.setContentsMargins(0, 0, 0, 0)
             status_label = QLabel('Ready.')
             status_label.setStyleSheet('color:#d7e1ea; font-size:12px; padding:2px;')
             resp_lay.addWidget(status_label)
-            response_edit = QPlainTextEdit()
-            response_edit.setReadOnly(True)
+            notes_lbl = QLabel('')
+            notes_lbl.setStyleSheet('color:#f59e0b; font-size:12px; padding:2px;')
+            resp_lay.addWidget(notes_lbl)
+            response_edit = QPlainTextEdit(); response_edit.setReadOnly(True)
             resp_lay.addWidget(response_edit, 1)
             splitter.addWidget(resp_box)
             splitter.setSizes([300, 400])
-            root.addWidget(splitter, 1)
+            rl.addWidget(splitter, 1)
+            tabs.addTab(rep, 'Repeater')
 
-            pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+            pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)
             state = {'fut': None}
             timer = QTimer(dlg)
 
             def _send():
                 m = method.currentText()
                 u = url.text().strip()
-                # Tolerate a pasted "URL:" label and a missing scheme.
                 if u.lower().startswith('url:'):
                     u = u[4:].strip()
                 if u and '://' not in u:
@@ -4955,32 +7648,14 @@ def main() -> None:
                 if not u:
                     status_label.setText('Enter a URL first.')
                     return
-                hdrs = {}
-                for line in headers_edit.toPlainText().splitlines():
-                    if ':' in line:
-                        k, v = line.split(':', 1)
-                        if k.strip():
-                            hdrs[k.strip()] = v.strip()
+                hdrs = _parse_headers(headers_edit.toPlainText())
                 data = body_edit.toPlainText() or None
-
-                def _work():
-                    import time as _time
-                    import requests
-                    try:
-                        import urllib3
-                        urllib3.disable_warnings()
-                    except Exception:
-                        pass
-                    t0 = _time.monotonic()
-                    r = requests.request(m, u, headers=hdrs or None,
-                                         data=data.encode() if data else None,
-                                         timeout=20, verify=False, allow_redirects=False)
-                    return r, (_time.monotonic() - t0)
-
+                opts = _get_opts()
                 send_btn.setEnabled(False)
+                notes_lbl.setText('')
                 status_label.setText(f'Sending {m} {u} …')
                 response_edit.clear()
-                state['fut'] = pool.submit(_work)
+                state['fut'] = pool.submit(_send_request, m, u, hdrs, data, opts)
                 timer.start(100)
 
             def _poll():
@@ -4996,15 +7671,289 @@ def main() -> None:
                     hdr_txt = '\n'.join(f"{k}: {v}" for k, v in r.headers.items())
                     body_txt = r.text if len(r.text) <= 200000 else r.text[:200000] + '\n…(truncated)'
                     response_edit.setPlainText(f"{hdr_txt}\n\n{body_txt}")
+                    notes = []
+                    if r.status_code >= 500:
+                        notes.append('5xx server error')
+                    if SQL_ERR_RE.search(r.text or ''):
+                        notes.append('⚠ SQL error in response')
+                    notes_lbl.setText('   ·   '.join(notes))
                 except Exception as e:
                     status_label.setText('Request failed.')
                     response_edit.setPlainText(f"{type(e).__name__}: {e}")
 
+            def _copy_curl():
+                parts = [f"curl -X {method.currentText()} {_shq(url.text().strip())}"]
+                for line in headers_edit.toPlainText().splitlines():
+                    if ':' in line and line.split(':', 1)[0].strip():
+                        parts.append(f"-H {_shq(line.strip())}")
+                if body_edit.toPlainText().strip():
+                    parts.append(f"--data {_shq(body_edit.toPlainText())}")
+                if not verify_chk.isChecked():
+                    parts.append('-k')
+                if redir_chk.isChecked():
+                    parts.append('-L')
+                try:
+                    QtWidgets.QApplication.clipboard().setText(' '.join(parts))
+                    status_label.setText('cURL copied to clipboard.')
+                except Exception:
+                    pass
+
             timer.timeout.connect(_poll)
             send_btn.clicked.connect(_send)
             url.returnPressed.connect(_send)
-            dlg.finished.connect(lambda *_: (timer.stop(), pool.shutdown(wait=False)))
-            dlg.exec()
+            curl_btn.clicked.connect(_copy_curl)
+
+            # ============================ INTRUDER TAB ============================
+            intr = QtWidgets.QWidget()
+            il = QVBoxLayout(intr)
+            il.addWidget(QLabel('Request template — put the marker  FUZZ  where payloads go '
+                                '(URL, a header value, or the body):'))
+            irow = QHBoxLayout()
+            i_method = QComboBox(); i_method.addItems(['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
+            i_url = QLineEdit(); i_url.setPlaceholderText('https://target/search?q=FUZZ')
+            load_btn = QPushButton('← Load from Repeater')
+            irow.addWidget(i_method); irow.addWidget(i_url, 1); irow.addWidget(load_btn)
+            il.addLayout(irow)
+            i_headers = QPlainTextEdit(); i_headers.setMaximumHeight(80)
+            i_headers.setPlaceholderText('headers (optional) — e.g.  Cookie: id=FUZZ')
+            il.addWidget(i_headers)
+            i_body = QPlainTextEdit(); i_body.setMaximumHeight(70)
+            i_body.setPlaceholderText('body (optional) — e.g.  username=admin&password=FUZZ')
+            il.addWidget(i_body)
+
+            prow = QHBoxLayout()
+            pset_combo = QComboBox(); pset_combo.addItems(list(PAYLOADS.keys()) + ['Custom'])
+            urlenc_chk = QCheckBox('URL-encode payloads')
+            i_start = QPushButton('▶ Start')
+            i_stop = QPushButton('■ Stop'); i_stop.setEnabled(False)
+            i_status = QLabel('')
+            prow.addWidget(QLabel('Payload set:')); prow.addWidget(pset_combo)
+            prow.addWidget(urlenc_chk); prow.addWidget(i_start); prow.addWidget(i_stop)
+            prow.addWidget(i_status, 1)
+            il.addLayout(prow)
+            custom_edit = QPlainTextEdit(); custom_edit.setMaximumHeight(60)
+            custom_edit.setPlaceholderText('custom payloads — one per line (used for "Custom", else appended)')
+            il.addWidget(custom_edit)
+
+            isplit = QSplitter(Qt.Vertical)
+            res_table = QTableWidget(0, 6)
+            res_table.setHorizontalHeaderLabels(['#', 'Payload', 'Status', 'Length', 'Time(ms)', 'Notes'])
+            res_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+            res_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+            res_table.setSortingEnabled(True)
+            try:
+                res_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+            except Exception:
+                pass
+            isplit.addWidget(res_table)
+            i_detail = QPlainTextEdit(); i_detail.setReadOnly(True)
+            isplit.addWidget(i_detail)
+            isplit.setSizes([360, 180])
+            il.addWidget(isplit, 1)
+            tabs.addTab(intr, 'Intruder')
+
+            ipool = {'pool': None}
+            istate = {'pending': [], 'baseline': None, 'baseline_fut': None, 'responses': {}}
+            itimer = QTimer(dlg)
+
+            def _load_from_repeater():
+                i_method.setCurrentText(method.currentText())
+                i_url.setText(url.text())
+                i_headers.setPlainText(headers_edit.toPlainText())
+                i_body.setPlainText(body_edit.toPlainText())
+
+            def _intr_build(payload):
+                enc = _ulib.quote(payload, safe='') if urlenc_chk.isChecked() else payload
+                u = i_url.text().replace('FUZZ', enc)
+                if u and '://' not in u:
+                    u = 'https://' + u
+                hdrs = _parse_headers(i_headers.toPlainText().replace('FUZZ', enc))
+                body = i_body.toPlainText().replace('FUZZ', enc) or None
+                return u, hdrs, body
+
+            def _intr_start():
+                m = i_method.currentText()
+                template = i_url.text() + i_headers.toPlainText() + i_body.toPlainText()
+                if 'FUZZ' not in template:
+                    i_status.setText('Add the FUZZ marker to the URL/headers/body first.')
+                    return
+                pset = pset_combo.currentText()
+                if pset == 'Custom':
+                    payloads = [x for x in custom_edit.toPlainText().splitlines() if x.strip()]
+                else:
+                    payloads = list(PAYLOADS.get(pset, []))
+                    payloads += [x for x in custom_edit.toPlainText().splitlines() if x.strip()]
+                if not payloads:
+                    i_status.setText('No payloads.')
+                    return
+                res_table.setRowCount(0)
+                istate['responses'] = {}
+                istate['baseline'] = None
+                opts = _get_opts()
+                pool2 = concurrent.futures.ThreadPoolExecutor(max_workers=10)
+                ipool['pool'] = pool2
+                bu, bh, bb = _intr_build('')   # baseline = marker removed
+                istate['baseline_fut'] = pool2.submit(_send_request, m, bu, bh, bb, opts)
+                pending = []
+                res_table.setSortingEnabled(False)
+                for i, p in enumerate(payloads):
+                    u, hdrs, body = _intr_build(p)
+                    r = res_table.rowCount(); res_table.insertRow(r)
+                    res_table.setItem(r, 0, _num_item(i + 1))
+                    pi = QTableWidgetItem(p); pi.setData(Qt.ItemDataRole.UserRole, r)
+                    res_table.setItem(r, 1, pi)
+                    res_table.setItem(r, 2, QTableWidgetItem('…'))
+                    pending.append((r, p, pool2.submit(_send_request, m, u, hdrs, body, opts)))
+                res_table.setSortingEnabled(True)
+                istate['pending'] = pending
+                i_start.setEnabled(False); i_stop.setEnabled(True)
+                i_status.setText(f'Fuzzing {len(payloads)} payload(s)…')
+                itimer.start(150)
+
+            def _intr_poll():
+                if istate.get('baseline') is None:
+                    bf = istate.get('baseline_fut')
+                    if bf is not None and bf.done():
+                        try:
+                            br, _bd = bf.result()
+                            istate['baseline'] = (br.status_code, len(br.content))
+                        except Exception:
+                            istate['baseline'] = (0, 0)
+                still = []
+                for (rowi, p, fut) in istate['pending']:
+                    if not fut.done():
+                        still.append((rowi, p, fut)); continue
+                    try:
+                        r, dt = fut.result()
+                        st, ln = r.status_code, len(r.content)
+                        res_table.setItem(rowi, 2, _num_item(st))
+                        res_table.setItem(rowi, 3, _num_item(ln))
+                        res_table.setItem(rowi, 4, _num_item(int(dt * 1000)))
+                        notes = []
+                        bl = istate.get('baseline')
+                        if bl:
+                            if st != bl[0]:
+                                notes.append(f'status≠{bl[0]}')
+                            if abs(ln - bl[1]) > 24:
+                                notes.append('len Δ')
+                        try:
+                            if p and p in r.text:
+                                notes.append('reflected')
+                        except Exception:
+                            pass
+                        if SQL_ERR_RE.search(r.text or ''):
+                            notes.append('SQL err')
+                        ni = QTableWidgetItem(', '.join(notes))
+                        if notes:
+                            ni.setForeground(QBrush(QColor('#f59e0b')))
+                        res_table.setItem(rowi, 5, ni)
+                        body_txt = r.text if len(r.text) <= 100000 else r.text[:100000] + '\n…(truncated)'
+                        hdr_txt = '\n'.join(f"{k}: {v}" for k, v in r.headers.items())
+                        istate['responses'][rowi] = (f"PAYLOAD: {p}\nHTTP {st} {r.reason}  "
+                                                     f"({ln} bytes, {dt*1000:.0f} ms)\n\n{hdr_txt}\n\n{body_txt}")
+                    except Exception as e:
+                        res_table.setItem(rowi, 2, QTableWidgetItem('ERR'))
+                        res_table.setItem(rowi, 5, QTableWidgetItem(str(e)[:60]))
+                        istate['responses'][rowi] = f"PAYLOAD: {p}\n{type(e).__name__}: {e}"
+                istate['pending'] = still
+                if not still and istate.get('baseline') is not None:
+                    itimer.stop()
+                    i_start.setEnabled(True); i_stop.setEnabled(False)
+                    i_status.setText('Done.  (orange = differs from baseline / reflected)')
+
+            def _intr_stop():
+                itimer.stop()
+                try:
+                    if ipool['pool']:
+                        ipool['pool'].shutdown(wait=False, cancel_futures=True)
+                except Exception:
+                    pass
+                istate['pending'] = []
+                i_start.setEnabled(True); i_stop.setEnabled(False)
+                i_status.setText('Stopped.')
+
+            def _intr_detail():
+                items = res_table.selectedItems()
+                if not items:
+                    return
+                pcell = res_table.item(items[0].row(), 1)
+                rowi = pcell.data(Qt.ItemDataRole.UserRole) if pcell else None
+                txt = istate['responses'].get(rowi)
+                if txt:
+                    i_detail.setPlainText(txt)
+
+            itimer.timeout.connect(_intr_poll)
+            load_btn.clicked.connect(_load_from_repeater)
+            intr_btn.clicked.connect(lambda: (_load_from_repeater(), tabs.setCurrentWidget(intr)))
+            i_start.clicked.connect(_intr_start)
+            i_stop.clicked.connect(_intr_stop)
+            res_table.itemSelectionChanged.connect(_intr_detail)
+
+            # ============================ DECODER TAB ============================
+            dec = QtWidgets.QWidget()
+            dl = QVBoxLayout(dec)
+            dl.addWidget(QLabel('INPUT'))
+            dec_in = QPlainTextEdit(); dl.addWidget(dec_in)
+            dec_out = QPlainTextEdit(); dec_out.setReadOnly(True)
+
+            def _b64dec(s):
+                try:
+                    return _b64.b64decode(s + '=' * (-len(s) % 4)).decode('utf-8', 'replace')
+                except Exception:
+                    return '(invalid base64)'
+
+            def _hexdec(s):
+                try:
+                    return bytes.fromhex(_re.sub(r'\s+', '', s)).decode('utf-8', 'replace')
+                except Exception:
+                    return '(invalid hex)'
+
+            transforms = [
+                ('URL enc', lambda s: _ulib.quote(s, safe='')),
+                ('URL dec', lambda s: _ulib.unquote(s)),
+                ('Base64 enc', lambda s: _b64.b64encode(s.encode('utf-8', 'replace')).decode()),
+                ('Base64 dec', _b64dec),
+                ('HTML enc', lambda s: _html.escape(s)),
+                ('HTML dec', lambda s: _html.unescape(s)),
+                ('Hex enc', lambda s: s.encode('utf-8', 'replace').hex()),
+                ('Hex dec', _hexdec),
+                ('\\u esc', lambda s: ''.join('\\u%04x' % ord(c) for c in s)),
+            ]
+            brow = QHBoxLayout()
+            for label, fn in transforms:
+                b = QPushButton(label)
+                b.clicked.connect(lambda _=False, f=fn: dec_out.setPlainText(f(dec_in.toPlainText())))
+                brow.addWidget(b)
+            brow.addStretch()
+            dl.addLayout(brow)
+            dl.addWidget(QLabel('OUTPUT'))
+            dl.addWidget(dec_out)
+            tabs.addTab(dec, 'Decoder')
+
+            def _apply_prefill(prefill):
+                """Load a request (method/url/headers/body) into the Repeater tab."""
+                try:
+                    if not prefill:
+                        return
+                    method.setCurrentText(str(prefill.get('method') or 'GET').upper())
+                    url.setText(_finding_url(prefill))
+                    hdrs = prefill.get('headers')
+                    if isinstance(hdrs, dict):
+                        headers_edit.setPlainText('\n'.join(f"{k}: {v}" for k, v in hdrs.items()))
+                    if prefill.get('data'):
+                        body_edit.setPlainText(str(prefill.get('data')))
+                    tabs.setCurrentWidget(rep)
+                except Exception:
+                    pass
+            self._repeater_apply = _apply_prefill
+            return dlg
+
+        def _repeater_load(self, prefill):
+            """Switch to the Repeater page and load a request into it."""
+            self._navigate('repeater')
+            fn = getattr(self, '_repeater_apply', None)
+            if callable(fn):
+                fn(prefill)
 
         def _show_http_log_dialog(self):
             """Show HTTP request/response log in a dialog."""
@@ -5625,19 +8574,18 @@ def main() -> None:
                 QMessageBox.critical(self, 'Import Error', str(e))
 
         # ==================== DASHBOARD ====================
-        def _show_dashboard(self):
-            """Show statistics dashboard."""
+        def _build_dashboard_page(self):
+            """Statistics dashboard as an in-place page (rebuilt fresh per visit)."""
             from PySide6.QtCore import Qt
-            
+
             try:
                 if self._db:
                     stats = self._db.get_dashboard_stats()
                 else:
                     stats = {'total_scans': 0, 'total_findings': 0, 'total_bypasses': 0, 'severity_distribution': {}, 'top_techniques': []}
-                
-                dlg = QtWidgets.QDialog(self)
-                dlg.setWindowTitle(_t('dashboard', self._lang) if 'dashboard' in TRANSLATIONS.get(self._lang, {}) else '📈 Dashboard')
-                dlg.resize(800, 600)
+
+                dlg = QtWidgets.QWidget()
+                dlg.setObjectName('DashboardPage')
                 dlg.setStyleSheet("""
                     QDialog { background-color: #0f1112; }
                     QLabel { color: #d7e1ea; }
@@ -5714,14 +8662,15 @@ def main() -> None:
                 compare_btn.clicked.connect(lambda: self._show_compare_scans_dialog())
                 layout.addWidget(compare_btn)
                 
-                # Close button
+                # Close button -> back to Scan
                 close_btn = QPushButton(_t('close', self._lang))
-                close_btn.clicked.connect(dlg.accept)
+                close_btn.clicked.connect(lambda: self._navigate('scan'))
                 layout.addWidget(close_btn)
-                
-                dlg.exec()
+
+                return dlg
             except Exception as e:
                 QMessageBox.critical(self, 'Dashboard Error', str(e))
+                return None
 
         def _show_compare_scans_dialog(self):
             """Show dialog to compare two scans."""
@@ -5845,8 +8794,8 @@ def main() -> None:
                 QMessageBox.critical(self, 'Compare Error', str(e))
 
         # ==================== TIMELINE VIEWER ====================
-        def _show_timeline_viewer(self):
-            """Show scan history timeline viewer."""
+        def _build_timeline_page(self):
+            """Scan history timeline as an in-place page (rebuilt fresh per visit)."""
             from PySide6.QtCore import Qt
             from PySide6.QtGui import QFontDatabase
             
@@ -5863,11 +8812,10 @@ def main() -> None:
                 unicode_fonts = ["Segoe UI", "Arial", "Noto Sans", "Tahoma", "Microsoft Sans Serif", "DejaVu Sans"]
                 selected_font = next((f for f in unicode_fonts if f in families), "")
                 
-                dlg = QtWidgets.QDialog(self)
-                dlg.setWindowTitle(_t('scan_timeline', self._lang) if 'scan_timeline' in TRANSLATIONS.get(self._lang, {}) else '📅 Scan Timeline')
-                dlg.resize(900, 650)
+                dlg = QtWidgets.QWidget()
+                dlg.setObjectName('TimelinePage')
                 dlg.setStyleSheet(f"""
-                    QDialog {{ background-color: #0f1112; font-family: '{selected_font}'; }}
+                    QWidget#TimelinePage {{ background-color: #0f1112; font-family: '{selected_font}'; }}
                     QLabel {{ color: #d7e1ea; font-family: '{selected_font}'; }}
                     QGroupBox {{ color: #d7e1ea; border: 1px solid #2b2f33; margin-top: 10px; padding-top: 10px; font-family: '{selected_font}'; }}
                     QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 5px; }}
@@ -6066,18 +9014,19 @@ def main() -> None:
                 
                 layout.addWidget(compare_group)
                 
-                # Close button
+                # Close button -> back to Scan
                 close_btn = QPushButton(_t('close', self._lang))
-                close_btn.clicked.connect(dlg.accept)
+                close_btn.clicked.connect(lambda: self._navigate('scan'))
                 layout.addWidget(close_btn)
-                
-                dlg.exec()
+
+                return dlg
             except Exception as e:
                 QMessageBox.critical(self, 'Timeline Error', str(e))
+                return None
 
         # ==================== PLUGIN MANAGER ====================
-        def _show_plugin_manager(self):
-            """Show plugin manager dialog."""
+        def _build_plugins_page(self):
+            """Plugin manager as an in-place page (rebuilt fresh per visit)."""
             from PySide6.QtCore import Qt
             from PySide6.QtGui import QFontDatabase
             import subprocess
@@ -6119,11 +9068,10 @@ def main() -> None:
                 unicode_fonts = ["Segoe UI", "Arial", "Noto Sans", "Tahoma", "Microsoft Sans Serif", "DejaVu Sans"]
                 selected_font = next((f for f in unicode_fonts if f in families), "")
                 
-                dlg = QtWidgets.QDialog(self)
-                dlg.setWindowTitle(_t('plugin_manager', self._lang) if 'plugin_manager' in TRANSLATIONS.get(self._lang, {}) else '🔌 Plugin Manager')
-                dlg.resize(850, 600)
+                dlg = QtWidgets.QWidget()
+                dlg.setObjectName('PluginsPage')
                 dlg.setStyleSheet(f"""
-                    QDialog {{ background-color: #0f1112; font-family: '{selected_font}'; }}
+                    QWidget#PluginsPage {{ background-color: #0f1112; font-family: '{selected_font}'; }}
                     QLabel {{ color: #d7e1ea; font-family: '{selected_font}'; }}
                     QGroupBox {{ color: #d7e1ea; border: 1px solid #2b2f33; margin-top: 10px; padding-top: 10px; font-family: '{selected_font}'; }}
                     QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 5px; }}
@@ -6625,29 +9573,29 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                 
                 layout.addWidget(tabs, 1)
                 
-                # Close button
+                # Close button -> back to Scan
                 close_btn = QPushButton(_t('close', self._lang))
-                close_btn.clicked.connect(dlg.accept)
+                close_btn.clicked.connect(lambda: self._navigate('scan'))
                 layout.addWidget(close_btn)
-                
-                dlg.exec()
+
+                return dlg
             except Exception as e:
                 import traceback
                 QMessageBox.critical(self, 'Plugin Manager Error', f'{str(e)}\\n\\n{traceback.format_exc()}')
+                return None
 
         # ==================== CUSTOM PAYLOADS ====================
-        def _show_payloads_dialog(self):
-            """Show custom payloads management dialog."""
+        def _build_payloads_page(self):
+            """Custom payloads management as an in-place page (rebuilt per visit)."""
             try:
                 if not self._db:
                     QMessageBox.warning(self, 'Payloads', 'Database is not available.')
                     return
 
-                dlg = QtWidgets.QDialog(self)
-                dlg.setWindowTitle(_t('custom_payloads', self._lang) if 'custom_payloads' in TRANSLATIONS.get(self._lang, {}) else '🎯 Custom Payloads')
-                dlg.resize(600, 500)
+                dlg = QtWidgets.QWidget()
+                dlg.setObjectName('PayloadsPage')
                 dlg.setStyleSheet("""
-                    QDialog { background-color: #0f1112; }
+                    QWidget#PayloadsPage { background-color: #0f1112; }
                     QLabel { color: #d7e1ea; }
                     QListWidget { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; }
                     QListWidget::item { padding: 8px; }
@@ -6783,15 +9731,16 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                 layout.addLayout(btn_layout)
                 
                 close_btn = QPushButton(_t('close', self._lang))
-                close_btn.clicked.connect(dlg.accept)
+                close_btn.clicked.connect(lambda: self._navigate('scan'))
                 layout.addWidget(close_btn)
-                
-                dlg.exec()
+
+                return dlg
             except Exception as e:
                 QMessageBox.critical(self, 'Payloads Error', str(e))
+                return None
 
-        def _show_scheduled_scans_dialog(self):
-            """Show scheduled scans management dialog."""
+        def _build_schedule_page(self):
+            """Scheduled jobs (scan or recon) as an in-place page (rebuilt per visit)."""
             try:
                 if not self._db:
                     QMessageBox.warning(self, 'Scheduled Scans', 'Database is not available.')
@@ -6813,11 +9762,10 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                 unicode_fonts = ["Segoe UI", "Arial", "Noto Sans", "Tahoma", "Microsoft Sans Serif", "DejaVu Sans"]
                 selected_font = next((f for f in unicode_fonts if f in families), "")
                 
-                dlg = QtWidgets.QDialog(self)
-                dlg.setWindowTitle(_t('scheduled_scans', self._lang) if 'scheduled_scans' in TRANSLATIONS.get(self._lang, {}) else '⏰ Scheduled Scans')
-                dlg.resize(700, 550)
+                dlg = QtWidgets.QWidget()
+                dlg.setObjectName('SchedulePage')
                 dlg.setStyleSheet(f"""
-                    QDialog {{ background-color: #0f1112; font-family: '{selected_font}'; }}
+                    QWidget#SchedulePage {{ background-color: #0f1112; font-family: '{selected_font}'; }}
                     QLabel {{ color: #d7e1ea; font-family: '{selected_font}'; }}
                     QTableWidget {{ background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; gridline-color: #2b2f33; font-family: '{selected_font}'; }}
                     QTableWidget::item {{ padding: 8px; }}
@@ -6838,8 +9786,8 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                 
                 # Scheduled scans table
                 table = QtWidgets.QTableWidget()
-                table.setColumnCount(5)
-                table.setHorizontalHeaderLabels(['Target', 'Schedule', 'Next Run', 'Status', 'Actions'])
+                table.setColumnCount(6)
+                table.setHorizontalHeaderLabels(['Target', 'Type', 'Schedule', 'Next Run', 'Status', 'Actions'])
                 table.horizontalHeader().setStretchLastSection(True)
                 table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
                 
@@ -6850,17 +9798,18 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                         for i, sched in enumerate(schedules):
                             table.insertRow(i)
                             table.setItem(i, 0, QtWidgets.QTableWidgetItem(sched.get('target', 'N/A')))
-                            table.setItem(i, 1, QtWidgets.QTableWidgetItem(sched.get('schedule_type', 'once')))
-                            table.setItem(i, 2, QtWidgets.QTableWidgetItem(sched.get('next_run', 'N/A')))
+                            table.setItem(i, 1, QtWidgets.QTableWidgetItem((sched.get('job_type') or 'scan').title()))
+                            table.setItem(i, 2, QtWidgets.QTableWidgetItem(sched.get('schedule_type', 'once')))
+                            table.setItem(i, 3, QtWidgets.QTableWidgetItem(sched.get('next_run', 'N/A')))
                             status_txt = '🟢 Active' if sched.get('enabled', True) else '⚪ Disabled'
-                            table.setItem(i, 3, QtWidgets.QTableWidgetItem(status_txt))
-                            
+                            table.setItem(i, 4, QtWidgets.QTableWidgetItem(status_txt))
+
                             # Action button
                             del_btn = QPushButton('🗑️')
                             del_btn.setFixedWidth(35)
                             sched_id = sched.get('id')
                             del_btn.clicked.connect(lambda checked, sid=sched_id: delete_schedule(sid))
-                            table.setCellWidget(i, 4, del_btn)
+                            table.setCellWidget(i, 5, del_btn)
                 
                 def delete_schedule(sched_id):
                     if self._db:
@@ -6898,7 +9847,13 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                 datetime_edit.setDateTime(QDateTime.currentDateTime().addSecs(3600))  # Default to 1 hour from now
                 datetime_edit.setCalendarPopup(True)
                 form_layout.addWidget(datetime_edit, 2, 1)
-                
+
+                form_layout.addWidget(QLabel('Type:'), 3, 0)
+                jobtype_combo = QtWidgets.QComboBox()
+                jobtype_combo.addItems(['Scan', 'Recon'])
+                jobtype_combo.setToolTip('Scan = WAF bypass scan. Recon = subfinder/amass/dnsx/httpx/nmap.')
+                form_layout.addWidget(jobtype_combo, 3, 1)
+
                 layout.addWidget(form_group)
                 
                 # Buttons
@@ -6924,6 +9879,7 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                             target=target,
                             schedule_type=schedule_type,
                             scheduled_time=scheduled_time.isoformat(),
+                            job_type=jobtype_combo.currentText().lower(),
                             settings={'threads': int(self.threads_spin.value()), 'delay': float(self.delay_spin.value())}
                         )
                         target_edit.clear()
@@ -6938,19 +9894,160 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                 btn_layout.addStretch()
                 
                 close_btn = QPushButton(_t('close', self._lang))
-                close_btn.clicked.connect(dlg.accept)
+                close_btn.clicked.connect(lambda: self._navigate('scan'))
                 btn_layout.addWidget(close_btn)
-                
+
                 layout.addLayout(btn_layout)
-                
+
                 # Info label
-                info_label = QLabel('ℹ️ Note: Scheduled scans run when the application is open.')
+                info_label = QLabel('ℹ️ Scheduled jobs (Scan or Recon) run automatically while the app is open.')
                 info_label.setStyleSheet('color: #8b949e; font-size: 11px;')
                 layout.addWidget(info_label)
-                
-                dlg.exec()
+
+                return dlg
             except Exception as e:
                 QMessageBox.critical(self, 'Scheduled Scans Error', str(e))
+                return None
+
+        # ------------------------------------------------------------------ #
+        # Scheduler executor — fires due scheduled jobs (scan or recon)
+        # ------------------------------------------------------------------ #
+        def _scan_running(self):
+            wt = getattr(self, '_worker_thread', None)
+            try:
+                return wt is not None and wt.isRunning()
+            except Exception:
+                return wt is not None
+
+        def _advance_schedule(self, iso, sched_type):
+            """Next fire time for a recurring job, strictly in the future."""
+            from datetime import datetime, timedelta
+            try:
+                nxt = datetime.fromisoformat(str(iso))
+            except Exception:
+                nxt = datetime.now()
+            step = {'daily': timedelta(days=1), 'weekly': timedelta(weeks=1),
+                    'monthly': timedelta(days=30)}.get(sched_type, timedelta(days=1))
+            now = datetime.now()
+            # Guard against runaway loops on absurd data.
+            for _ in range(10000):
+                if nxt > now:
+                    break
+                nxt = nxt + step
+            return nxt.isoformat()
+
+        def _check_due_schedules(self):
+            """Timer tick: run any enabled scheduled job whose time has arrived."""
+            if not getattr(self, '_db', None):
+                return
+            from datetime import datetime
+            try:
+                schedules = self._db.get_scheduled_scans()
+            except Exception:
+                return
+            now = datetime.now()
+            for s in schedules:
+                if not s.get('enabled', True):
+                    continue
+                nr = s.get('next_run') or s.get('schedule_time')
+                if not nr:
+                    continue
+                try:
+                    due = datetime.fromisoformat(str(nr))
+                except Exception:
+                    continue
+                if due > now:
+                    continue
+                try:
+                    self._fire_scheduled_job(s)
+                except Exception as e:
+                    try:
+                        self.append_log(f"[scheduler] job error: {e}\n")
+                    except Exception:
+                        pass
+
+        def _fire_scheduled_job(self, s):
+            job_type = (s.get('job_type') or 'scan').lower()
+            targets = s.get('targets') or []
+            target = targets[0] if targets else (
+                s.get('target') if s.get('target') not in (None, 'N/A') else None)
+            if not target:
+                try:
+                    self._db.mark_scheduled_run(s['id'], disable=True)
+                except Exception:
+                    pass
+                return
+            # Scan jobs need the scan worker free; a recon job runs independently,
+            # so it can fire even while a scan is in progress.
+            if job_type != 'recon' and self._scan_running():
+                return  # leave it due; retry on the next tick
+
+            sched_type = (s.get('schedule_type') or 'once').lower()
+            if sched_type == 'once':
+                self._db.mark_scheduled_run(s['id'], disable=True)
+            else:
+                self._db.mark_scheduled_run(
+                    s['id'],
+                    next_run=self._advance_schedule(
+                        s.get('next_run') or s.get('schedule_time'), sched_type))
+
+            if job_type == 'recon':
+                self._run_scheduled_recon(target)
+            else:
+                self._run_scheduled_scan(target)
+
+        def _run_scheduled_scan(self, target):
+            try:
+                self.append_log(f"[scheduler] starting scan for {target}\n")
+                self.target_edit.setText(target)
+                self.add_target()
+                self.start_scan()
+            except Exception as e:
+                self.append_log(f"[scheduler] scan launch failed: {e}\n")
+
+        def _run_scheduled_recon(self, target):
+            """Run a recon job headlessly and merge its findings into Results."""
+            from PySide6.QtCore import QProcess, QProcessEnvironment
+            import tempfile
+            try:
+                from .recon import preflight
+                if preflight():
+                    self.append_log("[scheduler] recon skipped — required tools not installed\n")
+                    return
+            except Exception:
+                pass
+            tmpf = tempfile.NamedTemporaryFile(delete=False, suffix='.json')
+            tmpf.close()
+            cmd = self._recon_worker_cmd(target, tmpf.name, 300, 100, False)
+            proc = QProcess(self)
+            proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+            env = QProcessEnvironment.systemEnvironment()
+            env.insert('PYTHONUNBUFFERED', '1')
+            proc.setProcessEnvironment(env)
+            proc.readyReadStandardOutput.connect(
+                lambda: self.append_log(bytes(proc.readAllStandardOutput()).decode('utf-8', 'replace')))
+
+            def _done(code=0, status=None):
+                try:
+                    if os.path.exists(tmpf.name):
+                        with open(tmpf.name, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                        if isinstance(data, list):
+                            self._results.extend(data)
+                            try:
+                                self._live_refresh()
+                            except Exception:
+                                pass
+                            self.append_log(
+                                f"[scheduler] recon finished: {len(data)} finding(s) for {target}\n")
+                        os.unlink(tmpf.name)
+                except Exception as e:
+                    self.append_log(f"[scheduler] recon parse failed: {e}\n")
+            proc.finished.connect(_done)
+            self._sched_procs = getattr(self, '_sched_procs', [])
+            self._sched_procs.append(proc)
+            self.append_log(f"[scheduler] starting recon for {target}\n")
+            proc.start(cmd[0], cmd[1:])
 
         def closeEvent(self, event):
             # Save persistent results to database
@@ -7020,8 +10117,15 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                 pass
 
     def run_qt():
+        # QtWebEngine (the Browser section) needs shared OpenGL contexts set
+        # before the QApplication is constructed. Harmless if WebEngine is absent.
+        try:
+            from PySide6.QtCore import Qt as _Qt, QCoreApplication
+            QCoreApplication.setAttribute(_Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
+        except Exception:
+            pass
         app = QApplication([])
-        
+
         # Always apply dark mode - Fusion style with dark palette
         try:
             from PySide6.QtGui import QPalette, QColor

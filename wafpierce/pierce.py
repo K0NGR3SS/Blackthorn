@@ -10109,10 +10109,21 @@ def load_custom_payloads(db=None) -> Dict[str, List[str]]:
 
 
 def load_plugins() -> list:
-    """Discover and return enabled user plugins (empty list on any failure)."""
+    """Discover and return enabled user plugins (empty list on any failure).
+
+    The PluginManager is wired to the shared on-disk DB so the scanner honors the
+    enable/disable state set in the GUI plugin manager. Without the DB every
+    discovered plugin would run regardless of being disabled.
+    """
     try:
         from .plugins import PluginManager
-        pm = PluginManager()
+        db = None
+        try:
+            from .database import WAFPierceDB
+            db = WAFPierceDB()
+        except Exception:
+            db = None
+        pm = PluginManager(db=db)
         pm.load_all_plugins()
         return pm.get_enabled_plugins()
     except Exception as e:

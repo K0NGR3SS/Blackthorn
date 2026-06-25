@@ -144,7 +144,14 @@ class WAFPierceDB:
                 FOREIGN KEY (template_id) REFERENCES templates(id)
             )
         ''')
-        
+
+        # Migration: scheduled jobs can be a normal scan or a recon run.
+        # ALTER fails if the column already exists, so ignore that.
+        try:
+            c.execute("ALTER TABLE scheduled_scans ADD COLUMN job_type TEXT DEFAULT 'scan'")
+        except Exception:
+            pass
+
         # Proxy configurations table
         c.execute('''
             CREATE TABLE IF NOT EXISTS proxy_configs (
@@ -765,24 +772,34 @@ class WAFPierceDB:
     
     def add_scheduled_scan(self, target: str = None, name: str = None, targets: List[str] = None,
                           schedule_type: str = 'once', scheduled_time: str = None,
-                          schedule_time: str = None, template_id: int = None, settings: dict = None):
-        """Add a scheduled scan."""
+                          schedule_time: str = None, template_id: int = None, settings: dict = None,
+                          job_type: str = 'scan'):
+        """Add a scheduled job. ``job_type`` is 'scan' or 'recon'."""
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
-        
+
         # Handle both old and new parameter styles
         if target and not targets:
             targets = [target]
         if scheduled_time and not schedule_time:
             schedule_time = scheduled_time
         if not name:
-            name = f"Scan {target or 'Unknown'}"
-        
-        c.execute('''
-            INSERT INTO scheduled_scans (name, targets, template_id, schedule_type, schedule_time)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (name, json.dumps(targets or []), template_id, schedule_type, schedule_time))
-        
+            name = f"{(job_type or 'scan').title()} {target or 'Unknown'}"
+
+        # next_run seeds the executor's due check; store it alongside schedule_time.
+        try:
+            c.execute('''
+                INSERT INTO scheduled_scans (name, targets, template_id, schedule_type, schedule_time, next_run, job_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (name, json.dumps(targets or []), template_id, schedule_type,
+                  schedule_time, schedule_time, job_type))
+        except Exception:
+            # Older schema without job_type/next_run — fall back to the base insert.
+            c.execute('''
+                INSERT INTO scheduled_scans (name, targets, template_id, schedule_type, schedule_time)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (name, json.dumps(targets or []), template_id, schedule_type, schedule_time))
+
         conn.commit()
         conn.close()
     
@@ -819,8 +836,26 @@ class WAFPierceDB:
         
         return scans
     
+    def mark_scheduled_run(self, scan_id: int, next_run: str = None, disable: bool = False):
+        """Record that a scheduled job fired: bump last_run, then either advance
+        next_run (recurring) or disable it ('once')."""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        now = datetime.now().isoformat()
+        try:
+            if disable:
+                c.execute('UPDATE scheduled_scans SET last_run = ?, enabled = 0 WHERE id = ?',
+                          (now, scan_id))
+            else:
+                c.execute('UPDATE scheduled_scans SET last_run = ?, next_run = ? WHERE id = ?',
+                          (now, next_run, scan_id))
+            conn.commit()
+        except Exception:
+            pass
+        conn.close()
+
     # ==================== STATISTICS / DASHBOARD ====================
-    
+
     def get_dashboard_stats(self) -> dict:
         """Get statistics for dashboard display."""
         conn = sqlite3.connect(self.db_path)

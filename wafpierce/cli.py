@@ -7,7 +7,10 @@ from the entry point users actually install. This dispatcher fixes that by
 exposing subcommands:
 
     wafpierce scan   <url> [rich scanner flags]   # full technique scanner
+    wafpierce recon  <domain> [...]               # external-tool reconnaissance
     wafpierce chain  <url> [...]                  # bypass->enum->scan->recon chain
+    wafpierce msf    <check|scan|push> [...]      # Metasploit RPC integration
+    wafpierce caido  <check|push|export> [...]    # Caido proxy integration
     wafpierce doctor                              # environment preflight
     wafpierce gui                                 # launch the desktop GUI
     wafpierce --version | -V
@@ -22,7 +25,8 @@ from typing import List, Optional
 
 from . import __version__
 
-_SUBCOMMANDS = {'scan', 'chain', 'doctor', 'gui', 'version', 'help'}
+_SUBCOMMANDS = {'scan', 'recon', 'chain', 'msf', 'caido',
+                'doctor', 'gui', 'version', 'help'}
 
 
 def _print_usage() -> None:
@@ -35,7 +39,11 @@ commands:
                        --oob, --impersonate, --resume, --safe-mode, --import-*,
                        --export, --ai-*, scope/auth, --dry-run, ...).
                        This is the default if you pass a URL with no command.
+  recon <domain>       External-tool recon (subfinder/amass/dnsx/httpx/nmap).
+                       Requires those tools on PATH; `wafpierce doctor` checks.
   chain <url> [flags]  Run the bypass -> enum -> scan -> recon -> report chain.
+  msf <sub> [flags]    Metasploit RPC: check | scan <target> | push <results>.
+  caido <sub> [flags]  Caido: check | push <results> | export <results> -o.
   doctor               Environment preflight (deps, config dir, egress, OOB).
   gui                  Launch the desktop GUI.
   version              Show version + which optional components are installed.
@@ -98,9 +106,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         from .pierce import main as scan_main
         return scan_main(argv[1:])
 
+    if head == 'recon':
+        from .recon import main as recon_main
+        return recon_main(argv[1:])
+
     if head == 'chain':
         from .chain import main as chain_main
         return chain_main(argv[1:])
+
+    if head == 'msf':
+        from .msf import main as msf_main
+        return msf_main(argv[1:])
+
+    if head == 'caido':
+        from .caido import main as caido_main
+        return caido_main(argv[1:])
 
     # No recognized subcommand -> treat the whole argv as a `scan` invocation so
     # `wafpierce https://target --oob ...` behaves like `wafpierce scan ...`.

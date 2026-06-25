@@ -25,6 +25,7 @@ OPTIONAL_COMPONENTS: List[Tuple[str, str, str, Optional[str]]] = [
     ('playwright', 'playwright', 'Headless-browser tests: DOM XSS / CSPT', 'pip install playwright && python -m playwright install chromium'),
     ('anthropic', 'anthropic', 'AI triage / AI report (--ai-triage / --ai-report)', 'pip install anthropic'),
     ('PySide6', 'PySide6', 'Desktop GUI (wafpierce gui / run_gui.py)', 'pip install PySide6'),
+    ('pymetasploit3', 'pymetasploit3', 'Metasploit RPC integration (wafpierce msf)', 'pip install pymetasploit3'),
 ]
 
 
@@ -147,6 +148,25 @@ def _check_oob() -> Tuple[bool, str]:
     return True, "Interactsh + self-hosted listener available"
 
 
+def _check_recon_tools() -> List[Tuple[str, bool, str]]:
+    """(label, available, hint) for each required external recon binary."""
+    import shutil
+    from .recon import REQUIRED_TOOLS
+    rows = []
+    for binary, label, _stage, hint in REQUIRED_TOOLS:
+        path = shutil.which(binary)
+        rows.append((label, path is not None, path or hint))
+    return rows
+
+
+def _check_metasploit() -> Tuple[bool, str]:
+    """Is pymetasploit3 importable? (RPC reachability needs creds, so skip it.)"""
+    avail, ver = check_component('pymetasploit3')
+    if avail:
+        return True, f"pymetasploit3 {ver or ''} (start msfrpcd + set RPC creds to use)"
+    return False, "pymetasploit3 missing -> pip install pymetasploit3"
+
+
 def run_doctor(no_color: bool = False, check_network: bool = True) -> int:
     """Green/red preflight checklist. Returns a process exit code (0 = all core OK)."""
     no_color = no_color or bool(os.environ.get('NO_COLOR'))
@@ -187,6 +207,21 @@ def run_doctor(no_color: bool = False, check_network: bool = True) -> int:
     # 5. OOB readiness
     oob_ok, oob_msg = _check_oob()
     print(f"  {ok if oob_ok else bad} OOB: {oob_msg}")
+
+    # 5b. Recon external tools (required for `wafpierce recon`)
+    print("\n  Recon tools (required for `wafpierce recon`):")
+    recon_rows = _check_recon_tools()
+    for label, avail, info in recon_rows:
+        mark = ok if avail else bad
+        suffix = info if avail else f"(missing)  ->  {info}"
+        print(f"    {mark} {label:<12} {suffix}")
+    recon_ready = all(a for _l, a, _i in recon_rows)
+    print(f"    {ok if recon_ready else bad} recon "
+          f"{'ready' if recon_ready else 'NOT ready - install the tools above'}")
+
+    # 5c. Metasploit integration
+    msf_ok, msf_msg = _check_metasploit()
+    print(f"\n  {ok if msf_ok else bad} Metasploit: {msf_msg}")
 
     # 6. Network egress (best-effort, opt-out)
     if check_network:
