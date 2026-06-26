@@ -4,7 +4,7 @@
   <h1>WAFPierce</h1>
   <b>Teaching firewalls humility, one bypass at a time</b>
   <br><br>
-  <a href="https://img.shields.io/badge/version-1.5-blue"><img src="https://img.shields.io/badge/version-1.5-blue"/></a>
+  <a href="https://img.shields.io/badge/version-1.7-blue"><img src="https://img.shields.io/badge/version-1.7-blue"/></a>
   <a href="https://img.shields.io/badge/python-3.8+-green"><img src="https://img.shields.io/badge/python-3.8+-green"/></a>
   <a href="https://img.shields.io/badge/license-MIT-orange"><img src="https://img.shields.io/badge/license-MIT-orange"/></a>
 </div>
