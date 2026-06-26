@@ -2524,7 +2524,8 @@ def main() -> None:
             sections migrate to in-place pages one at a time without breakage."""
             keys = ['pipeline', 'recon', 'browser', 'fuzzer', 'secrets', 'sqli',
                     'repeater', 'payloads', 'plugins', 'schedule', 'timeline',
-                    'dashboard', 'results', 'live', 'settings']
+                    'dashboard', 'results', 'live', 'settings',
+                    'tools', 'zapburp', 'adint', 'proxy']
             out = {}
             for k in keys:
                 fn = getattr(self, f'_build_{k}_page', None)
@@ -2538,12 +2539,7 @@ def main() -> None:
             Every nav section now has a `_build_<key>_page`, so this is normally
             empty; it remains as a safety net (resolved by getattr) for any future
             section added before its page builder exists."""
-            mapping = {
-                'tools': '_show_tools_manager',
-                'zapburp': '_show_zapburp',
-                'adint': '_show_adint',
-                'proxy': '_show_proxy_repeater',
-            }
+            mapping = {}
             out = {}
             for key, name in mapping.items():
                 fn = getattr(self, name, None)
@@ -3659,6 +3655,14 @@ def main() -> None:
             except Exception:
                 pass
 
+        def show_results_summary(self):
+            """Back-compat shim for my section pages: route to the Results
+            page in wave1's stacked shell (the old method was removed)."""
+            try:
+                self._navigate('results')
+            except Exception:
+                pass
+
         def _ingest_external_findings(self, findings, label='External tool'):
             """Fold external tool / ZAP / Burp findings into the SAME results funnel
             the scanner uses. Creates a synthetic scan row if none is active so the
@@ -3685,7 +3689,7 @@ def main() -> None:
                 pass
             return len(findings)
 
-        def _show_tools_manager(self):
+        def _build_tools_page(self):
             """External pentest tools (detect-&-drive): list installed tools by
             category with status badges, run a selected one as a killable subprocess,
             and fold its findings into the Results Explorer. Absent tools show an
@@ -3697,7 +3701,7 @@ def main() -> None:
                 QMessageBox.critical(self, 'Tools', f'Tool registry unavailable: {e}')
                 return
 
-            dlg = QtWidgets.QDialog(self)
+            dlg = QtWidgets.QWidget()
             dlg.setWindowTitle('External Tools')
             dlg.resize(940, 660)
             dlg.setStyleSheet('''
@@ -3866,7 +3870,7 @@ def main() -> None:
             results_btn.clicked.connect(self.show_results_summary)
             tree.itemDoubleClicked.connect(lambda *_: run_selected())
             populate()
-            dlg.exec()
+            return dlg
 
         def _configure_tool_dialog(self, tool_key, on_saved=None):
             """Per-tool override editor (custom binary path / extra args / API key),
@@ -4207,11 +4211,11 @@ def main() -> None:
                 pass
             return False
 
-        def _show_proxy_repeater(self):
+        def _build_proxy_page(self):
             """Built-in intercepting proxy + Burp/ZAP-style Repeater. Records HTTP(S)
             traffic to the unified history store; HTTPS needs the WAFPierce CA trusted."""
             from .config import get_proxy_ca_dir
-            dlg = QtWidgets.QDialog(self)
+            dlg = QtWidgets.QWidget()
             dlg.setWindowTitle('Proxy + Repeater')
             dlg.resize(1040, 720)
             dlg.setStyleSheet('''
@@ -4457,7 +4461,7 @@ def main() -> None:
                     pass
                 ev.accept()
             dlg.closeEvent = on_close
-            dlg.exec()
+            return dlg
 
         def _show_browser(self):
             """Embedded QtWebEngine browser (source-only). Records request metadata
@@ -4510,12 +4514,12 @@ def main() -> None:
             dlg.closeEvent = on_close
             dlg.exec()
 
-        def _show_zapburp(self):
+        def _build_zapburp_page(self):
             """Detect-&-drive OWASP ZAP (REST spider+active-scan) and import Burp
             Suite issue reports. Findings flow into the Results Explorer tagged
             [ZAP]/[Burp]. Absent tools degrade to a status line, never a crash."""
             from .tooldrivers import detect_zap, detect_burp
-            dlg = QtWidgets.QDialog(self)
+            dlg = QtWidgets.QWidget()
             dlg.setWindowTitle('ZAP / Burp')
             dlg.resize(860, 620)
             dlg.setStyleSheet('''
@@ -4641,9 +4645,9 @@ def main() -> None:
             bimport.clicked.connect(import_burp)
             res_btn.clicked.connect(self.show_results_summary)
             do_detect_zap(); do_detect_burp()
-            dlg.exec()
+            return dlg
 
-        def _show_adint(self):
+        def _build_adint_page(self):
             """Active Directory / internal section: detect-&-drive BloodHound + Neo4j +
             SharpHound/AzureHound. Optional and clearly separated from web scanning.
             Credentials are kept in-memory (not persisted). Authorized use only."""
@@ -4653,7 +4657,7 @@ def main() -> None:
                 QMessageBox.critical(self, 'AD / Internal', f'AD module unavailable: {e}')
                 return
             P = self._prefs
-            dlg = QtWidgets.QDialog(self)
+            dlg = QtWidgets.QWidget()
             dlg.setWindowTitle('AD / Internal — BloodHound + Neo4j')
             dlg.resize(940, 720)
             dlg.setStyleSheet('''
@@ -4870,7 +4874,7 @@ def main() -> None:
             run_q.clicked.connect(run_query)
 
             do_detect()
-            dlg.exec()
+            return dlg
 
         def _on_target_summary(self, target, done_list, errors):
             try:
