@@ -71,6 +71,12 @@ class WAFPierceDB:
         c.execute('CREATE INDEX IF NOT EXISTS idx_results_target ON results(target)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_results_severity ON results(severity)')
 
+        # Provenance for external/tool/ZAP/Burp findings (back-compat add).
+        try:
+            c.execute('ALTER TABLE results ADD COLUMN source TEXT')
+        except Exception:
+            pass
+
         # WAF feedback loop - learns which techniques bypass which WAF vendor so
         # future scans can run the historically-effective ones first.
         c.execute('''
@@ -144,7 +150,14 @@ class WAFPierceDB:
                 FOREIGN KEY (template_id) REFERENCES templates(id)
             )
         ''')
-        
+
+        # Migration: scheduled jobs can be a normal scan or a recon run.
+        # ALTER fails if the column already exists, so ignore that.
+        try:
+            c.execute("ALTER TABLE scheduled_scans ADD COLUMN job_type TEXT DEFAULT 'scan'")
+        except Exception:
+            pass
+
         # Proxy configurations table
         c.execute('''
             CREATE TABLE IF NOT EXISTS proxy_configs (
@@ -242,13 +255,327 @@ class WAFPierceDB:
                 FOREIGN KEY (scan_id) REFERENCES scans(scan_id)
             )
         ''')
-        
+
+        # External-tool per-tool overrides (P2 tool registry): custom binary path,
+        # extra args, API key, enabled flag, and last-detected status cache.
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS tool_configs (
+                tool_key TEXT PRIMARY KEY,
+                custom_path TEXT,
+                extra_args TEXT,
+                api_key TEXT,
+                enabled INTEGER DEFAULT 1,
+                last_detected_version TEXT,
+                last_status TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        # Saved pipelines (P3): an ordered list of typed stages stored as JSON.
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS pipelines (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                description TEXT,
+                definition TEXT NOT NULL,
+                schema_version INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        # Unified request/response history (shared layer 2): proxy / repeater (P4)
+        # and embedded browser (P5) all write here, discriminated by `source`.
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS captured_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                source TEXT DEFAULT 'proxy',
+                session_id TEXT,
+                method TEXT, scheme TEXT, host TEXT, port INTEGER,
+                path TEXT, url TEXT, first_party_url TEXT,
+                req_headers TEXT, req_body BLOB,
+                status_code INTEGER, resp_headers TEXT, resp_body BLOB,
+                resp_time_ms REAL, resource_type INTEGER, navigation_type INTEGER,
+                is_navigation INTEGER DEFAULT 0, intercepted INTEGER DEFAULT 0,
+                raw_request TEXT, notes TEXT
+            )
+        ''')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_capreq_host ON captured_requests(host)')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_capreq_ts ON captured_requests(ts)')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_capreq_src ON captured_requests(source)')
+
+        # Active Directory / internal runs (P7): collector runs + cypher results.
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS ad_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT UNIQUE NOT NULL,
+                collector TEXT, domain TEXT, output_path TEXT,
+                status TEXT DEFAULT 'running', ingested INTEGER DEFAULT 0,
+                started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, finished_at TIMESTAMP
+            )
+        ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS ad_findings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT, query_name TEXT, row_json TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (run_id) REFERENCES ad_runs(run_id)
+            )
+        ''')
+
         conn.commit()
         conn.close()
-        
+
         # Insert default evasion profiles
         self._insert_default_evasion_profiles()
         self._insert_default_proxy_configs()
+
+    # ---- External-tool configs (P2) ------------------------------------- #
+    def get_tool_config(self, tool_key: str) -> Optional[Dict[str, Any]]:
+        """Return the saved override row for a tool, or None."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            row = conn.execute('SELECT * FROM tool_configs WHERE tool_key = ?',
+                               (tool_key,)).fetchone()
+            conn.close()
+            return dict(row) if row else None
+        except Exception:
+            return None
+
+    def get_all_tool_configs(self) -> Dict[str, Dict[str, Any]]:
+        """Return {tool_key: config_row} for every saved override."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute('SELECT * FROM tool_configs').fetchall()
+            conn.close()
+            return {r['tool_key']: dict(r) for r in rows}
+        except Exception:
+            return {}
+
+    def save_tool_config(self, tool_key: str, custom_path: str = None,
+                         extra_args: str = None, api_key: str = None,
+                         enabled: bool = True, last_detected_version: str = None,
+                         last_status: str = None) -> bool:
+        """Upsert a tool override row."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.execute('''
+                INSERT INTO tool_configs
+                    (tool_key, custom_path, extra_args, api_key, enabled,
+                     last_detected_version, last_status, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(tool_key) DO UPDATE SET
+                    custom_path=excluded.custom_path,
+                    extra_args=excluded.extra_args,
+                    api_key=excluded.api_key,
+                    enabled=excluded.enabled,
+                    last_detected_version=excluded.last_detected_version,
+                    last_status=excluded.last_status,
+                    updated_at=CURRENT_TIMESTAMP
+            ''', (tool_key, custom_path, extra_args, api_key, 1 if enabled else 0,
+                  last_detected_version, last_status))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception:
+            return False
+
+    # ---- Pipelines (P3) -------------------------------------------------- #
+    def save_pipeline(self, name: str, definition: dict, description: str = '') -> bool:
+        """Upsert a pipeline by name. ``definition`` is stored as JSON."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.execute('''
+                INSERT INTO pipelines (name, description, definition, schema_version, updated_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(name) DO UPDATE SET
+                    description=excluded.description,
+                    definition=excluded.definition,
+                    schema_version=excluded.schema_version,
+                    updated_at=CURRENT_TIMESTAMP
+            ''', (name, description, json.dumps(definition),
+                  int(definition.get('schema_version', 1))))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception:
+            return False
+
+    def get_pipeline(self, name: str) -> Optional[Dict[str, Any]]:
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            row = conn.execute('SELECT * FROM pipelines WHERE name = ?', (name,)).fetchone()
+            conn.close()
+            if not row:
+                return None
+            d = dict(row)
+            try:
+                d['definition'] = json.loads(d['definition'])
+            except Exception:
+                d['definition'] = {}
+            return d
+        except Exception:
+            return None
+
+    def list_pipelines(self) -> List[Dict[str, Any]]:
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute('SELECT name, description, updated_at FROM pipelines '
+                               'ORDER BY updated_at DESC').fetchall()
+            conn.close()
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
+
+    def delete_pipeline(self, name: str) -> bool:
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.execute('DELETE FROM pipelines WHERE name = ?', (name,))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception:
+            return False
+
+    # ---- Unified request/response history (P4 proxy / P5 browser) -------- #
+    PROXY_HISTORY_LIMIT = 5000
+    _BODY_CAP = 1_000_000
+
+    def add_captured_request(self, flow: dict) -> Optional[int]:
+        """Insert one captured flow (dict) into captured_requests. Bodies over 1 MB
+        are truncated. Returns the new row id. Caller must invoke from a single
+        thread (the GUI marshals proxy/browser flows here via a queued signal)."""
+        try:
+            def _b(v):
+                if v is None:
+                    return None
+                if isinstance(v, str):
+                    v = v.encode('utf-8', 'replace')
+                return v[:self._BODY_CAP] if isinstance(v, (bytes, bytearray)) else v
+            rh = flow.get('req_headers'); sh = flow.get('resp_headers')
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.execute('''
+                INSERT INTO captured_requests
+                    (source, session_id, method, scheme, host, port, path, url,
+                     first_party_url, req_headers, req_body, status_code, resp_headers,
+                     resp_body, resp_time_ms, resource_type, navigation_type,
+                     is_navigation, intercepted, raw_request, notes)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ''', (
+                flow.get('source', 'proxy'), flow.get('session_id'),
+                flow.get('method'), flow.get('scheme'), flow.get('host'), flow.get('port'),
+                flow.get('path'), flow.get('url'), flow.get('first_party_url'),
+                json.dumps(rh) if isinstance(rh, dict) else rh, _b(flow.get('req_body')),
+                flow.get('status_code'),
+                json.dumps(sh) if isinstance(sh, dict) else sh, _b(flow.get('resp_body')),
+                flow.get('resp_time_ms'), flow.get('resource_type'),
+                flow.get('navigation_type'), flow.get('is_navigation', 0),
+                flow.get('intercepted', 0), flow.get('raw_request'), flow.get('notes'),
+            ))
+            rid = cur.lastrowid
+            # trim oldest rows beyond the cap
+            conn.execute('''DELETE FROM captured_requests WHERE id IN (
+                SELECT id FROM captured_requests ORDER BY id DESC LIMIT -1 OFFSET ?)''',
+                (self.PROXY_HISTORY_LIMIT,))
+            conn.commit()
+            conn.close()
+            return rid
+        except Exception:
+            return None
+
+    def get_captured_requests(self, limit: int = 500, source: str = None) -> List[Dict[str, Any]]:
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            if source:
+                rows = conn.execute('SELECT * FROM captured_requests WHERE source=? '
+                                   'ORDER BY id DESC LIMIT ?', (source, limit)).fetchall()
+            else:
+                rows = conn.execute('SELECT * FROM captured_requests ORDER BY id DESC '
+                                   'LIMIT ?', (limit,)).fetchall()
+            conn.close()
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
+
+    def get_captured_request(self, row_id: int) -> Optional[Dict[str, Any]]:
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            row = conn.execute('SELECT * FROM captured_requests WHERE id=?', (row_id,)).fetchone()
+            conn.close()
+            return dict(row) if row else None
+        except Exception:
+            return None
+
+    def clear_captured_requests(self, source: str = None) -> bool:
+        try:
+            conn = sqlite3.connect(self.db_path)
+            if source:
+                conn.execute('DELETE FROM captured_requests WHERE source=?', (source,))
+            else:
+                conn.execute('DELETE FROM captured_requests')
+            conn.commit()
+            conn.close()
+            return True
+        except Exception:
+            return False
+
+    # ---- Active Directory runs / findings (P7) -------------------------- #
+    def save_ad_run(self, run_id: str, collector: str = '', domain: str = '',
+                    output_path: str = '', status: str = 'running') -> bool:
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.execute('''
+                INSERT INTO ad_runs (run_id, collector, domain, output_path, status)
+                VALUES (?,?,?,?,?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    collector=excluded.collector, domain=excluded.domain,
+                    output_path=excluded.output_path, status=excluded.status
+            ''', (run_id, collector, domain, output_path, status))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception:
+            return False
+
+    def finish_ad_run(self, run_id: str, status: str = 'done', ingested: bool = False) -> bool:
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.execute('UPDATE ad_runs SET status=?, ingested=?, finished_at=CURRENT_TIMESTAMP '
+                        'WHERE run_id=?', (status, 1 if ingested else 0, run_id))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception:
+            return False
+
+    def add_ad_findings(self, run_id: str, query_name: str, rows: list) -> bool:
+        try:
+            conn = sqlite3.connect(self.db_path)
+            for row in rows:
+                conn.execute('INSERT INTO ad_findings (run_id, query_name, row_json) VALUES (?,?,?)',
+                            (run_id, query_name, json.dumps(row)))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception:
+            return False
+
+    def get_ad_run(self, run_id: str) -> Optional[Dict[str, Any]]:
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            row = conn.execute('SELECT * FROM ad_runs WHERE run_id=?', (run_id,)).fetchone()
+            conn.close()
+            return dict(row) if row else None
+        except Exception:
+            return None
     
     def _insert_default_evasion_profiles(self):
         """Insert default WAF evasion profiles."""
@@ -765,24 +1092,34 @@ class WAFPierceDB:
     
     def add_scheduled_scan(self, target: str = None, name: str = None, targets: List[str] = None,
                           schedule_type: str = 'once', scheduled_time: str = None,
-                          schedule_time: str = None, template_id: int = None, settings: dict = None):
-        """Add a scheduled scan."""
+                          schedule_time: str = None, template_id: int = None, settings: dict = None,
+                          job_type: str = 'scan'):
+        """Add a scheduled job. ``job_type`` is 'scan' or 'recon'."""
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
-        
+
         # Handle both old and new parameter styles
         if target and not targets:
             targets = [target]
         if scheduled_time and not schedule_time:
             schedule_time = scheduled_time
         if not name:
-            name = f"Scan {target or 'Unknown'}"
-        
-        c.execute('''
-            INSERT INTO scheduled_scans (name, targets, template_id, schedule_type, schedule_time)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (name, json.dumps(targets or []), template_id, schedule_type, schedule_time))
-        
+            name = f"{(job_type or 'scan').title()} {target or 'Unknown'}"
+
+        # next_run seeds the executor's due check; store it alongside schedule_time.
+        try:
+            c.execute('''
+                INSERT INTO scheduled_scans (name, targets, template_id, schedule_type, schedule_time, next_run, job_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (name, json.dumps(targets or []), template_id, schedule_type,
+                  schedule_time, schedule_time, job_type))
+        except Exception:
+            # Older schema without job_type/next_run — fall back to the base insert.
+            c.execute('''
+                INSERT INTO scheduled_scans (name, targets, template_id, schedule_type, schedule_time)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (name, json.dumps(targets or []), template_id, schedule_type, schedule_time))
+
         conn.commit()
         conn.close()
     
@@ -819,8 +1156,26 @@ class WAFPierceDB:
         
         return scans
     
+    def mark_scheduled_run(self, scan_id: int, next_run: str = None, disable: bool = False):
+        """Record that a scheduled job fired: bump last_run, then either advance
+        next_run (recurring) or disable it ('once')."""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        now = datetime.now().isoformat()
+        try:
+            if disable:
+                c.execute('UPDATE scheduled_scans SET last_run = ?, enabled = 0 WHERE id = ?',
+                          (now, scan_id))
+            else:
+                c.execute('UPDATE scheduled_scans SET last_run = ?, next_run = ? WHERE id = ?',
+                          (now, next_run, scan_id))
+            conn.commit()
+        except Exception:
+            pass
+        conn.close()
+
     # ==================== STATISTICS / DASHBOARD ====================
-    
+
     def get_dashboard_stats(self) -> dict:
         """Get statistics for dashboard display."""
         conn = sqlite3.connect(self.db_path)

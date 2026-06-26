@@ -151,3 +151,78 @@ def load_requests(path: str, fmt: Optional[str] = None) -> List[Dict[str, Any]]:
     except Exception as e:
         logger.error(f"Failed to import {fmt} from {path}: {e}")
     return []
+
+
+# --------------------------------------------------------------------------- #
+# Finding importers (P6): bring external scanner *findings* (not requests) into
+# the WAFPierce results funnel. Siblings of the request importers above.
+# --------------------------------------------------------------------------- #
+def from_burp_issues(path: str) -> List[Dict[str, Any]]:
+    """Parse a Burp Suite 'Report issues' XML export into canonical findings."""
+    import re
+    import xml.etree.ElementTree as ET
+    from .tooldrivers import burp_issue_to_finding
+    findings: List[Dict[str, Any]] = []
+    try:
+        root = ET.parse(path).getroot()
+    except Exception as e:
+        logger.error(f"Burp issues parse failed for {path}: {e}")
+        return []
+    for node in root.iter('issue'):
+        def _t(tag):
+            el = node.find(tag)
+            return (el.text or '').strip() if el is not None and el.text else ''
+        vclass = _t('vulnerabilityClassifications')
+        m = re.search(r'CWE-(\d+)', vclass)
+        issue = {
+            'name': _t('name'),
+            'host': _t('host'),
+            'path': _t('path'),
+            'severity': _t('severity'),
+            'confidence': _t('confidence'),
+            'background': _t('issueBackground') or _t('issueDetail'),
+            'cwe': m.group(1) if m else '',
+        }
+        findings.append(burp_issue_to_finding(issue))
+    return findings
+
+
+def load_findings(path: str, fmt: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Load scanner findings from a Burp issues XML or a ZAP alerts JSON export,
+    auto-detecting the format when ``fmt`` is None. Returns canonical finding dicts."""
+    from .tooldrivers import zap_alert_to_finding
+    fmt = (fmt or '').lower()
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            head = f.read(4096)
+    except Exception:
+        head = ''
+    if not fmt:
+        if '<issues' in head or '<issue>' in head:
+            fmt = 'burp'
+        elif '"alerts"' in head or '"@name"' in head or '"pluginId"' in head:
+            fmt = 'zap'
+        elif path.lower().endswith('.xml'):
+            fmt = 'burp'
+        else:
+            fmt = 'zap'
+    try:
+        if fmt == 'burp':
+            return from_burp_issues(path)
+        if fmt == 'zap':
+            with open(path, encoding='utf-8', errors='replace') as f:
+                data = json.load(f)
+            alerts = []
+            if isinstance(data, dict):
+                if isinstance(data.get('alerts'), list):
+                    alerts = data['alerts']
+                else:
+                    for site in (data.get('site') or []):
+                        for a in (site.get('alerts') or []):
+                            alerts.append(a)
+            elif isinstance(data, list):
+                alerts = data
+            return [zap_alert_to_finding(a) for a in alerts if isinstance(a, dict)]
+    except Exception as e:
+        logger.error(f"Failed to import findings ({fmt}) from {path}: {e}")
+    return []

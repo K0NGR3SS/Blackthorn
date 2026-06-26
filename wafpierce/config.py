@@ -91,11 +91,21 @@ def ensure_plugins_dir() -> str:
 def get_log_dir() -> str:
     """
     Get the directory for log files.
-    
+
     Returns:
         Path to the log directory
     """
     d = os.path.join(get_config_dir(), 'logs')
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        pass
+    return d
+
+
+def get_proxy_ca_dir() -> str:
+    """Directory holding the built-in proxy's root CA + cached leaf certs (P4)."""
+    d = os.path.join(get_config_dir(), 'ca')
     try:
         os.makedirs(d, exist_ok=True)
     except OSError:

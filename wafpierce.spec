@@ -88,6 +88,11 @@ hidden_imports = [
     'wafpierce.cvss',
     'wafpierce.importers',
     'wafpierce.integrations',
+    'wafpierce.cli',
+    'wafpierce.diagnostics',
+    'wafpierce.redaction',
+    'wafpierce.authorization',
+    'wafpierce.configfile',
     # Optional native-dep features (lazily imported; degrade gracefully)
     'cryptography',
     'curl_cffi',

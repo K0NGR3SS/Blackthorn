@@ -4,7 +4,7 @@
   <h1>WAFPierce</h1>
   <b>Teaching firewalls humility, one bypass at a time</b>
   <br><br>
-  <a href="https://img.shields.io/badge/version-1.6-blue"><img src="https://img.shields.io/badge/version-1.6-blue"/></a>
+  <a href="https://img.shields.io/badge/version-1.5-blue"><img src="https://img.shields.io/badge/version-1.5-blue"/></a>
   <a href="https://img.shields.io/badge/python-3.8+-green"><img src="https://img.shields.io/badge/python-3.8+-green"/></a>
   <a href="https://img.shields.io/badge/license-MIT-orange"><img src="https://img.shields.io/badge/license-MIT-orange"/></a>
 </div>
@@ -101,14 +101,83 @@ pip3 install -r requirements.txt
 pip3 install -e .
 ```
 
+### pipx (isolated CLI install)
+```bash
+pipx install .
+wafpierce doctor
+```
+
+### Docker (headless CLI, no GUI)
+```bash
+docker build -t wafpierce .
+docker run --rm wafpierce scan https://target --safe-mode
+docker run --rm wafpierce doctor
+```
+
 ---
 
 ## 🖥️ Usage
 
-### Run UI
+### Run the GUI
 ```bash
-python3 run_gui.py  
+python3 run_gui.py
 ```
+
+### Command line
+
+After `pip install -e .` the unified `wafpierce` command exposes subcommands
+(all the documented scanner flags live under `scan`):
+
+```bash
+wafpierce scan https://target            # full technique scanner
+wafpierce scan https://target --impersonate chrome --oob interactsh
+wafpierce scan https://target --dry-run --safe-mode      # plan only, no requests
+wafpierce chain https://target           # bypass -> enum -> scan -> recon chain
+wafpierce doctor                         # environment preflight
+wafpierce gui                            # launch the desktop GUI
+wafpierce --version                      # version + which optional deps are installed
+```
+
+A bare `wafpierce https://target` (no subcommand) is treated as `scan`. Run
+`wafpierce scan -h` for the full flag list, or `wafpierce scan --list-techniques`
+to see every technique grouped by category.
+
+Without installing, the equivalent is `python3 -m wafpierce <command> ...`.
+
+Helpful flags: `--dry-run`, `--list-categories`, `--list-techniques`, `-q/--quiet`,
+`--no-color` (also honors the `NO_COLOR` env var), `--max-time <seconds>`,
+`--seed <n>`, `--profile stealth|normal|aggressive`.
+
+**Config file** — stop retyping flags (`--config wp.toml [--config-profile staging]`,
+JSON or TOML; explicit flags still win):
+
+```toml
+threads = 20
+impersonate = "chrome"
+safe_mode = true
+
+[profiles.staging]
+target = "https://staging.example.com"
+oob = "interactsh"
+```
+
+**CI / reporting / safety:**
+- `--export-format` now also supports `junit`, `csv`, `prometheus` (monitor-mode
+  textfile collector), and `har` (Burp/ZAP-importable) — alongside `sarif`,
+  `nuclei`, `html`, `json`, `pdf`.
+- `--fail-on <critical|high|medium|low|info>` — exit code `10` when a finding
+  reaches that severity (build gating).
+- `--diff-against prev.json [--diff-out diff.html]` — standalone HTML diff vs a
+  previous scan, highlighting new vs resolved findings.
+- The HTML report includes an executive summary, live search + severity/category
+  filters, CVSS hover tooltips, and copy-curl buttons.
+- `--slack-webhook`, `--discord-webhook`, `--teams-webhook` — push a findings
+  summary to chat.
+- `--authorize <file>` — allowlist of authorized hosts/URL patterns (globs ok);
+  the target must match before any test runs (fail-closed). Every scan is
+  recorded to `audit.log` in the config dir.
+- Reports **redact** cookies/tokens/auth by default; pass `--no-redact` to keep
+  raw values.
 
 ---
 

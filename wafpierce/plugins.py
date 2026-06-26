@@ -19,6 +19,18 @@ from abc import ABC, abstractmethod
 from .config import ensure_plugins_dir
 
 
+def _get_plugins_dir() -> str:
+    """Return the primary user plugins directory, creating it if needed.
+
+    Module-level helper so callers (e.g. the GUI plugin manager) can import it
+    alongside :class:`PluginManager`. Historically the GUI imported this name but
+    it was never defined here, which made ``from wafpierce.plugins import
+    PluginManager, _get_plugins_dir`` raise ImportError and the whole Plugins
+    section fail to open. Keep this in sync with :func:`config.ensure_plugins_dir`.
+    """
+    return ensure_plugins_dir()
+
+
 class BypassPlugin(ABC):
     """
     Base class for WAFPierce bypass plugins.
@@ -403,7 +415,9 @@ PLUGIN_CLASS = UnicodeBypassPlugin
                 self.plugin_files[plugin.name] = os.path.abspath(file_path)
                 self.load_errors.pop(file_path, None)
                 
-                # Save to database
+                # Save to database, then restore the persisted enabled state so
+                # disabling a plugin in the GUI survives reloads and is honored by
+                # scans (load creates plugins enabled=True by default).
                 if self.db:
                     self.db.save_plugin(
                         name=plugin.name,
@@ -415,7 +429,14 @@ PLUGIN_CLASS = UnicodeBypassPlugin
                         source='local',
                         checksum=checksum
                     )
-                
+                    try:
+                        for row in self.db.get_plugins():
+                            if row.get('name') == plugin.name:
+                                plugin.enabled = bool(row.get('enabled', 1))
+                                break
+                    except Exception:
+                        pass
+
                 return plugin
             else:
                 self.load_errors[file_path] = 'No valid BypassPlugin class found (PLUGIN_CLASS missing/invalid)'

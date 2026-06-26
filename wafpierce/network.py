@@ -22,17 +22,20 @@ def create_optimized_session(
     pool_maxsize: int = CONNECTION_POOL_MAXSIZE,
     verify_ssl: bool = True,
     user_agent: str = DEFAULT_USER_AGENT,
+    proxy: Optional[str] = None,
 ) -> requests.Session:
     """
     Create a session with connection pooling and retry logic.
-    
+
     Args:
         max_retries: Maximum number of retry attempts
         pool_connections: Number of connection pools to cache
         pool_maxsize: Maximum number of connections per pool
         verify_ssl: Whether to verify SSL certificates
         user_agent: User-Agent string to use
-    
+        proxy: Optional upstream proxy URL (e.g. Caido at http://127.0.0.1:8080)
+            applied to both http and https.
+
     Returns:
         Configured requests.Session object
     """
@@ -67,7 +70,11 @@ def create_optimized_session(
         import urllib3
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         session.verify = False
-    
+
+    # Optional upstream proxy (e.g. route traffic through Caido for capture).
+    if proxy:
+        session.proxies.update({'http': proxy, 'https': proxy})
+
     return session
 
 

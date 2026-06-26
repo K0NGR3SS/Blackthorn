@@ -1026,11 +1026,16 @@ Handle findings responsibly and patch vulnerabilities promptly.
         
         return 0 if completed_phases == len(phases) else 1
 
-def main():
-    """Main entry point with comprehensive error handling"""
+def main(argv=None):
+    """Main entry point with comprehensive error handling.
+
+    Accepts an explicit ``argv`` so the unified :mod:`wafpierce.cli` dispatcher can
+    route ``wafpierce chain ...`` here; falls back to ``sys.argv`` when run directly.
+    """
     from argparse import ArgumentParser
-    
-    parser = ArgumentParser(description='WAFPierce Full WAF/CDN Penetration Test Chain')
+
+    parser = ArgumentParser(prog='wafpierce chain',
+                            description='WAFPierce Full WAF/CDN Penetration Test Chain')
     parser.add_argument("target", help="Target URL (e.g., https://example.com)")
     parser.add_argument("-o", "--output", default="pentest_results", help="Output directory")
     parser.add_argument("-t", "--threads", type=int, default=10, help="Number of threads")
@@ -1038,7 +1043,7 @@ def main():
     parser.add_argument("--log-level", default="INFO",
                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
                        help="Logging level")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     
     # Validate threads parameter
     if args.threads < 1 or args.threads > 100:

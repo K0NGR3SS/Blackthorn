@@ -1423,15 +1423,15 @@ class CloudFrontBypasser(ExtraTechniques):
         """
         logger.info(f"Starting scan of {self.target}")
         print(f"[*] Scanning {self.target}")
-        
+
+        # Start the clock for the optional --max-time budget.
+        self._scan_start = time.monotonic()
+
         # Establish baseline first
         print("[*] Establishing baseline...")
         try:
             baseline = self._get_baseline()
-            # NB: bool(requests.Response) is response.ok (False for 4xx/5xx), so
-            # check identity — a 403/429/503 root is a perfectly valid baseline
-            # (the engine compares against it for auth-bypass detection).
-            if baseline is None:
+            if not baseline:
                 raise BaselineFailedError(
                     "Failed to establish baseline - target may be down",
                     details={'target': self.target}
@@ -1740,9 +1740,18 @@ class CloudFrontBypasser(ExtraTechniques):
         # pool, so total in-flight requests never exceed self.threads (no nested
         # pool explosion). The adaptive limiter throttles further under WAF pushback.
         error_count = 0
+        max_time = getattr(self, 'max_time', 0) or 0
         self._executor = ThreadPoolExecutor(max_workers=self.threads)
         try:
-            for technique in techniques:
+            for idx, technique in enumerate(techniques):
+                # Overall scan budget: stop launching new techniques past the deadline.
+                if max_time and (time.monotonic() - self._scan_start) > max_time:
+                    remaining = len(techniques) - idx
+                    msg = (f"--max-time {max_time}s reached after {idx} technique(s); "
+                           f"skipping {remaining} remaining")
+                    logger.warning(msg)
+                    print(f"\n[!] {msg}")
+                    break
                 tname = getattr(technique, '__name__', '?')
                 if self.resume and tname in self._completed_techniques:
                     continue
@@ -2253,15 +2262,19 @@ class CloudFrontBypasser(ExtraTechniques):
             TargetUnreachableError: If target cannot be reached after retries
         """
         try:
-            # Baseline through the SAME session every probe uses: the browser
-            # User-Agent, any auth/evasion headers, and verify=False. Using
-            # safe_request here instead would send a bare `python-requests` UA
-            # and verify TLS — so a UA-filtering edge or a TLS-intercepting proxy
-            # could fail the baseline while the real scan would have worked.
-            return self._session.request(
-                method='GET', url=self.target,
-                timeout=self.timeout, allow_redirects=False, verify=False,
+            # When impersonating, baseline through the same fingerprinted session
+            # so the baseline isn't blocked while probes pass (or vice-versa).
+            if self._impersonating:
+                return self._session.request(
+                    method='GET', url=self.target,
+                    timeout=self.timeout, allow_redirects=False, verify=False,
+                )
+            resp = safe_request(
+                self.target,
+                timeout=self.timeout,
+                allow_redirects=False
             )
+            return resp
         except Exception as e:
             logger.error(f"Baseline request failed: {e}")
             raise
@@ -10097,10 +10110,21 @@ def load_custom_payloads(db=None) -> Dict[str, List[str]]:
 
 
 def load_plugins() -> list:
-    """Discover and return enabled user plugins (empty list on any failure)."""
+    """Discover and return enabled user plugins (empty list on any failure).
+
+    The PluginManager is wired to the shared on-disk DB so the scanner honors the
+    enable/disable state set in the GUI plugin manager. Without the DB every
+    discovered plugin would run regardless of being disabled.
+    """
     try:
         from .plugins import PluginManager
-        pm = PluginManager()
+        db = None
+        try:
+            from .database import WAFPierceDB
+            db = WAFPierceDB()
+        except Exception:
+            db = None
+        pm = PluginManager(db=db)
         pm.load_all_plugins()
         return pm.get_enabled_plugins()
     except Exception as e:
@@ -10146,15 +10170,188 @@ def create_scanner(target: str, db=None, use_db_extras: bool = True,
     return scanner
 
 
-def main():
-    """Standalone scanner with comprehensive error handling"""
+def _pretty_technique(method_name: str) -> str:
+    """Turn '_test_host_header_injection' into 'host header injection'."""
+    name = method_name
+    for prefix in ('_test_', '_'):
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+            break
+    return name.replace('_', ' ')
+
+
+def _resolve_categories(raw):
+    """Validate a comma-separated category string against SCAN_CATEGORIES.
+
+    Returns (selected_keys_or_None, invalid_list).
+    """
+    if not raw:
+        return None, []
+    requested = [c.strip() for c in raw.split(',') if c.strip()]
+    valid = list(SCAN_CATEGORIES.keys())
+    invalid = [c for c in requested if c not in valid]
+    selected = [c for c in requested if c in valid]
+    return (selected or None), invalid
+
+
+def _print_category_list() -> None:
+    print("Scan categories (use -c key1,key2 ...):\n")
+    for key, cat in SCAN_CATEGORIES.items():
+        n = len(cat.get('techniques', []))
+        print(f"  {key:<22} {n:>3} techniques   {cat.get('name', '')}")
+    print(f"\n  {len(SCAN_CATEGORIES)} categories total. "
+          f"`wafpierce scan --list-techniques` for the full breakdown.")
+
+
+def _print_technique_list() -> None:
+    skip = getattr(CloudFrontBypasser, 'SAFE_MODE_SKIP', set())
+    total = 0
+    print("Techniques by category ('*' = skipped under --safe-mode):\n")
+    for key, cat in SCAN_CATEGORIES.items():
+        techs = cat.get('techniques', [])
+        total += len(techs)
+        print(f"[{key}] {cat.get('name', '')}")
+        for t in techs:
+            mark = ' *' if t in skip else ''
+            print(f"    - {_pretty_technique(t)}{mark}")
+        print()
+    print(f"{total} techniques across {len(SCAN_CATEGORIES)} categories.")
+
+
+# Per-profile presets. Each entry is applied only to args still at their CLI
+# default, so anything the user passes explicitly always wins.
+_PROFILE_PRESETS = {
+    'stealth':    {'threads': 3,  'delay': 1.0, 'jitter': 1.5, 'safe_mode': True,
+                   'impersonate': 'chrome'},
+    'normal':     {'threads': 10, 'delay': 0.2, 'jitter': 0.0, 'safe_mode': False},
+    'aggressive': {'threads': 30, 'delay': 0.0, 'jitter': 0.0, 'safe_mode': False},
+}
+# argparse defaults used to detect "user didn't set this".
+_ARG_DEFAULTS = {'threads': 10, 'delay': 0.2, 'jitter': 0.0, 'safe_mode': False,
+                 'impersonate': None}
+
+
+def _apply_profile(args) -> None:
+    """Fill in threads/delay/jitter/safe-mode/impersonate from --profile, but only
+    where the user left the CLI default (explicit flags take precedence)."""
+    preset = _PROFILE_PRESETS.get(getattr(args, 'profile', None) or '')
+    if not preset:
+        return
+    for key, value in preset.items():
+        if getattr(args, key, None) == _ARG_DEFAULTS.get(key):
+            setattr(args, key, value)
+
+
+def _fail_on_exit(results, fail_on) -> 'Optional[int]':
+    """CI gating: return exit code 10 if any finding is at or above ``fail_on``
+    severity, else ``None`` (caller uses its normal exit code)."""
+    if not fail_on:
+        return None
+    thr = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3, 'info': 4}.get(fail_on)
+    if thr is None:
+        return None
+    rank = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3, 'INFO': 4}
+    if any(rank.get((r.get('severity') or 'INFO').upper(), 4) <= thr for r in results):
+        return 10
+    return None
+
+
+def _print_dry_run_plan(args, no_color: bool = False) -> None:
+    """Show the technique plan + effective settings for the given flags, no I/O."""
+    selected, invalid = _resolve_categories(getattr(args, 'categories', None))
+    if invalid:
+        print(f"[!] Unknown categories ignored: {', '.join(invalid)}")
+    cats = selected or list(SCAN_CATEGORIES.keys())
+    skip = getattr(CloudFrontBypasser, 'SAFE_MODE_SKIP', set()) if args.safe_mode else set()
+
+    proxies = []
+    if getattr(args, 'proxy_pool', None):
+        proxies = [p.strip() for p in args.proxy_pool.split(',') if p.strip()]
+    if getattr(args, 'tor', False):
+        proxies.append('socks5h://127.0.0.1:9050')
+    has_auth = any(getattr(args, k, None) for k in
+                   ('cookie', 'header', 'bearer', 'basic_auth', 'login_url'))
+    imports = [s for s in (getattr(args, 'import_har', None),
+                           getattr(args, 'import_postman', None),
+                           getattr(args, 'import_burp', None)) if s]
+
+    print(f"DRY RUN - plan for {args.target}\n")
+    print("Settings:")
+    print(f"  threads={args.threads}  delay={args.delay}s  timeout={args.timeout}s"
+          f"  jitter={args.jitter}s")
+    print(f"  impersonate={args.impersonate or 'off'}  oob={args.oob}"
+          f"  safe_mode={'on' if args.safe_mode else 'off'}  resume={'on' if args.resume else 'off'}")
+    print(f"  crawl={'off' if args.no_crawl else 'on'}  schema={'off' if args.no_schema else 'on'}"
+          f"  reconfirm={'off' if args.no_reconfirm else f'on(x{args.reconfirm_samples})'}"
+          f"  db_extras={'off' if args.no_db_extras else 'on'}")
+    print(f"  proxies={len(proxies)}  auth={'yes' if has_auth else 'no'}"
+          f"  imports={len(imports)}")
+    if args.scope_include:
+        print(f"  scope-include: {', '.join(args.scope_include)}")
+    if args.scope_exclude:
+        print(f"  scope-exclude: {', '.join(args.scope_exclude)}")
+
+    print("\nCategories & techniques that would run:")
+    total = 0
+    skipped = 0
+    for key in cats:
+        cat = SCAN_CATEGORIES.get(key)
+        if not cat:
+            continue
+        techs = cat.get('techniques', [])
+        running = [t for t in techs if t not in skip]
+        skipped += len(techs) - len(running)
+        total += len(running)
+        print(f"  [{key}] {cat.get('name', '')} - {len(running)} run"
+              + (f", {len(techs) - len(running)} skipped(safe-mode)" if (len(techs) - len(running)) else ""))
+        for t in running:
+            print(f"      - {_pretty_technique(t)}")
+
+    print(f"\nTotal: {total} techniques would run"
+          + (f" ({skipped} skipped by --safe-mode)" if skipped else "")
+          + f" across {len([k for k in cats if k in SCAN_CATEGORIES])} categories.")
+    print("(dry run - no requests were sent)")
+
+
+def main(argv=None):
+    """Standalone scanner with comprehensive error handling.
+
+    Accepts an explicit ``argv`` (list of args *after* the subcommand) so the
+    unified :mod:`wafpierce.cli` dispatcher can route ``wafpierce scan ...`` here;
+    falls back to ``sys.argv[1:]`` when run directly.
+    """
     from argparse import ArgumentParser
     import json
+    import os
     import sys
     from .error_handler import setup_logging
-    
-    parser = ArgumentParser(description='WAFPierce WAF Bypass Scanner')
-    parser.add_argument('target', help='Target URL')
+
+    if argv is None:
+        argv = sys.argv[1:]
+
+    no_color_env = bool(os.environ.get('NO_COLOR'))
+
+    # Pre-parse the informational flags that must work without a target.
+    if '-V' in argv or '--version' in argv:
+        from .diagnostics import print_version
+        print_version(no_color=('--no-color' in argv) or no_color_env)
+        return 0
+    if '--list-categories' in argv:
+        _print_category_list()
+        return 0
+    if '--list-techniques' in argv:
+        _print_technique_list()
+        return 0
+
+    parser = ArgumentParser(prog='wafpierce scan', description='WAFPierce WAF Bypass Scanner')
+    parser.add_argument('target', nargs='?', help='Target URL (or set it in --config)')
+    parser.add_argument('-V', '--version', action='store_true',
+                       help='Show version + installed optional components, then exit')
+    parser.add_argument('--config', metavar='FILE',
+                       help='Load scanner defaults from a JSON/TOML config file '
+                            '(explicit flags still win)')
+    parser.add_argument('--config-profile', metavar='NAME',
+                       help='Use a named [profiles.NAME] section from --config')
     parser.add_argument('-t', '--threads', type=int, default=10, help='Number of threads')
     parser.add_argument('-d', '--delay', type=float, default=0.2, help='Delay between requests')
     parser.add_argument('--timeout', type=int, default=5, help='Request timeout in seconds')
@@ -10175,6 +10372,9 @@ def main():
                        help='Skip the bypass re-confirmation pass (faster, more false positives)')
     parser.add_argument('--reconfirm-samples', type=int, default=2,
                        help='Replays per candidate bypass during re-confirmation (default: 2)')
+    parser.add_argument('--max-time', type=int, default=0, metavar='SECONDS',
+                       help='Overall scan budget: stop launching new techniques after N seconds '
+                            '(0 = no limit). Findings so far are still reported.')
     # Evasion: TLS/HTTP2 fingerprint impersonation (needs curl_cffi)
     parser.add_argument('--impersonate', nargs='?', const='chrome', default=None,
                        metavar='BROWSER',
@@ -10183,6 +10383,11 @@ def main():
                             'target like chrome124 / safari17_0')
     parser.add_argument('--jitter', type=float, default=0.0, metavar='SECONDS',
                        help='Add up to N random seconds per request (rate-WAF evasion)')
+    parser.add_argument('--profile', choices=['stealth', 'normal', 'aggressive'],
+                       help='Bundle threads/delay/jitter/safe-mode (and impersonate for stealth) '
+                            'into one knob. Explicit flags you pass still win.')
+    parser.add_argument('--seed', type=int, metavar='N',
+                       help='Seed the RNG (jitter, UA/proxy rotation, mutations) for reproducible scans')
     parser.add_argument('--proxy-pool', help='Comma-separated proxy URLs to rotate per request '
                                              '(e.g. "http://a:8080,socks5h://b:1080")')
     parser.add_argument('--tor', action='store_true',
@@ -10194,19 +10399,33 @@ def main():
                        help='Never test discovered URLs matching this regex (repeatable)')
     parser.add_argument('--safe-mode', action='store_true',
                        help='Skip noisy/DoS-flavored and state-changing techniques')
+    parser.add_argument('--authorize', metavar='FILE',
+                       help='Path to an allowlist of authorized hosts/URL patterns (one per '
+                            'line, globs ok). The target must match before any test runs.')
+    parser.add_argument('--no-redact', action='store_true',
+                       help='Do NOT redact secrets (cookies/tokens/auth) from saved reports '
+                            '(redaction is on by default)')
     parser.add_argument('--resume', action='store_true',
                        help='Resume an interrupted scan of this target from its checkpoint')
     # Exports
     parser.add_argument('--export', help='Write an extra export to this path (format from --export-format)')
-    parser.add_argument('--export-format', default='html', choices=['sarif', 'nuclei', 'html', 'json', 'pdf'],
+    parser.add_argument('--export-format', default='html',
+                       choices=['sarif', 'nuclei', 'html', 'json', 'pdf', 'junit', 'csv',
+                                'prometheus', 'har'],
                        help='Format for --export (default: html)')
     parser.add_argument('--json', action='store_true', help='Print results as JSON to stdout (pipeline mode)')
+    parser.add_argument('--fail-on', choices=['critical', 'high', 'medium', 'low', 'info'],
+                       metavar='SEVERITY',
+                       help='Exit non-zero (code 10) if any finding at or above this severity is '
+                            'present (CI gating). Independent of the default 0/1 exit code.')
     # Import recorded traffic to fuzz real (often authenticated) requests
     parser.add_argument('--import-har', help='Seed the scan from a HAR capture')
     parser.add_argument('--import-postman', help='Seed the scan from a Postman v2 collection')
     parser.add_argument('--import-burp', help='Seed the scan from a Burp items XML export')
     # Integrations
     parser.add_argument('--slack-webhook', help='Post a findings summary to a Slack incoming webhook')
+    parser.add_argument('--discord-webhook', help='Post a findings summary to a Discord webhook')
+    parser.add_argument('--teams-webhook', help='Post a findings summary to a Microsoft Teams incoming webhook')
     # AI (opt-in)
     parser.add_argument('--ai-triage', action='store_true', help='Run AI false-positive triage (needs ANTHROPIC_API_KEY)')
     parser.add_argument('--ai-report', help='Write an AI-generated markdown report to this path (needs ANTHROPIC_API_KEY)')
@@ -10225,6 +10444,10 @@ def main():
     # Monitoring
     parser.add_argument('--monitor', action='store_true', help='After scanning, diff against the previous scan of this target')
     parser.add_argument('--webhook', help='Webhook URL for monitoring alerts')
+    parser.add_argument('--diff-against', metavar='PREV.json',
+                       help='Compare this scan against a previous results JSON and write an HTML diff')
+    parser.add_argument('--diff-out', metavar='OUT.html', default='wafpierce-diff.html',
+                       help='Output path for the --diff-against HTML diff (default: wafpierce-diff.html)')
     # Authenticated scanning
     parser.add_argument('--cookie', help='Cookie string to send on every request (e.g. "session=abc; csrf=xyz")')
     parser.add_argument('--header', action='append', default=[], help='Extra header "Name: value" (repeatable)')
@@ -10233,7 +10456,63 @@ def main():
     parser.add_argument('--login-url', help='Login URL to authenticate before scanning')
     parser.add_argument('--login-data', help='Login form data as urlencoded string (e.g. "user=a&pass=b")')
     parser.add_argument('--login-success', help='Substring expected in a successful login response')
-    args = parser.parse_args()
+    # Usability / output
+    parser.add_argument('--dry-run', action='store_true',
+                       help='Print the technique plan for the given flags/scope/safe-mode and exit '
+                            '(no requests sent)')
+    parser.add_argument('-q', '--quiet', action='store_true',
+                       help='Suppress per-finding output; print only a one-line summary')
+    parser.add_argument('--no-color', action='store_true',
+                       help='Disable emoji/colored decoration (also honors the NO_COLOR env var)')
+    parser.add_argument('--list-categories', action='store_true',
+                       help='List available scan categories and exit')
+    parser.add_argument('--list-techniques', action='store_true',
+                       help='List every technique grouped by category and exit')
+    args = parser.parse_args(argv)
+
+    # Late catch for informational flags (also handled pre-parse for no-target use).
+    if getattr(args, 'version', False):
+        from .diagnostics import print_version
+        print_version(no_color=args.no_color or no_color_env)
+        return 0
+
+    no_color = args.no_color or no_color_env
+    quiet = args.quiet
+
+    # Load config-file defaults (explicit CLI flags already on `args` win).
+    if args.config:
+        try:
+            from .configfile import load_config, apply_config
+            apply_config(args, parser, load_config(args.config, profile=args.config_profile))
+        except Exception as e:
+            print(f"[!] Config load failed: {e}")
+            return 2
+
+    # Resolve --profile presets (explicit flags win) before anything reads them.
+    _apply_profile(args)
+
+    # A target is required (from the positional arg or the config file).
+    if not args.target:
+        parser.error("a target URL is required (pass it as an argument or set it in --config)")
+
+    # Deterministic RNG for reproducible scans (jitter/UA/proxy/mutation choices).
+    if args.seed is not None:
+        import random
+        random.seed(args.seed)
+
+    # Dry run: show exactly what would execute, then stop before any network I/O.
+    if args.dry_run:
+        _print_dry_run_plan(args, no_color=no_color)
+        return 0
+
+    # Authorization gate: when an allowlist is supplied, the target's host must
+    # match before any active test runs (fail-closed on empty/unreadable list).
+    if args.authorize:
+        from .authorization import load_allowlist, is_authorized
+        if not is_authorized(args.target, load_allowlist(args.authorize)):
+            print(f"[!] '{args.target}' is not in the authorization allowlist "
+                  f"({args.authorize}); refusing to scan.")
+            return 5
 
     # In --json/pipeline mode, keep stdout clean for machine consumption.
     if args.json:
@@ -10342,9 +10621,39 @@ def main():
         scanner.reconfirm_samples = max(1, args.reconfirm_samples)
         scanner.oob_wait = max(0, args.oob_wait)
         scanner.resume = args.resume
+        scanner.max_time = max(0, args.max_time)
+
+        # Audit record: a scan against this target is starting.
+        try:
+            from .authorization import audit_log
+            audit_log('scan_start', target=args.target, categories=selected_categories,
+                      safe_mode=args.safe_mode, authorized=bool(args.authorize))
+        except Exception:
+            pass
 
         # Run scan with selected categories
         results = scanner.scan(selected_categories)
+
+        # CI gating: optionally exit non-zero (10) when findings reach a severity.
+        fail_exit = _fail_on_exit(results, args.fail_on)
+
+        # Redact secrets (cookies/tokens/auth) from anything persisted or sent,
+        # unless explicitly disabled. The console summary uses raw `results`.
+        if args.no_redact:
+            out_results = results
+        else:
+            try:
+                from .redaction import redact_findings
+                out_results = redact_findings(results)
+            except Exception:
+                out_results = results
+
+        try:
+            from .authorization import audit_log
+            audit_log('scan_end', target=args.target, findings=len(results),
+                      bypasses=sum(1 for r in results if r.get('bypass')))
+        except Exception:
+            pass
 
         # Opt-in AI triage (annotates results with false-positive likelihood).
         if args.ai_triage:
@@ -10362,27 +10671,45 @@ def main():
         if args.export:
             try:
                 from .exporters import export as _export
-                _export(results, args.target, args.export_format, args.export)
+                _export(out_results, args.target, args.export_format, args.export)
                 print(f"[+] Exported {args.export_format.upper()} to {args.export}")
             except Exception as e:
                 print(f"[!] Export failed: {e}")
 
-        # Push a findings summary to Slack.
-        if args.slack_webhook:
+        # Standalone diff report against a previous scan's results JSON.
+        if args.diff_against:
             try:
-                from .integrations import send_slack
-                if send_slack(args.slack_webhook, args.target, results):
-                    print("[+] Posted findings summary to Slack")
-                else:
-                    print("[!] Slack push failed (see logs)")
+                from .exporters import to_html_diff
+                with open(args.diff_against, 'r', encoding='utf-8') as f:
+                    prev = json.load(f)
+                with open(args.diff_out, 'w', encoding='utf-8') as f:
+                    f.write(to_html_diff(args.target, prev, out_results))
+                print(f"[+] Wrote scan diff to {args.diff_out}")
             except Exception as e:
-                logger.debug(f"Slack push error: {e}")
+                print(f"[!] Diff failed: {e}")
+
+        # Push a findings summary to chat integrations.
+        for _flag, _sender, _label in (
+            (args.slack_webhook, 'send_slack', 'Slack'),
+            (args.discord_webhook, 'send_discord', 'Discord'),
+            (args.teams_webhook, 'send_teams', 'Teams'),
+        ):
+            if not _flag:
+                continue
+            try:
+                import wafpierce.integrations as _integ
+                if getattr(_integ, _sender)(_flag, args.target, out_results):
+                    print(f"[+] Posted findings summary to {_label}")
+                else:
+                    print(f"[!] {_label} push failed (see logs)")
+            except Exception as e:
+                logger.debug(f"{_label} push error: {e}")
 
         # AI-written markdown report.
         if args.ai_report:
             try:
                 from .ai_triage import write_report
-                md = write_report(args.target, results, api_key=args.ai_key, model=args.ai_model)
+                md = write_report(args.target, out_results, api_key=args.ai_key, model=args.ai_model)
                 if md:
                     with open(args.ai_report, 'w', encoding='utf-8') as f:
                         f.write(md)
@@ -10394,11 +10721,11 @@ def main():
 
         # Pipeline mode: emit machine-readable JSON to the real stdout and exit.
         if args.json:
-            _emit_json_stdout(results)
+            _emit_json_stdout(out_results)
             if args.output:
                 with open(args.output, 'w', encoding='utf-8') as f:
-                    json.dump(results, f, indent=2)
-            sys.exit(0 if len(results) == 0 else 1)
+                    json.dump(out_results, f, indent=2)
+            sys.exit(fail_exit if fail_exit is not None else (0 if len(results) == 0 else 1))
 
         # Continuous monitoring: diff against the previous scan of this target.
         if args.monitor:
@@ -10410,71 +10737,67 @@ def main():
             except Exception as e:
                 logger.debug(f"Monitor error: {e}")
 
-        # Display results
-        print(f"\n{'='*60}")
-        print(f"[+] Scan Complete: Found {len(results)} findings")
-        print(f"{'='*60}\n")
-        
-        if results:
-            # Group by severity
-            critical = [r for r in results if r.get('severity') == 'CRITICAL']
-            high = [r for r in results if r.get('severity') == 'HIGH']
-            medium = [r for r in results if r.get('severity') == 'MEDIUM']
-            low = [r for r in results if r.get('severity') == 'LOW']
-            info = [r for r in results if r.get('severity') == 'INFO']
-            
-            # Count actual bypasses
-            bypasses = [r for r in results if r.get('bypass', False)]
-            detections = [r for r in results if r.get('category') in ['WAF_DETECTION', 'CDN_DETECTION', 'API_DISCOVERY']]
-            
-            print(f"📊 Summary:")
-            print(f"   Total Findings: {len(results)}")
-            print(f"   Actual Bypasses: {len(bypasses)}")
-            print(f"   WAF/CDN Detections: {len(detections)}")
-            print()
-            
-            if critical:
-                print(f"🔴 CRITICAL ({len(critical)}):")
-                for r in critical:
-                    print(f"  - {r['technique']}")
-                    print(f"    Reason: {r['reason']}")
-            
-            if high:
-                print(f"\n🟠 HIGH ({len(high)}):")
-                for r in high:
-                    print(f"  - {r['technique']}")
-                    print(f"    Reason: {r['reason']}")
-            
-            if medium:
-                print(f"\n🟡 MEDIUM ({len(medium)}):")
-                for r in medium:
-                    print(f"  - {r['technique']}")
-                    print(f"    Reason: {r['reason']}")
-            
-            if low:
-                print(f"\n🔵 LOW ({len(low)}):")
-                for r in low:
-                    print(f"  - {r['technique']}")
-                    if r.get('reason'):
-                        print(f"    Reason: {r['reason']}")
-            
-            if info:
-                print(f"\nℹ️  INFO ({len(info)}):")
-                for r in info:
-                    print(f"  - {r['technique']}")
-                    if r.get('reason'):
-                        print(f"    Reason: {r['reason']}")
+        # Group by severity (needed for both quiet and verbose summaries).
+        critical = [r for r in results if r.get('severity') == 'CRITICAL']
+        high = [r for r in results if r.get('severity') == 'HIGH']
+        medium = [r for r in results if r.get('severity') == 'MEDIUM']
+        low = [r for r in results if r.get('severity') == 'LOW']
+        info = [r for r in results if r.get('severity') == 'INFO']
+        bypasses = [r for r in results if r.get('bypass', False)]
+        detections = [r for r in results if r.get('category') in ['WAF_DETECTION', 'CDN_DETECTION', 'API_DISCOVERY']]
+
+        if quiet:
+            # One-line, pipe-friendly summary.
+            print(f"Found {len(results)} findings "
+                  f"(CRITICAL={len(critical)} HIGH={len(high)} MEDIUM={len(medium)} "
+                  f"LOW={len(low)} INFO={len(info)}; bypasses={len(bypasses)})")
         else:
-            print("✅ No bypasses found - target is properly protected")
-        
+            # Emoji decoration unless --no-color / NO_COLOR.
+            sev_icon = {
+                'summary': '' if no_color else '📊 ',
+                'CRITICAL': '[CRIT] ' if no_color else '🔴 ',
+                'HIGH': '[HIGH] ' if no_color else '🟠 ',
+                'MEDIUM': '[MED]  ' if no_color else '🟡 ',
+                'LOW': '[LOW]  ' if no_color else '🔵 ',
+                'INFO': '[INFO] ' if no_color else 'ℹ️  ',
+                'clean': '[OK] ' if no_color else '✅ ',
+            }
+            print(f"\n{'='*60}")
+            print(f"[+] Scan Complete: Found {len(results)} findings")
+            print(f"{'='*60}\n")
+
+            if results:
+                print(f"{sev_icon['summary']}Summary:")
+                print(f"   Total Findings: {len(results)}")
+                print(f"   Actual Bypasses: {len(bypasses)}")
+                print(f"   WAF/CDN Detections: {len(detections)}")
+                print()
+                for label, group, always_reason in (
+                    ('CRITICAL', critical, True), ('HIGH', high, True),
+                    ('MEDIUM', medium, True), ('LOW', low, False), ('INFO', info, False),
+                ):
+                    if not group:
+                        continue
+                    print(f"\n{sev_icon[label]}{label} ({len(group)}):")
+                    for r in group:
+                        print(f"  - {r['technique']}")
+                        if always_reason or r.get('reason'):
+                            print(f"    Reason: {r.get('reason', '')}")
+            else:
+                print(f"{sev_icon['clean']}No bypasses found - target is properly protected")
+
         # Save results
         if args.output:
             with open(args.output, 'w') as f:
-                json.dump(results, f, indent=2)
-            print(f"\n[+] Results saved to {args.output}")
-        
+                json.dump(out_results, f, indent=2)
+            if not quiet:
+                print(f"\n[+] Results saved to {args.output}")
+
+        if fail_exit is not None and not quiet:
+            print(f"\n[!] --fail-on {args.fail_on}: threshold met -> exit {fail_exit}")
+
         # Return appropriate exit code
-        sys.exit(0 if len(results) == 0 else 1)
+        sys.exit(fail_exit if fail_exit is not None else (0 if len(results) == 0 else 1))
     
     except InvalidTargetError as e:
         print(f"[!] Invalid target: {e}")
@@ -10508,4 +10831,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

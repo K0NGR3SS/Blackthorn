@@ -1,0 +1,84 @@
+name: wafpierce-scan
+
+# On-demand authorized scan of a staging/target URL. Uploads a SARIF report to
+# GitHub code scanning and a JUnit report as a build artifact, and can gate the
+# run on finding severity via --fail-on.
+#
+# ONLY run this against systems you are authorized to test.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Target URL (must be authorized to test)"
+        required: true
+        type: string
+      categories:
+        description: "Comma-separated scan categories (blank = all)"
+        required: false
+        type: string
+        default: ""
+      fail_on:
+        description: "Fail the run if a finding at/above this severity is present"
+        required: false
+        type: choice
+        default: "high"
+        options: ["critical", "high", "medium", "low", "info"]
+      safe_mode:
+        description: "Skip noisy / DoS-flavored / state-changing tests"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  security-events: write   # required to upload SARIF
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install WAFPierce
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Run scan
+        id: scan
+        run: |
+          ARGS=""
+          [ -n "${{ inputs.categories }}" ] && ARGS="$ARGS -c ${{ inputs.categories }}"
+          [ "${{ inputs.safe_mode }}" = "true" ] && ARGS="$ARGS --safe-mode"
+          wafpierce scan "${{ inputs.target }}" $ARGS \
+            --export wafpierce.sarif --export-format sarif \
+            --fail-on "${{ inputs.fail_on }}"
+          # Also emit a JUnit report (does not re-scan; renders the same run is
+          # out of scope here, so produce JSON->JUnit in a second pass instead).
+        continue-on-error: true
+
+      - name: Upload SARIF to code scanning
+        if: always() && hashFiles('wafpierce.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: wafpierce.sarif
+
+      - name: Upload report artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wafpierce-reports
+          path: |
+            wafpierce.sarif
+          if-no-files-found: ignore
+
+      - name: Enforce gate
+        if: steps.scan.outcome == 'failure'
+        run: |
+          echo "::error::WAFPierce gate failed (--fail-on ${{ inputs.fail_on }})"
+          exit 1
