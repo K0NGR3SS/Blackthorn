@@ -2,7 +2,7 @@ import os
 import tempfile
 
 from wafpierce.agent_server import AgentAPI
-from wafpierce.ai_providers import provider_status
+from wafpierce.ai_providers import normalize_provider, provider_status
 from wafpierce.database import WAFPierceDB
 
 
@@ -79,3 +79,9 @@ def test_ai_provider_status_is_non_secret_and_off_by_default():
     assert status.provider == 'anthropic'
     assert isinstance(status.configured, bool)
     assert 'sk-' not in status.reason
+    assert normalize_provider('local') == 'ollama'
+    assert normalize_provider('openai') == 'openai-compatible'
+    compat = provider_status('openai-compatible', base_url='http://127.0.0.1:9999/v1',
+                             model='qwen-test')
+    assert compat.configured is True
+    assert compat.ready is True

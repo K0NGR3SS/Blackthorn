@@ -106,6 +106,29 @@ def merge_profile(prefs: dict, data: dict) -> dict:
     return prefs
 
 
+_LANGUAGE_ALIASES = {
+    'english': 'en',
+    'en-us': 'en',
+    'en-gb': 'en',
+    'arabic': 'ar',
+    'arab': 'ar',
+    'ar-sa': 'ar',
+    'ukrainian': 'uk',
+    'ukraine': 'uk',
+    'ua': 'uk',
+    'uk-ua': 'uk',
+}
+_LANGUAGE_CODES = {'en', 'ar', 'uk'}
+
+
+def _normalize_language(value) -> str:
+    code = str(value or 'en').strip().lower().replace('_', '-')
+    code = _LANGUAGE_ALIASES.get(code, code)
+    if '-' in code and code not in _LANGUAGE_CODES:
+        code = code.split('-', 1)[0]
+    return code if code in _LANGUAGE_CODES else 'en'
+
+
 # default settings, change if you want different ones for the application
 def _load_prefs() -> dict:
     path = get_gui_prefs_path()
@@ -132,6 +155,7 @@ def _load_prefs() -> dict:
                     defaults.update(data)
     except Exception:
         pass
+    defaults['language'] = _normalize_language(defaults.get('language', 'en'))
     return defaults
 
 
@@ -1104,11 +1128,26 @@ def _censor_url(url: str, censor: bool = False) -> str:
 
 
 def _save_prefs(prefs: dict) -> None:
-    path = _get_config_path()
+    path = get_gui_prefs_path()
+    data = dict(prefs or {})
+    data['language'] = _normalize_language(data.get('language', 'en'))
+    tmp_path = None
     try:
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump(prefs, f, indent=2)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(prefix='.gui_prefs.', suffix='.json',
+                                        dir=os.path.dirname(path))
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+            f.write('\n')
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
     except Exception:
+        try:
+            if tmp_path and os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+        except Exception:
+            pass
         pass
 
 
@@ -1402,8 +1441,12 @@ def main() -> None:
                               '--export-format', str(opts['export'])])
             if opts.get('ai_triage'):
                 flags.append('--ai-triage')
+            if opts.get('ai_provider'):
+                flags.extend(['--ai-provider', str(opts['ai_provider'])])
             if opts.get('ai_model'):
                 flags.extend(['--ai-model', str(opts['ai_model'])])
+            if opts.get('ai_base_url'):
+                flags.extend(['--ai-base-url', str(opts['ai_base_url'])])
             # Caido proxy passthrough — route every scan request through Caido.
             if opts.get('caido_proxy'):
                 flags.extend(['--proxy-pool', str(opts['caido_proxy'])])
@@ -1547,9 +1590,14 @@ def main() -> None:
                     env = os.environ.copy()
                     env['PYTHONIOENCODING'] = 'utf-8'
                     env['PYTHONUNBUFFERED'] = '1'  # Force unbuffered output
-                    # Pass the Anthropic key via env (not argv) when AI triage is on.
+                    # Pass AI keys via env (not argv) so secrets are not visible
+                    # in the process list.
                     if self.advanced_opts.get('ai_triage') and self.advanced_opts.get('ai_key'):
-                        env['ANTHROPIC_API_KEY'] = str(self.advanced_opts['ai_key'])
+                        provider = str(self.advanced_opts.get('ai_provider') or 'anthropic')
+                        if provider == 'anthropic':
+                            env['ANTHROPIC_API_KEY'] = str(self.advanced_opts['ai_key'])
+                        else:
+                            env['AI_API_KEY'] = str(self.advanced_opts['ai_key'])
                     try:
                         proc = subprocess.Popen(
                             cmd,
@@ -2159,6 +2207,7 @@ def main() -> None:
                 ('OPERATE', [
                     ('scan', '◉', 'Scan', True),
                     ('pipeline', '⛓', 'Pipeline', False),
+                    ('ai', '✦', 'AI / Automation', False),
                     ('recon', '◈', 'Recon', False),
                     ('browser', '◍', 'Browser', False),
                     ('proxy', '◌', 'Proxy', False),
@@ -2573,7 +2622,7 @@ def main() -> None:
             sections migrate to in-place pages one at a time without breakage."""
             keys = ['pipeline', 'recon', 'browser', 'fuzzer', 'secrets', 'sqli',
                     'repeater', 'payloads', 'plugins', 'schedule', 'timeline',
-                    'dashboard', 'results', 'live', 'settings',
+                    'dashboard', 'results', 'live', 'settings', 'ai',
                     'tools', 'zapburp', 'adint', 'proxy', 'engagements']
             out = {}
             for k in keys:
@@ -2614,7 +2663,7 @@ def main() -> None:
             # stale content; stateful sections (a running recon process, the live
             # feed, an in-progress repeater request, the settings form) persist.
             dynamic = {'dashboard', 'results', 'timeline', 'plugins',
-                       'schedule', 'payloads', 'engagements'}
+                       'schedule', 'payloads', 'engagements', 'ai'}
             page = self._pages.get(key)
             if page is not None and key in dynamic:
                 try:
@@ -2835,7 +2884,8 @@ def main() -> None:
                 QMessageBox.warning(self, 'Scan Profile', 'Select at least one scan category.')
                 return None
             prefs = _load_prefs()
-            ai_key = prefs.get('anthropic_api_key') or None
+            ai_provider = prefs.get('ai_provider') or 'anthropic'
+            ai_key = (prefs.get('ai_api_key') or prefs.get('anthropic_api_key') or None)
             advanced = {
                 'categories': selected,
                 'safe_mode': bool(self._safe_mode_chk.isChecked()),
@@ -2844,8 +2894,10 @@ def main() -> None:
                 'impersonate': 'chrome' if self._impersonate_chk.isChecked() else None,
                 'oob': self._oob_combo.currentData() if getattr(self, '_oob_combo', None) else 'off',
                 'ai_triage': bool(self._ai_triage_chk.isChecked()),
+                'ai_provider': ai_provider,
                 'ai_key': ai_key,
                 'ai_model': prefs.get('ai_model') or None,
+                'ai_base_url': prefs.get('ai_base_url') or None,
                 'authorize': self._authorize_file_edit.text().strip(),
                 'scope_include': self._split_patterns(self._scope_include_edit.text()),
                 'scope_exclude': self._split_patterns(self._scope_exclude_edit.text()),
@@ -7640,6 +7692,267 @@ def main() -> None:
             run_btn.clicked.connect(_run); stop_btn.clicked.connect(_stop)
             return page
 
+        def _build_ai_page(self):
+            """AI provider configuration and safe automation actions."""
+            page = QtWidgets.QWidget()
+            page.setObjectName('AIPage')
+            layout = QVBoxLayout(page)
+            layout.setContentsMargins(22, 20, 22, 20)
+            layout.setSpacing(14)
+
+            title_row = QHBoxLayout()
+            title_box = QVBoxLayout()
+            title = QLabel('AI / Automation')
+            title.setObjectName('PageTitle')
+            subtitle = QLabel('Configure a local or online model, then run scope-aware helper actions.')
+            subtitle.setObjectName('FieldLabel')
+            title_box.addWidget(title)
+            title_box.addWidget(subtitle)
+            title_row.addLayout(title_box)
+            title_row.addStretch()
+            layout.addLayout(title_row)
+
+            prefs = _load_prefs()
+
+            def form_label(text, width=130):
+                lbl = QLabel(text)
+                lbl.setObjectName('FieldLabel')
+                lbl.setMinimumWidth(width)
+                lbl.setMaximumWidth(width)
+                return lbl
+
+            cfg = QtWidgets.QGroupBox('Provider')
+            cfg_layout = QtWidgets.QGridLayout(cfg)
+            cfg_layout.setColumnStretch(1, 1)
+            provider_combo = QtWidgets.QComboBox()
+            provider_combo.addItem('Anthropic Claude', 'anthropic')
+            provider_combo.addItem('Ollama local model', 'ollama')
+            provider_combo.addItem('OpenAI-compatible endpoint', 'openai-compatible')
+            provider_value = prefs.get('ai_provider') or 'anthropic'
+            for i in range(provider_combo.count()):
+                if provider_combo.itemData(i) == provider_value:
+                    provider_combo.setCurrentIndex(i)
+                    break
+            model_edit = QLineEdit(str(prefs.get('ai_model', '') or ''))
+            model_edit.setPlaceholderText('qwen2.5-coder:7b / claude-sonnet-4-6 / model id')
+            base_url_edit = QLineEdit(str(prefs.get('ai_base_url', '') or ''))
+            base_url_edit.setPlaceholderText('http://127.0.0.1:11434 or https://host/v1')
+            key_edit = QLineEdit(str(prefs.get('ai_api_key') or prefs.get('anthropic_api_key') or ''))
+            key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+            key_edit.setPlaceholderText('optional API key')
+            show_key = QCheckBox('show')
+            show_key.toggled.connect(lambda on: key_edit.setEchoMode(
+                QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password))
+            status_lbl = QLabel('Not checked')
+            status_lbl.setObjectName('FieldLabel')
+            cfg_layout.addWidget(form_label('Provider'), 0, 0)
+            cfg_layout.addWidget(provider_combo, 0, 1, 1, 2)
+            cfg_layout.addWidget(form_label('Model'), 1, 0)
+            cfg_layout.addWidget(model_edit, 1, 1, 1, 2)
+            cfg_layout.addWidget(form_label('Base URL'), 2, 0)
+            cfg_layout.addWidget(base_url_edit, 2, 1, 1, 2)
+            cfg_layout.addWidget(form_label('API key'), 3, 0)
+            cfg_layout.addWidget(key_edit, 3, 1)
+            cfg_layout.addWidget(show_key, 3, 2)
+            cfg_layout.addWidget(form_label('Status'), 4, 0)
+            cfg_layout.addWidget(status_lbl, 4, 1, 1, 2)
+            layout.addWidget(cfg)
+
+            actions = QHBoxLayout()
+            save_btn = QPushButton('Save')
+            test_btn = QPushButton('Test Provider')
+            report_btn = QPushButton('Draft Report')
+            steps_btn = QPushButton('Suggest Next Steps')
+            payload_btn = QPushButton('Payload Ideas')
+            actions.addWidget(save_btn)
+            actions.addWidget(test_btn)
+            actions.addStretch()
+            actions.addWidget(report_btn)
+            actions.addWidget(steps_btn)
+            actions.addWidget(payload_btn)
+            layout.addLayout(actions)
+
+            dry_group = QtWidgets.QGroupBox('Safe Dry-Run Planner')
+            dry_layout = QtWidgets.QGridLayout(dry_group)
+            dry_layout.setColumnStretch(1, 1)
+            engagement_combo = QtWidgets.QComboBox()
+            engagement_combo.addItem('Select engagement', None)
+            if self._db:
+                try:
+                    for engagement in self._db.list_engagements():
+                        engagement_combo.addItem(engagement.get('name', 'Engagement'),
+                                                 engagement.get('id'))
+                except Exception:
+                    pass
+            current_eid = prefs.get('current_engagement_id')
+            for i in range(engagement_combo.count()):
+                if engagement_combo.itemData(i) == current_eid:
+                    engagement_combo.setCurrentIndex(i)
+                    break
+            target_edit = QLineEdit()
+            target_edit.setPlaceholderText('https://in-scope.example.com')
+            try:
+                if self.tree.topLevelItemCount():
+                    item = self.tree.topLevelItem(0)
+                    target_edit.setText(item.data(0, 256) or item.text(0))
+            except Exception:
+                pass
+            dry_btn = QPushButton('Generate Dry-Run Plan')
+            dry_layout.addWidget(form_label('Engagement'), 0, 0)
+            dry_layout.addWidget(engagement_combo, 0, 1)
+            dry_layout.addWidget(form_label('Target'), 1, 0)
+            dry_layout.addWidget(target_edit, 1, 1)
+            dry_layout.addWidget(dry_btn, 1, 2)
+            layout.addWidget(dry_group)
+
+            output = QTextEdit()
+            output.setReadOnly(True)
+            output.setPlaceholderText('AI output and automation plans appear here.')
+            layout.addWidget(output, 1)
+
+            def provider_args():
+                return {
+                    'provider': provider_combo.currentData() or 'anthropic',
+                    'model': model_edit.text().strip(),
+                    'base_url': base_url_edit.text().strip(),
+                    'api_key': key_edit.text().strip() or None,
+                }
+
+            def save_config():
+                args = provider_args()
+                p = _load_prefs()
+                p['ai_provider'] = args['provider']
+                p['ai_model'] = args['model']
+                p['ai_base_url'] = args['base_url']
+                p['ai_api_key'] = args['api_key'] or ''
+                if args['provider'] == 'anthropic':
+                    p['anthropic_api_key'] = args['api_key'] or ''
+                _save_prefs(p)
+                self._prefs = p
+                status_lbl.setText('Saved')
+
+            def test_provider():
+                save_config()
+                try:
+                    from .ai_providers import provider_status
+                    args = provider_args()
+                    st = provider_status(args['provider'], api_key=args['api_key'],
+                                         base_url=args['base_url'], model=args['model'])
+                    status_lbl.setText('Ready' if st.ready else st.reason or 'Not ready')
+                except Exception as e:
+                    status_lbl.setText(str(e))
+
+            def current_findings():
+                return list(getattr(self, '_results', []) or [])
+
+            def draft_report():
+                save_config()
+                args = provider_args()
+                findings = current_findings()
+                if not findings:
+                    output.setPlainText('No findings loaded yet. Run/import a scan first.')
+                    return
+                try:
+                    from .ai_providers import write_report
+                    text = write_report(args['provider'], 'current WAFPierce workspace',
+                                        findings, api_key=args['api_key'],
+                                        model=args['model'], base_url=args['base_url'])
+                except Exception:
+                    text = ''
+                if not text:
+                    text = self._local_ai_fallback_report(findings)
+                output.setPlainText(text)
+
+            def suggest_steps():
+                save_config()
+                findings = current_findings()
+                high = [f for f in findings if str(f.get('severity', '')).upper() in ('CRITICAL', 'HIGH')]
+                candidate = [f for f in findings if f.get('workflow_state', 'candidate') == 'candidate']
+                lines = [
+                    'Next safe automation steps:',
+                    '',
+                    '1. Confirm the selected engagement scope before any active scan.',
+                    '2. Run dry-run planning first, then safe-mode scans only when authorized.',
+                    '3. Validate findings manually with the least invasive proof.',
+                    '4. Redact tokens, cookies, account data, and unrelated response bodies.',
+                ]
+                if high:
+                    lines.append(f'5. Prioritize {len(high)} critical/high finding(s) for validation.')
+                if candidate:
+                    lines.append(f'6. Triage {len(candidate)} candidate finding(s) into validated/reported/duplicate states.')
+                output.setPlainText('\n'.join(lines))
+
+            def payload_ideas():
+                save_config()
+                args = provider_args()
+                seeds = []
+                for f in current_findings():
+                    payload = f.get('payload')
+                    if payload:
+                        seeds.append(str(payload))
+                    if len(seeds) >= 10:
+                        break
+                if not seeds:
+                    seeds = ["<script>alert(1)</script>", "' OR '1'='1", "../../etc/passwd"]
+                try:
+                    from .ai_providers import generate_payload_mutations
+                    ideas = generate_payload_mutations(args['provider'], seeds,
+                                                       context='authorized WAF testing',
+                                                       api_key=args['api_key'],
+                                                       model=args['model'],
+                                                       base_url=args['base_url'])
+                except Exception:
+                    ideas = []
+                output.setPlainText('\n'.join(f'- {x}' for x in ideas) if ideas
+                                    else 'Provider unavailable or returned no payload ideas.')
+
+            def dry_run_plan():
+                if not self._db:
+                    output.setPlainText('Database is not available.')
+                    return
+                eid = engagement_combo.currentData()
+                target = target_edit.text().strip()
+                if not eid or not target:
+                    output.setPlainText('Select an engagement and target first.')
+                    return
+                try:
+                    from .agent_server import AgentAPI
+                    res = AgentAPI(self._db).handle({
+                        'method': 'start_scan',
+                        'params': {
+                            'engagement_id': eid,
+                            'target': target,
+                            'dry_run': True,
+                            'safe_mode': True,
+                            'categories': ['detection_recon', 'info_disclosure'],
+                        },
+                    })
+                    if res.get('ok'):
+                        output.setPlainText(res.get('stdout') or 'Dry-run completed.')
+                    else:
+                        output.setPlainText(f"{res.get('code')}: {res.get('error')}")
+                except Exception as e:
+                    output.setPlainText(str(e))
+
+            save_btn.clicked.connect(save_config)
+            test_btn.clicked.connect(test_provider)
+            report_btn.clicked.connect(draft_report)
+            steps_btn.clicked.connect(suggest_steps)
+            payload_btn.clicked.connect(payload_ideas)
+            dry_btn.clicked.connect(dry_run_plan)
+            return page
+
+        def _local_ai_fallback_report(self, findings):
+            rows = list(findings or [])
+            lines = ['# WAFPierce Report Draft', '', '## Summary',
+                     f'- Findings reviewed: {len(rows)}',
+                     '- AI provider was unavailable; this is a local structured draft.',
+                     '', '## Findings']
+            for f in rows[:50]:
+                lines.append(f"- {f.get('severity', 'INFO')}: {f.get('technique', 'Finding')} "
+                             f"({f.get('workflow_state', 'candidate')})")
+            return '\n'.join(lines) + '\n'
+
         def _build_settings_page(self):
             try:
                 dlg = QtWidgets.QWidget()
@@ -7867,13 +8180,12 @@ def main() -> None:
                 
                 layout.addWidget(privacy_group)
 
-                # ========== AI (ANTHROPIC) SETTINGS ==========
-                ai_group = QtWidgets.QGroupBox('🤖 AI (Anthropic)')
+                # ========== AI SETTINGS SHORTCUT ==========
+                ai_group = QtWidgets.QGroupBox('AI shortcut')
                 ai_layout = QVBoxLayout(ai_group)
                 ai_layout.addWidget(QLabel(
-                    'Optional. Used for AI triage / AI report (enable per-scan in the scan '
-                    'dialog). The key is stored locally and passed to the scanner via the '
-                    'ANTHROPIC_API_KEY environment variable — never on the command line.'))
+                    'Full provider setup and automation actions live in AI / Automation. '
+                    'This shortcut keeps legacy Claude key/model fields available.'))
                 key_row = QtWidgets.QHBoxLayout()
                 key_row.addWidget(QLabel('API key:'))
                 ai_key_edit = QLineEdit()
@@ -7893,7 +8205,7 @@ def main() -> None:
                 model_row = QtWidgets.QHBoxLayout()
                 model_row.addWidget(QLabel('Model:'))
                 ai_model_edit = QLineEdit()
-                ai_model_edit.setPlaceholderText('default (per-feature) — e.g. claude-opus-4-8')
+                ai_model_edit.setPlaceholderText('default or model id')
                 try:
                     ai_model_edit.setText(str(prefs.get('ai_model', '') or ''))
                 except Exception:
@@ -8019,8 +8331,8 @@ def main() -> None:
 
                 def _save_qt():
                     try:
-                        old_lang = prefs.get('language', 'en')
-                        new_lang = lang_combo.currentData()
+                        old_lang = _normalize_language(prefs.get('language', 'en'))
+                        new_lang = _normalize_language(lang_combo.currentData())
                         
                         prefs['font_size'] = int(font_spin.value())
                         prefs['watermark'] = bool(wm_chk.isChecked())
@@ -8044,8 +8356,10 @@ def main() -> None:
                         # Save privacy settings
                         prefs['censor_sites'] = bool(censor_sites_chk.isChecked())
 
-                        # Save AI (Anthropic) settings
+                        # Save legacy AI shortcut settings. Full provider setup
+                        # lives in the AI / Automation page.
                         prefs['anthropic_api_key'] = ai_key_edit.text().strip()
+                        prefs['ai_api_key'] = ai_key_edit.text().strip()
                         prefs['ai_model'] = ai_model_edit.text().strip()
 
                         # Save Integrations (Metasploit + Caido) settings
@@ -8083,6 +8397,7 @@ def main() -> None:
                         
                         _save_prefs(prefs)
                         self._prefs = prefs
+                        self._lang = new_lang
                         self._apply_qt_prefs(prefs)
                         
                         # If language changed, ask to restart

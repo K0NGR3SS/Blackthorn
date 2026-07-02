@@ -6,6 +6,7 @@ tested without a display or Qt installed.
 from wafpierce.gui import (
     _finding_url, _finding_to_curl, _finding_to_python,
     profile_from_prefs, merge_profile, PROFILE_KEYS,
+    _load_prefs, _normalize_language, _save_prefs,
 )
 
 
@@ -69,3 +70,18 @@ def test_profile_merge_only_known_keys():
 
 def test_profile_keys_have_no_secret():
     assert 'anthropic_api_key' not in PROFILE_KEYS
+
+
+def test_language_pref_is_normalized_and_persisted(monkeypatch, tmp_path):
+    prefs_path = tmp_path / 'gui_prefs.json'
+    monkeypatch.setattr('wafpierce.gui.get_gui_prefs_path', lambda: str(prefs_path))
+
+    _save_prefs({'language': 'en', 'font_size': 13})
+    assert _load_prefs()['language'] == 'en'
+
+    _save_prefs({'language': 'uk-UA'})
+    assert _load_prefs()['language'] == 'uk'
+
+    _save_prefs({'language': 'not-real'})
+    assert _load_prefs()['language'] == 'en'
+    assert _normalize_language('ua') == 'uk'

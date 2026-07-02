@@ -10032,15 +10032,16 @@ class CloudFrontBypasser(ExtraTechniques):
             logger.debug(f"WebSocket fuzzing error: {e}")
             return []
 
-    def triage_with_ai(self, api_key: str = None, model: str = None) -> Dict[str, Any]:
+    def triage_with_ai(self, api_key: str = None, model: str = None,
+                       provider: str = 'anthropic', base_url: str = None) -> Dict[str, Any]:
         """Run opt-in AI triage over current results (no-op without a key)."""
         try:
             from .ai_providers import triage_results
         except Exception as e:
             logger.debug(f"AI triage unavailable: {e}")
             return {}
-        return triage_results('anthropic', self.target, self.results,
-                              api_key=api_key, model=model)
+        return triage_results(provider, self.target, self.results,
+                              api_key=api_key, model=model, base_url=base_url)
 
     def _test_dom_xss(self) -> List[Dict[str, Any]]:
         """DOM-based XSS detection (optional, requires Playwright)."""
@@ -10428,10 +10429,14 @@ def main(argv=None):
     parser.add_argument('--discord-webhook', help='Post a findings summary to a Discord webhook')
     parser.add_argument('--teams-webhook', help='Post a findings summary to a Microsoft Teams incoming webhook')
     # AI (opt-in)
-    parser.add_argument('--ai-triage', action='store_true', help='Run AI false-positive triage (needs ANTHROPIC_API_KEY)')
-    parser.add_argument('--ai-report', help='Write an AI-generated markdown report to this path (needs ANTHROPIC_API_KEY)')
-    parser.add_argument('--ai-key', help='Anthropic API key (overrides ANTHROPIC_API_KEY env)')
-    parser.add_argument('--ai-model', help='Anthropic model id (default: per-feature)')
+    parser.add_argument('--ai-triage', action='store_true', help='Run AI false-positive triage (opt-in; provider configured separately)')
+    parser.add_argument('--ai-report', help='Write an AI-generated markdown report to this path')
+    parser.add_argument('--ai-key', help='AI API key (overrides provider env; avoid passing from GUI)')
+    parser.add_argument('--ai-model', help='AI model id (default: per-provider)')
+    parser.add_argument('--ai-provider', default='anthropic',
+                       choices=['anthropic', 'ollama', 'openai-compatible'],
+                       help='AI provider for --ai-triage/--ai-report')
+    parser.add_argument('--ai-base-url', help='AI provider base URL (Ollama or OpenAI-compatible)')
     # Out-of-band (OOB) blind-vuln confirmation (opt-in)
     parser.add_argument('--oob', choices=['off', 'interactsh', 'selfhosted'], default='off',
                        help='Enable out-of-band confirmation of blind vulns (default: off)')
@@ -10659,12 +10664,14 @@ def main(argv=None):
         # Opt-in AI triage (annotates results with false-positive likelihood).
         if args.ai_triage:
             try:
-                summary = scanner.triage_with_ai(api_key=args.ai_key, model=args.ai_model)
+                summary = scanner.triage_with_ai(
+                    api_key=args.ai_key, model=args.ai_model,
+                    provider=args.ai_provider, base_url=args.ai_base_url)
                 if summary:
                     print(f"[+] AI triage: {summary.get('likely_false_positives', 0)}/"
                           f"{summary.get('triaged', 0)} flagged as likely false positives")
                 else:
-                    print("[!] AI triage skipped (no API key or 'anthropic' not installed)")
+                    print(f"[!] AI triage skipped ({args.ai_provider} unavailable or returned no triage)")
             except Exception as e:
                 logger.debug(f"AI triage error: {e}")
 
@@ -10710,14 +10717,15 @@ def main(argv=None):
         if args.ai_report:
             try:
                 from .ai_providers import write_report
-                md = write_report('anthropic', args.target, out_results,
-                                  api_key=args.ai_key, model=args.ai_model)
+                md = write_report(args.ai_provider, args.target, out_results,
+                                  api_key=args.ai_key, model=args.ai_model,
+                                  base_url=args.ai_base_url)
                 if md:
                     with open(args.ai_report, 'w', encoding='utf-8') as f:
                         f.write(md)
                     print(f"[+] AI report written to {args.ai_report}")
                 else:
-                    print("[!] AI report skipped (no API key or 'anthropic' not installed)")
+                    print(f"[!] AI report skipped ({args.ai_provider} unavailable or returned no report)")
             except Exception as e:
                 logger.debug(f"AI report error: {e}")
 

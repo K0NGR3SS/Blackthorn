@@ -118,12 +118,13 @@ class AgentAPI:
         target = params.get('target') or 'selected engagement'
         api_key = params.get('api_key')
         model = params.get('model')
+        base_url = params.get('base_url')
         provider = params.get('provider') or 'anthropic'
         findings = self._list_findings(params).get('findings', [])
         try:
             from .ai_providers import write_report
             report = write_report(provider, target, findings, api_key=api_key,
-                                  model=model)
+                                  model=model, base_url=base_url)
         except Exception:
             report = ''
         if not report:
