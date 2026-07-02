@@ -12,6 +12,7 @@ exposing subcommands:
     wafpierce msf    <check|scan|push> [...]      # Metasploit RPC integration
     wafpierce caido  <check|push|export> [...]    # Caido proxy integration
     wafpierce doctor                              # environment preflight
+    wafpierce agent-server --stdio                # local agent bridge
     wafpierce gui                                 # launch the desktop GUI
     wafpierce --version | -V
 
@@ -25,7 +26,7 @@ from typing import List, Optional
 
 from . import __version__
 
-_SUBCOMMANDS = {'scan', 'recon', 'chain', 'msf', 'caido',
+_SUBCOMMANDS = {'scan', 'recon', 'chain', 'msf', 'caido', 'agent-server',
                 'doctor', 'gui', 'version', 'help'}
 
 
@@ -44,6 +45,7 @@ commands:
   chain <url> [flags]  Run the bypass -> enum -> scan -> recon -> report chain.
   msf <sub> [flags]    Metasploit RPC: check | scan <target> | push <results>.
   caido <sub> [flags]  Caido: check | push <results> | export <results> -o.
+  agent-server --stdio Local JSON-lines bridge for authorized AI/agent workflows.
   doctor               Environment preflight (deps, config dir, egress, OOB).
   gui                  Launch the desktop GUI.
   version              Show version + which optional components are installed.
@@ -121,6 +123,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     if head == 'caido':
         from .caido import main as caido_main
         return caido_main(argv[1:])
+
+    if head == 'agent-server':
+        from .agent_server import main as agent_main
+        return agent_main(argv[1:])
 
     # No recognized subcommand -> treat the whole argv as a `scan` invocation so
     # `wafpierce https://target --oob ...` behaves like `wafpierce scan ...`.

@@ -39,6 +39,7 @@ class WAFPierceDB:
                 waf_detected TEXT
             )
         ''')
+        self._add_column_if_missing(c, 'scans', 'engagement_id', 'INTEGER')
         
         # Results table - stores individual findings
         c.execute('''
@@ -65,6 +66,9 @@ class WAFPierceDB:
                 FOREIGN KEY (scan_id) REFERENCES scans(scan_id)
             )
         ''')
+        self._add_column_if_missing(c, 'results', 'engagement_id', 'INTEGER')
+        self._add_column_if_missing(c, 'results', 'workflow_state', "TEXT DEFAULT 'candidate'")
+        self._add_column_if_missing(c, 'results', 'evidence_notes', 'TEXT')
         
         # Create index for faster queries
         c.execute('CREATE INDEX IF NOT EXISTS idx_results_scan ON results(scan_id)')
@@ -208,6 +212,7 @@ class WAFPierceDB:
                 FOREIGN KEY (last_scan_id) REFERENCES scans(scan_id)
             )
         ''')
+        self._add_column_if_missing(c, 'persistent_targets', 'engagement_id', 'INTEGER')
         
         # Plugins table - stores installed/registered plugins
         c.execute('''
@@ -301,9 +306,28 @@ class WAFPierceDB:
                 raw_request TEXT, notes TEXT
             )
         ''')
+        self._add_column_if_missing(c, 'captured_requests', 'engagement_id', 'INTEGER')
         c.execute('CREATE INDEX IF NOT EXISTS idx_capreq_host ON captured_requests(host)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_capreq_ts ON captured_requests(ts)')
         c.execute('CREATE INDEX IF NOT EXISTS idx_capreq_src ON captured_requests(source)')
+
+        # Bug bounty engagements: optional workspace layer for program scope,
+        # rules, test-account notes, and default profile metadata.
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS engagements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                scope TEXT,
+                exclusions TEXT,
+                rules_notes TEXT,
+                test_accounts_notes TEXT,
+                default_scan_profile TEXT,
+                status TEXT DEFAULT 'active',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_engagements_status ON engagements(status)')
 
         # Active Directory / internal runs (P7): collector runs + cypher results.
         c.execute('''
@@ -330,6 +354,19 @@ class WAFPierceDB:
         # Insert default evasion profiles
         self._insert_default_evasion_profiles()
         self._insert_default_proxy_configs()
+
+    def _add_column_if_missing(self, cursor, table: str, column: str, decl: str) -> None:
+        """Best-effort additive migration helper.
+
+        SQLite has no portable IF NOT EXISTS for ADD COLUMN on older versions, so
+        use PRAGMA table_info and keep failures non-fatal for legacy DBs.
+        """
+        try:
+            existing = {row[1] for row in cursor.execute(f'PRAGMA table_info({table})')}
+            if column not in existing:
+                cursor.execute(f'ALTER TABLE {table} ADD COLUMN {column} {decl}')
+        except Exception:
+            pass
 
     # ---- External-tool configs (P2) ------------------------------------- #
     def get_tool_config(self, tool_key: str) -> Optional[Dict[str, Any]]:
@@ -442,6 +479,133 @@ class WAFPierceDB:
         except Exception:
             return False
 
+    # ---- Bug bounty engagements ---------------------------------------- #
+    def save_engagement(self, name: str, scope: List[str] = None,
+                        exclusions: List[str] = None, rules_notes: str = '',
+                        test_accounts_notes: str = '',
+                        default_scan_profile: dict = None,
+                        status: str = 'active',
+                        engagement_id: int = None) -> Optional[int]:
+        """Create or update a bug bounty engagement workspace.
+
+        Scope and exclusions are stored as JSON lists so agents and GUI code can
+        use one representation without changing existing scan records.
+        """
+        if not name or not str(name).strip():
+            return None
+        try:
+            conn = sqlite3.connect(self.db_path)
+            if engagement_id:
+                conn.execute('''
+                    UPDATE engagements
+                    SET name=?, scope=?, exclusions=?, rules_notes=?,
+                        test_accounts_notes=?, default_scan_profile=?, status=?,
+                        updated_at=CURRENT_TIMESTAMP
+                    WHERE id=?
+                ''', (
+                    str(name).strip(), json.dumps(scope or []),
+                    json.dumps(exclusions or []), rules_notes or '',
+                    test_accounts_notes or '',
+                    json.dumps(default_scan_profile or {}), status or 'active',
+                    engagement_id,
+                ))
+                eid = engagement_id
+            else:
+                cur = conn.execute('''
+                    INSERT INTO engagements
+                        (name, scope, exclusions, rules_notes, test_accounts_notes,
+                         default_scan_profile, status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(name) DO UPDATE SET
+                        scope=excluded.scope,
+                        exclusions=excluded.exclusions,
+                        rules_notes=excluded.rules_notes,
+                        test_accounts_notes=excluded.test_accounts_notes,
+                        default_scan_profile=excluded.default_scan_profile,
+                        status=excluded.status,
+                        updated_at=CURRENT_TIMESTAMP
+                ''', (
+                    str(name).strip(), json.dumps(scope or []),
+                    json.dumps(exclusions or []), rules_notes or '',
+                    test_accounts_notes or '',
+                    json.dumps(default_scan_profile or {}), status or 'active',
+                ))
+                row = conn.execute('SELECT id FROM engagements WHERE name=?',
+                                   (str(name).strip(),)).fetchone()
+                eid = int(row[0]) if row else int(cur.lastrowid or 0)
+            conn.commit()
+            conn.close()
+            return eid or None
+        except Exception:
+            return None
+
+    def list_engagements(self, include_archived: bool = False) -> List[Dict[str, Any]]:
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            if include_archived:
+                rows = conn.execute('SELECT * FROM engagements ORDER BY updated_at DESC').fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM engagements WHERE status != 'archived' "
+                    'ORDER BY updated_at DESC').fetchall()
+            conn.close()
+            return [self._decode_engagement(dict(r)) for r in rows]
+        except Exception:
+            return []
+
+    def get_engagement(self, engagement_id: int) -> Optional[Dict[str, Any]]:
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            row = conn.execute('SELECT * FROM engagements WHERE id=?',
+                               (engagement_id,)).fetchone()
+            conn.close()
+            return self._decode_engagement(dict(row)) if row else None
+        except Exception:
+            return None
+
+    def delete_engagement(self, engagement_id: int) -> bool:
+        """Archive rather than hard-delete, preserving scan/finding history."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.execute("UPDATE engagements SET status='archived', "
+                         'updated_at=CURRENT_TIMESTAMP WHERE id=?', (engagement_id,))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception:
+            return False
+
+    def update_finding_state(self, result_id: int, workflow_state: str,
+                             evidence_notes: str = None) -> bool:
+        allowed = {'candidate', 'validated', 'reported', 'duplicate',
+                   'accepted', 'fixed', 'informative'}
+        if workflow_state not in allowed:
+            return False
+        try:
+            conn = sqlite3.connect(self.db_path)
+            if evidence_notes is None:
+                conn.execute('UPDATE results SET workflow_state=? WHERE id=?',
+                             (workflow_state, result_id))
+            else:
+                conn.execute('UPDATE results SET workflow_state=?, evidence_notes=? '
+                             'WHERE id=?', (workflow_state, evidence_notes, result_id))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception:
+            return False
+
+    def _decode_engagement(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        for key, fallback in (('scope', []), ('exclusions', []),
+                              ('default_scan_profile', {})):
+            try:
+                row[key] = json.loads(row.get(key) or json.dumps(fallback))
+            except Exception:
+                row[key] = fallback
+        return row
+
     # ---- Unified request/response history (P4 proxy / P5 browser) -------- #
     PROXY_HISTORY_LIMIT = 5000
     _BODY_CAP = 1_000_000
@@ -464,8 +628,8 @@ class WAFPierceDB:
                     (source, session_id, method, scheme, host, port, path, url,
                      first_party_url, req_headers, req_body, status_code, resp_headers,
                      resp_body, resp_time_ms, resource_type, navigation_type,
-                     is_navigation, intercepted, raw_request, notes)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     is_navigation, intercepted, raw_request, notes, engagement_id)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ''', (
                 flow.get('source', 'proxy'), flow.get('session_id'),
                 flow.get('method'), flow.get('scheme'), flow.get('host'), flow.get('port'),
@@ -476,6 +640,7 @@ class WAFPierceDB:
                 flow.get('resp_time_ms'), flow.get('resource_type'),
                 flow.get('navigation_type'), flow.get('is_navigation', 0),
                 flow.get('intercepted', 0), flow.get('raw_request'), flow.get('notes'),
+                flow.get('engagement_id'),
             ))
             rid = cur.lastrowid
             # trim oldest rows beyond the cap
@@ -694,14 +859,15 @@ class WAFPierceDB:
     
     # ==================== SCAN OPERATIONS ====================
     
-    def create_scan(self, scan_id: str, targets: List[str], settings: dict = None) -> str:
+    def create_scan(self, scan_id: str, targets: List[str], settings: dict = None,
+                    engagement_id: int = None) -> str:
         """Create a new scan session."""
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
         c.execute('''
-            INSERT INTO scans (scan_id, targets, settings)
-            VALUES (?, ?, ?)
-        ''', (scan_id, json.dumps(targets), json.dumps(settings or {})))
+            INSERT INTO scans (scan_id, targets, settings, engagement_id)
+            VALUES (?, ?, ?, ?)
+        ''', (scan_id, json.dumps(targets), json.dumps(settings or {}), engagement_id))
         conn.commit()
         conn.close()
         return scan_id
@@ -757,8 +923,9 @@ class WAFPierceDB:
             INSERT INTO results (
                 scan_id, target, technique, category, severity, cvss_score,
                 bypass, reason, url, payload, response_code, response_time,
-                cve_id, cwe_id, reference_url
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                cve_id, cwe_id, reference_url, engagement_id, workflow_state,
+                evidence_notes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             scan_id,
             result.get('target', ''),
@@ -774,7 +941,10 @@ class WAFPierceDB:
             result.get('response_time', 0.0),
             result.get('cve_id', ''),
             result.get('cwe_id', ''),
-            result.get('reference_url', '')
+            result.get('reference_url', ''),
+            result.get('engagement_id'),
+            result.get('workflow_state', 'candidate'),
+            result.get('evidence_notes', '')
         ))
         
         conn.commit()
@@ -873,7 +1043,8 @@ class WAFPierceDB:
     # ==================== PERSISTENT TARGETS ====================
     
     def save_persistent_target(self, target: str, status: str, scan_id: str = None, 
-                               findings_count: int = 0, waf_detected: str = None, results: list = None):
+                               findings_count: int = 0, waf_detected: str = None,
+                               results: list = None, engagement_id: int = None):
         """Save or update a persistent target."""
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
@@ -889,17 +1060,19 @@ class WAFPierceDB:
                     status = ?,
                     findings_count = ?,
                     waf_detected = ?,
-                    results_json = ?
+                    results_json = ?,
+                    engagement_id = ?
                 WHERE target = ?
             ''', (scan_id, status, findings_count, waf_detected, 
-                  json.dumps(results) if results else None, target))
+                  json.dumps(results) if results else None, engagement_id, target))
         else:
             c.execute('''
                 INSERT INTO persistent_targets (target, last_scan_id, last_scanned, status, 
-                                                findings_count, waf_detected, results_json)
-                VALUES (?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?)
+                                                findings_count, waf_detected, results_json,
+                                                engagement_id)
+                VALUES (?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?)
             ''', (target, scan_id, status, findings_count, waf_detected,
-                  json.dumps(results) if results else None))
+                  json.dumps(results) if results else None, engagement_id))
         
         conn.commit()
         conn.close()

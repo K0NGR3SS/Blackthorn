@@ -10035,11 +10035,12 @@ class CloudFrontBypasser(ExtraTechniques):
     def triage_with_ai(self, api_key: str = None, model: str = None) -> Dict[str, Any]:
         """Run opt-in AI triage over current results (no-op without a key)."""
         try:
-            from .ai_triage import triage_results
+            from .ai_providers import triage_results
         except Exception as e:
             logger.debug(f"AI triage unavailable: {e}")
             return {}
-        return triage_results(self.target, self.results, api_key=api_key, model=model)
+        return triage_results('anthropic', self.target, self.results,
+                              api_key=api_key, model=model)
 
     def _test_dom_xss(self) -> List[Dict[str, Any]]:
         """DOM-based XSS detection (optional, requires Playwright)."""
@@ -10708,8 +10709,9 @@ def main(argv=None):
         # AI-written markdown report.
         if args.ai_report:
             try:
-                from .ai_triage import write_report
-                md = write_report(args.target, out_results, api_key=args.ai_key, model=args.ai_model)
+                from .ai_providers import write_report
+                md = write_report('anthropic', args.target, out_results,
+                                  api_key=args.ai_key, model=args.ai_model)
                 if md:
                     with open(args.ai_report, 'w', encoding='utf-8') as f:
                         f.write(md)

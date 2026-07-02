@@ -97,7 +97,7 @@ QSpinBox, QDoubleSpinBox, QComboBox {{
     background-color: {p['input']};
     color: {p['text']};
     border: 1px solid {p['border']};
-    border-radius: 8px;
+    border-radius: 6px;
     padding: 7px 10px;
     selection-background-color: {p['accent']};
     selection-color: #ffffff;
@@ -132,7 +132,7 @@ QPushButton {{
     background-color: {p['input']};
     color: {p['text']};
     border: 1px solid {p['border']};
-    border-radius: 8px;
+    border-radius: 6px;
     padding: 8px 16px;
     font-weight: 600;
 }}
@@ -221,6 +221,11 @@ QScrollBar::handle:horizontal {{ background: {p['elevated']}; border-radius: 5px
 QScrollBar::handle:horizontal:hover {{ background: {p['accent']}; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; background: none; border: none; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: none; }}
+QScrollArea#PageScroll {{
+    background-color: {p['surface']};
+    border: none;
+}}
+QScrollArea#PageScroll > QWidget > QWidget {{ background-color: {p['surface']}; }}
 
 /* ============================ TABS ============================ */
 QTabWidget::pane {{ border: 1px solid {p['border']}; border-radius: 10px; background: {p['surface']}; top: -1px; }}
@@ -251,7 +256,7 @@ QMenuBar::item:selected {{ background: {p['accent_soft']}; }}
 /* ============================ GROUPBOX ============================ */
 QGroupBox {{
     border: 1px solid {p['border']};
-    border-radius: 10px;
+    border-radius: 8px;
     margin-top: 14px;
     padding-top: 8px;
     font-weight: 600;
@@ -266,6 +271,18 @@ QFrame#Sidebar {{
     border-right: 1px solid {p['border_subtle']};
 }}
 QFrame#Sidebar QLabel {{ background: transparent; }}
+QScrollArea#SidebarScroll {{
+    background-color: {p['sidebar']};
+    border: none;
+}}
+QScrollArea#SidebarScroll > QWidget > QWidget,
+QFrame#SidebarNavBody {{ background-color: {p['sidebar']}; }}
+QScrollArea#SidebarScroll QScrollBar:vertical {{ width: 7px; margin: 2px 0; }}
+QScrollArea#SidebarScroll QScrollBar::handle:vertical {{
+    background-color: {p['elevated']};
+    border-radius: 3px;
+    min-height: 24px;
+}}
 QLabel#BrandName {{ color: {p['text']}; font-size: 17px; font-weight: 800; letter-spacing: 0.5px; }}
 QLabel#BrandTag {{ color: {p['accent']}; font-family: {MONO_FONT}; font-size: 10px; letter-spacing: 1px; }}
 QLabel#NavSection {{ color: {p['text_faint']}; font-size: 10px; font-weight: 700; letter-spacing: 1.5px; }}
@@ -294,10 +311,15 @@ QWidget#Content {{ background-color: {p['surface']}; }}
 QFrame#Card {{
     background-color: {p['card']};
     border: 1px solid {p['border']};
-    border-radius: 12px;
+    border-radius: 8px;
 }}
 QLabel#PageTitle {{ font-size: 20px; font-weight: 800; color: {p['text']}; }}
 QLabel#FieldLabel {{ color: {p['text_muted']}; font-size: 12px; font-weight: 600; }}
+QFrame#DashboardPill {{
+    background-color: {p['input']};
+    border: 1px solid {p['border_subtle']};
+    border-radius: 6px;
+}}
 """
 
 

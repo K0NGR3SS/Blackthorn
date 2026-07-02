@@ -1379,6 +1379,16 @@ def main() -> None:
             flags = []
             if opts.get('safe_mode'):
                 flags.append('--safe-mode')
+            if opts.get('dry_run'):
+                flags.append('--dry-run')
+            if opts.get('authorize'):
+                flags.extend(['--authorize', str(opts['authorize'])])
+            for pattern in opts.get('scope_include') or []:
+                if pattern:
+                    flags.extend(['--scope-include', str(pattern)])
+            for pattern in opts.get('scope_exclude') or []:
+                if pattern:
+                    flags.extend(['--scope-exclude', str(pattern)])
             if opts.get('no_reconfirm'):
                 flags.append('--no-reconfirm')
             if opts.get('impersonate'):
@@ -1879,6 +1889,7 @@ def main() -> None:
             
             # Current scan ID for database tracking
             self._current_scan_id = None
+            self._current_engagement_id = None
             
             # Proxy settings
             self._proxy_config = None
@@ -2083,18 +2094,18 @@ def main() -> None:
                 btn.setCursor(Qt.PointingHandCursor)
             except Exception:
                 pass
-            btn.setMinimumHeight(38)
             if slot:
                 try:
                     btn.clicked.connect(slot)
                 except Exception:
                     pass
             btn.setProperty('active', 'true' if active else 'false')
+            btn.setMinimumHeight(34)
             return btn
 
         def _build_sidebar(self):
             """Build the left navigation rail (brand + nav actions + version)."""
-            from PySide6.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout, QLabel
+            from PySide6.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout, QLabel, QScrollArea
             from PySide6.QtGui import QPixmap
             from PySide6.QtCore import Qt
 
@@ -2128,49 +2139,71 @@ def main() -> None:
             brand.addLayout(name_box)
             brand.addStretch()
             lay.addLayout(brand)
-            lay.addSpacing(18)
+            lay.addSpacing(12)
 
-            section = QLabel('MENU')
-            section.setObjectName('NavSection')
-            lay.addWidget(section)
-            lay.addSpacing(4)
-
-            # Nav items map to existing actions/dialogs.
+            # Nav items map to existing actions/pages. Grouping keeps the
+            # bug-bounty workspace scannable without removing any current tool.
             self._nav_buttons = {}
-            # (key, glyph, label, active) — every button routes through
-            # _navigate(key), which swaps the central page in place.
-            nav_items = [
-                ('scan', '◉', 'Scan', True),
-                ('pipeline', '⛓', 'Pipeline', False),
-                ('recon', '◈', 'Recon', False),
-                ('browser', '◍', 'Browser', False),
-                ('fuzzer', '⌗', 'Fuzzer', False),
-                ('secrets', '⚷', 'Secrets', False),
-                ('sqli', '⛁', 'SQLi', False),
-                ('dashboard', '▦', 'Dashboard', False),
-                ('results', '◆', 'Results', False),
-                ('live', '◰', 'Live', False),
-                ('repeater', '↻', 'Repeater', False),
-                ('payloads', '⚑', 'Payloads', False),
-                ('schedule', '◷', 'Schedule', False),
-                ('timeline', '☰', 'Timeline', False),
-                ('plugins', '❖', 'Plugins', False),
-                ('tools', '⚒', 'Tools', False),
-                ('zapburp', '🐝', 'ZAP/Burp', False),
-                ('adint', '🏰', 'AD / Internal', False),
-                ('proxy', '🛰', 'Proxy', False),
-                ('settings', '⚙', 'Settings', False),
+            nav_scroll = QScrollArea()
+            nav_scroll.setObjectName('SidebarScroll')
+            nav_scroll.setFrameShape(QFrame.NoFrame)
+            nav_scroll.setWidgetResizable(True)
+            nav_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            nav_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            nav_body = QFrame()
+            nav_body.setObjectName('SidebarNavBody')
+            nav_lay = QVBoxLayout(nav_body)
+            nav_lay.setContentsMargins(0, 0, 0, 0)
+            nav_lay.setSpacing(4)
+            nav_groups = [
+                ('OPERATE', [
+                    ('scan', '◉', 'Scan', True),
+                    ('pipeline', '⛓', 'Pipeline', False),
+                    ('recon', '◈', 'Recon', False),
+                    ('browser', '◍', 'Browser', False),
+                    ('proxy', '◌', 'Proxy', False),
+                ]),
+                ('ANALYZE', [
+                    ('results', '◆', 'Results', False),
+                    ('dashboard', '▦', 'Dashboard', False),
+                    ('timeline', '☰', 'Timeline', False),
+                    ('live', '◰', 'Live Logs', False),
+                ]),
+                ('TOOLS', [
+                    ('tools', '⚒', 'External Tools', False),
+                    ('repeater', '↻', 'Repeater', False),
+                    ('fuzzer', '⌗', 'Fuzzer', False),
+                    ('sqli', '⛁', 'SQLi', False),
+                    ('secrets', '⚷', 'Secrets', False),
+                    ('payloads', '⚑', 'Payloads', False),
+                    ('zapburp', '◧', 'ZAP/Burp', False),
+                    ('adint', '◇', 'AD / Internal', False),
+                ]),
+                ('MANAGE', [
+                    ('engagements', '◎', 'Engagements', False),
+                    ('schedule', '◷', 'Schedule', False),
+                    ('plugins', '❖', 'Plugins', False),
+                    ('settings', '⚙', 'Settings', False),
+                ]),
             ]
-            for key, glyph, label, active in nav_items:
-                # All sections route through the single-page navigator so the
-                # central panel swaps in place instead of opening dialogs.
-                btn = self._nav_button(glyph, label,
-                                       (lambda checked=False, k=key: self._navigate(k)),
-                                       active)
-                self._nav_buttons[key] = btn
-                lay.addWidget(btn)
+            for group, items in nav_groups:
+                section = QLabel(group)
+                section.setObjectName('NavSection')
+                nav_lay.addWidget(section)
+                for key, glyph, label, active in items:
+                    # All sections route through the single-page navigator so the
+                    # central panel swaps in place instead of opening dialogs.
+                    btn = self._nav_button(glyph, label,
+                                           (lambda checked=False, k=key: self._navigate(k)),
+                                           active)
+                    self._nav_buttons[key] = btn
+                    nav_lay.addWidget(btn)
+                nav_lay.addSpacing(6)
 
-            lay.addStretch()
+            nav_lay.addStretch()
+            nav_scroll.setWidget(nav_body)
+            lay.addWidget(nav_scroll, 1)
+
             ver = QLabel(f'v{__version__}')
             ver.setObjectName('SidebarVersion')
             lay.addWidget(ver)
@@ -2226,7 +2259,10 @@ def main() -> None:
             add_btn.clicked.connect(self.add_target)
             remove_btn = QPushButton(_t('remove', self._lang))
             remove_btn.clicked.connect(self.remove_selected)
-            top.addWidget(QLabel(_t('target_url', self._lang)))
+            target_lbl = QLabel(_t('target_url', self._lang))
+            target_lbl.setObjectName('FieldLabel')
+            target_lbl.setFixedWidth(96)
+            top.addWidget(target_lbl)
             top.addWidget(self.target_edit)
             top.addWidget(add_btn)
             top.addWidget(remove_btn)
@@ -2279,15 +2315,28 @@ def main() -> None:
                 self.use_concurrent_chk.setChecked(bool(self._prefs.get('use_concurrent', False)))
             except Exception:
                 self.use_concurrent_chk.setChecked(False)
-            opts.addWidget(QLabel(_t('threads', self._lang)))
+            threads_lbl = QLabel(_t('threads', self._lang)); threads_lbl.setObjectName('FieldLabel')
+            concurrent_lbl = QLabel(_t('concurrent', self._lang)); concurrent_lbl.setObjectName('FieldLabel')
+            delay_lbl = QLabel(_t('delay', self._lang)); delay_lbl.setObjectName('FieldLabel')
+            for _lbl in (threads_lbl, concurrent_lbl, delay_lbl):
+                _lbl.setFixedWidth(86)
+            self.threads_spin.setFixedWidth(76)
+            self.concurrent_spin.setFixedWidth(76)
+            self.delay_spin.setFixedWidth(86)
+            opts.addWidget(threads_lbl)
             opts.addWidget(self.threads_spin)
-            opts.addWidget(QLabel(_t('concurrent', self._lang)))
+            opts.addWidget(concurrent_lbl)
             opts.addWidget(self.concurrent_spin)
             opts.addWidget(self.use_concurrent_chk)
             opts.addSpacing(10)
-            opts.addWidget(QLabel(_t('delay', self._lang)))
+            opts.addWidget(delay_lbl)
             opts.addWidget(self.delay_spin)
             v.addLayout(opts)
+
+            try:
+                v.addWidget(self._build_scan_profile_panel())
+            except Exception:
+                pass
 
             # legend for status colors
             try:
@@ -2525,7 +2574,7 @@ def main() -> None:
             keys = ['pipeline', 'recon', 'browser', 'fuzzer', 'secrets', 'sqli',
                     'repeater', 'payloads', 'plugins', 'schedule', 'timeline',
                     'dashboard', 'results', 'live', 'settings',
-                    'tools', 'zapburp', 'adint', 'proxy']
+                    'tools', 'zapburp', 'adint', 'proxy', 'engagements']
             out = {}
             for k in keys:
                 fn = getattr(self, f'_build_{k}_page', None)
@@ -2565,7 +2614,7 @@ def main() -> None:
             # stale content; stateful sections (a running recon process, the live
             # feed, an in-progress repeater request, the settings form) persist.
             dynamic = {'dashboard', 'results', 'timeline', 'plugins',
-                       'schedule', 'payloads'}
+                       'schedule', 'payloads', 'engagements'}
             page = self._pages.get(key)
             if page is not None and key in dynamic:
                 try:
@@ -2603,11 +2652,38 @@ def main() -> None:
             """Wrap a page in a frameless, resizable scroll area so content that is
             taller/wider than the window scrolls instead of clipping (several
             sections began life as wider dialogs)."""
-            from PySide6.QtWidgets import QScrollArea, QFrame
-            sa = QScrollArea()
+            from PySide6.QtWidgets import QScrollArea, QFrame, QSizePolicy
+            from PySide6.QtCore import Qt
+
+            class PageScrollArea(QScrollArea):
+                def resizeEvent(self, event):
+                    super().resizeEvent(event)
+                    child = self.widget()
+                    if child is None:
+                        return
+                    try:
+                        # Keep width responsive, but preserve the page's natural
+                        # height so the vertical scrollbar appears when needed.
+                        child.layout().activate() if child.layout() else None
+                        child.setMinimumWidth(max(0, self.viewport().width() - 2))
+                        child.setMinimumHeight(child.sizeHint().height())
+                    except Exception:
+                        pass
+
+            sa = PageScrollArea()
             sa.setObjectName('PageScroll')
             sa.setFrameShape(QFrame.NoFrame)
+            sa.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            sa.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             sa.setWidgetResizable(True)
+            try:
+                widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+                if widget.layout():
+                    widget.layout().setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetMinimumSize)
+                    widget.layout().activate()
+                widget.setMinimumHeight(widget.sizeHint().height())
+            except Exception:
+                pass
             sa.setWidget(widget)
             return sa
 
@@ -2620,6 +2696,170 @@ def main() -> None:
                     btn.style().polish(btn)
                 except Exception:
                     pass
+
+        def _build_scan_profile_panel(self):
+            """In-page scan profile controls replacing the fixed category dialog."""
+            panel = QtWidgets.QGroupBox('Scan Profile & Scope')
+            panel.setObjectName('ScanProfilePanel')
+            layout = QtWidgets.QVBoxLayout(panel)
+            layout.setSpacing(10)
+
+            top = QHBoxLayout()
+            engagement_lbl = QLabel('Engagement:')
+            engagement_lbl.setObjectName('FieldLabel')
+            engagement_lbl.setFixedWidth(130)
+            top.addWidget(engagement_lbl)
+            self._engagement_combo = QtWidgets.QComboBox()
+            self._refresh_engagement_combo()
+            top.addWidget(self._engagement_combo, 1)
+            manage_btn = QPushButton('Manage')
+            manage_btn.clicked.connect(lambda: self._navigate('engagements'))
+            top.addWidget(manage_btn)
+            layout.addLayout(top)
+
+            auth = QtWidgets.QGridLayout()
+            self._authorize_file_edit = QLineEdit()
+            self._authorize_file_edit.setPlaceholderText('optional allowlist file for --authorize')
+            browse_btn = QPushButton('Browse')
+            browse_btn.clicked.connect(self._browse_authorize_file)
+            self._scope_include_edit = QLineEdit()
+            self._scope_include_edit.setPlaceholderText('optional regex, comma-separated')
+            self._scope_exclude_edit = QLineEdit()
+            self._scope_exclude_edit.setPlaceholderText('optional regex, comma-separated')
+            auth.setColumnMinimumWidth(0, 130)
+            auth.setColumnStretch(1, 1)
+            for _row, _text in enumerate(('Authorization file:', 'Scope include:', 'Scope exclude:')):
+                _lbl = QLabel(_text)
+                _lbl.setObjectName('FieldLabel')
+                _lbl.setMinimumWidth(130)
+                auth.addWidget(_lbl, _row, 0)
+            auth.addWidget(self._authorize_file_edit, 0, 1)
+            auth.addWidget(browse_btn, 0, 2)
+            auth.addWidget(self._scope_include_edit, 1, 1, 1, 2)
+            auth.addWidget(self._scope_exclude_edit, 2, 1, 1, 2)
+            layout.addLayout(auth)
+
+            adv = (self._prefs.get('advanced') or {}) if hasattr(self, '_prefs') else {}
+            controls = QHBoxLayout()
+            self._safe_mode_chk = QCheckBox('Safe mode')
+            self._safe_mode_chk.setChecked(bool(adv.get('safe_mode', True)))
+            self._safe_mode_chk.setToolTip('Skip noisy/DoS-flavored and state-changing techniques')
+            self._dry_run_chk = QCheckBox('Dry run')
+            self._dry_run_chk.setChecked(bool(adv.get('dry_run', False)))
+            self._dry_run_chk.setToolTip('Print the scan plan without sending requests')
+            self._reconfirm_chk = QCheckBox('Re-confirm findings')
+            self._reconfirm_chk.setChecked(not adv.get('no_reconfirm', False))
+            self._impersonate_chk = QCheckBox('Impersonate browser')
+            self._impersonate_chk.setChecked(bool(adv.get('impersonate')))
+            self._ai_triage_chk = QCheckBox('AI triage')
+            self._ai_triage_chk.setChecked(bool(adv.get('ai_triage', False)))
+            self._oob_combo = QtWidgets.QComboBox()
+            self._oob_combo.addItem('OOB off', 'off')
+            self._oob_combo.addItem('Interactsh', 'interactsh')
+            self._oob_combo.addItem('Self-hosted', 'selfhosted')
+            self._oob_combo.setCurrentIndex({'off': 0, 'interactsh': 1,
+                                             'selfhosted': 2}.get(adv.get('oob', 'off'), 0))
+            for w in (self._safe_mode_chk, self._dry_run_chk, self._reconfirm_chk,
+                      self._impersonate_chk, self._ai_triage_chk):
+                controls.addWidget(w)
+            controls.addWidget(self._oob_combo)
+            controls.addStretch()
+            layout.addLayout(controls)
+
+            cat_header = QHBoxLayout()
+            cat_header.addWidget(QLabel('Categories:'))
+            select_all = QPushButton('Select All')
+            deselect_all = QPushButton('Deselect All')
+            cat_header.addStretch()
+            cat_header.addWidget(select_all)
+            cat_header.addWidget(deselect_all)
+            layout.addLayout(cat_header)
+
+            cats = QtWidgets.QGridLayout()
+            cats.setSpacing(4)
+            self._scan_cat_checks = {}
+            saved_cats = adv.get('categories')
+            saved_set = set(saved_cats or SCAN_CATEGORIES_GUI.keys())
+            for i, (cat_key, cat_info) in enumerate(SCAN_CATEGORIES_GUI.items()):
+                cb = QCheckBox(_t(cat_info['name_key'], self._lang))
+                cb.setToolTip(cat_info['description'])
+                cb.setChecked(cat_key in saved_set)
+                self._scan_cat_checks[cat_key] = cb
+                cats.addWidget(cb, i // 4, i % 4)
+            layout.addLayout(cats)
+
+            select_all.clicked.connect(lambda checked=False: [cb.setChecked(True) for cb in self._scan_cat_checks.values()])
+            deselect_all.clicked.connect(lambda checked=False: [cb.setChecked(False) for cb in self._scan_cat_checks.values()])
+            return panel
+
+        def _refresh_engagement_combo(self):
+            combo = getattr(self, '_engagement_combo', None)
+            if combo is None:
+                return
+            current = combo.currentData() if combo.count() else self._prefs.get('current_engagement_id')
+            combo.clear()
+            combo.addItem('No engagement selected', None)
+            if self._db:
+                try:
+                    for engagement in self._db.list_engagements():
+                        combo.addItem(engagement.get('name', 'Engagement'),
+                                      engagement.get('id'))
+                except Exception:
+                    pass
+            for i in range(combo.count()):
+                if combo.itemData(i) == current:
+                    combo.setCurrentIndex(i)
+                    break
+
+        def _browse_authorize_file(self):
+            try:
+                path, _ = QFileDialog.getOpenFileName(
+                    self, 'Select authorization allowlist', '',
+                    'Text files (*.txt);;All files (*)')
+                if path:
+                    self._authorize_file_edit.setText(path)
+            except Exception:
+                pass
+
+        def _split_patterns(self, text):
+            return [p.strip() for p in str(text or '').replace('\n', ',').split(',')
+                    if p.strip()]
+
+        def _read_scan_profile_panel(self):
+            """Return (selected_categories, advanced_opts) from the in-page panel."""
+            checks = getattr(self, '_scan_cat_checks', None)
+            if not checks:
+                return None
+            selected = [k for k, cb in checks.items() if cb.isChecked()]
+            if not selected:
+                QMessageBox.warning(self, 'Scan Profile', 'Select at least one scan category.')
+                return None
+            prefs = _load_prefs()
+            ai_key = prefs.get('anthropic_api_key') or None
+            advanced = {
+                'categories': selected,
+                'safe_mode': bool(self._safe_mode_chk.isChecked()),
+                'dry_run': bool(self._dry_run_chk.isChecked()),
+                'no_reconfirm': not bool(self._reconfirm_chk.isChecked()),
+                'impersonate': 'chrome' if self._impersonate_chk.isChecked() else None,
+                'oob': self._oob_combo.currentData() if getattr(self, '_oob_combo', None) else 'off',
+                'ai_triage': bool(self._ai_triage_chk.isChecked()),
+                'ai_key': ai_key,
+                'ai_model': prefs.get('ai_model') or None,
+                'authorize': self._authorize_file_edit.text().strip(),
+                'scope_include': self._split_patterns(self._scope_include_edit.text()),
+                'scope_exclude': self._split_patterns(self._scope_exclude_edit.text()),
+                'engagement_id': self._engagement_combo.currentData()
+                    if getattr(self, '_engagement_combo', None) else None,
+            }
+            try:
+                prefs['advanced'] = advanced
+                prefs['current_engagement_id'] = advanced.get('engagement_id')
+                _save_prefs(prefs)
+                self._prefs = prefs
+            except Exception:
+                pass
+            return selected, advanced
 
         def append_log(self, text: str):
             self.log.append(text)
@@ -3132,10 +3372,13 @@ def main() -> None:
                 QMessageBox.warning(self, _t('missing_target', self._lang), _t('add_target_msg', self._lang))
                 return
             
-            # Show scan category selection dialog
-            selected_categories = self._show_scan_selection_dialog()
+            scan_profile = self._read_scan_profile_panel() if hasattr(self, '_read_scan_profile_panel') else None
+            if scan_profile is None:
+                selected_categories = self._show_scan_selection_dialog()
+                advanced_opts = getattr(self, '_pending_advanced', None) or {}
+            else:
+                selected_categories, advanced_opts = scan_profile
             if selected_categories is None:
-                # User cancelled
                 return
             
             # WAF Detection for first target
@@ -3156,19 +3399,23 @@ def main() -> None:
                         self._progress_bars[target].setValue(0)
             except Exception:
                 pass
-            self.append_log(f"[*] {_t('detecting_waf', self._lang)}\n")
-            QtWidgets.QApplication.processEvents()
-            
-            waf_name, confidence, indicators = self._detect_waf(targets[0])
-            if waf_name:
-                waf_display = waf_name.replace('_', ' ').title()
-                self.append_log(f"[+] 🛡️ {_t('waf_detected', self._lang).format(waf=waf_display)} (Confidence: {confidence}%)\n")
-                for ind in indicators[:3]:
-                    self.append_log(f"    └─ {ind}\n")
-                self._detected_waf = waf_name
-            else:
-                self.append_log(f"[*] {_t('no_waf_detected', self._lang)}\n")
+            if advanced_opts.get('dry_run'):
+                waf_name, confidence, indicators = None, 0, []
+                self.append_log("[*] Dry run enabled: skipping pre-scan WAF detection request.\n")
                 self._detected_waf = None
+            else:
+                self.append_log(f"[*] {_t('detecting_waf', self._lang)}\n")
+                QtWidgets.QApplication.processEvents()
+                waf_name, confidence, indicators = self._detect_waf(targets[0])
+                if waf_name:
+                    waf_display = waf_name.replace('_', ' ').title()
+                    self.append_log(f"[+] 🛡️ {_t('waf_detected', self._lang).format(waf=waf_display)} (Confidence: {confidence}%)\n")
+                    for ind in indicators[:3]:
+                        self.append_log(f"    └─ {ind}\n")
+                    self._detected_waf = waf_name
+                else:
+                    self.append_log(f"[*] {_t('no_waf_detected', self._lang)}\n")
+                    self._detected_waf = None
             
             threads = int(self.threads_spin.value())
             delay = float(self.delay_spin.value())
@@ -3195,7 +3442,6 @@ def main() -> None:
                 self._prefs = prefs
             except Exception:
                 pass
-            advanced_opts = getattr(self, '_pending_advanced', None) or {}
             # Caido proxy passthrough: route all scan traffic through Caido when
             # enabled in Settings -> Integrations (so requests land in Caido).
             try:
@@ -3205,6 +3451,7 @@ def main() -> None:
                         'caido_proxy_url', 'http://127.0.0.1:8080')
             except Exception:
                 pass
+            self._current_engagement_id = advanced_opts.get('engagement_id')
             self._worker = QtWorker(targets, threads, delay, concurrent_val, use_concurrent, retry_failed, selected_categories, proxy_config=self._proxy_config, enable_http_logging=self._enable_http_logging, enable_ssl_analysis=self._enable_ssl_analysis, advanced_opts=advanced_opts)
             self._worker_thread = QtCore.QThread()
             self._worker.moveToThread(self._worker_thread)
@@ -3218,10 +3465,7 @@ def main() -> None:
             self._worker.progress_update.connect(self._update_target_progress, QtCore.Qt.QueuedConnection)
             self._worker.finished.connect(self._on_finished, QtCore.Qt.QueuedConnection)
             self._worker_thread.started.connect(self._worker.run)
-            self._worker_thread.start()
-            self.start_btn.setEnabled(False)
-            self.stop_btn.setEnabled(True)
-            
+
             # Generate scan ID and add to database/timeline
             import uuid
             self._current_scan_id = str(uuid.uuid4())
@@ -3231,17 +3475,26 @@ def main() -> None:
                     self._db.create_scan(
                         scan_id=self._current_scan_id,
                         targets=targets,
-                        settings={'threads': threads, 'delay': delay, 'concurrent': concurrent_val, 'categories': selected_categories, 'waf_detected': waf_name}
+                        settings={'threads': threads, 'delay': delay, 'concurrent': concurrent_val, 'categories': selected_categories, 'waf_detected': waf_name, 'safe_mode': advanced_opts.get('safe_mode'), 'dry_run': advanced_opts.get('dry_run')},
+                        engagement_id=advanced_opts.get('engagement_id')
                     )
                     # Add timeline event for scan start
                     self._db.add_timeline_event(
                         scan_id=self._current_scan_id,
                         target=targets[0] if len(targets) == 1 else f'{len(targets)} targets',
                         event_type='scan_started',
-                        event_data={'targets': targets, 'waf': waf_name, 'categories': selected_categories}
+                        event_data={'targets': targets, 'waf': waf_name,
+                                    'categories': selected_categories,
+                                    'engagement_id': advanced_opts.get('engagement_id'),
+                                    'safe_mode': advanced_opts.get('safe_mode'),
+                                    'dry_run': advanced_opts.get('dry_run')}
                     )
             except Exception:
                 pass
+
+            self._worker_thread.start()
+            self.start_btn.setEnabled(False)
+            self.stop_btn.setEnabled(True)
             
             # disable controls while running
             try:
@@ -3643,6 +3896,9 @@ def main() -> None:
                     if self._db and self._current_scan_id:
                         for result in data:
                             try:
+                                if getattr(self, '_current_engagement_id', None):
+                                    result = dict(result)
+                                    result.setdefault('engagement_id', self._current_engagement_id)
                                 self._db.add_result(self._current_scan_id, result)
                             except Exception:
                                 pass
@@ -3675,7 +3931,9 @@ def main() -> None:
                     import uuid as _uuid
                     sid = str(_uuid.uuid4())
                     try:
-                        self._db.create_scan(scan_id=sid, targets=[label])
+                        self._db.create_scan(
+                            scan_id=sid, targets=[label],
+                            engagement_id=getattr(self, '_current_engagement_id', None))
                         self._current_scan_id = sid
                     except Exception:
                         pass
@@ -7394,16 +7652,25 @@ def main() -> None:
                 except Exception:
                     prefs = {}
 
+                def form_label(text, width=170):
+                    lbl = QLabel(text)
+                    lbl.setObjectName('FieldLabel')
+                    lbl.setMinimumWidth(width)
+                    lbl.setMaximumWidth(width)
+                    return lbl
+
                 # font size
                 h2 = QtWidgets.QHBoxLayout()
-                h2.addWidget(QLabel(_t('font_size', self._lang)))
+                h2.addWidget(form_label(_t('font_size', self._lang)))
                 font_spin = QSpinBox()
+                font_spin.setFixedWidth(90)
                 font_spin.setRange(8, 20)
                 try:
                     font_spin.setValue(int(prefs.get('font_size', 11)))
                 except Exception:
                     font_spin.setValue(11)
                 h2.addWidget(font_spin)
+                h2.addStretch()
                 layout.addLayout(h2)
 
                 # watermark
@@ -7424,19 +7691,21 @@ def main() -> None:
 
                 # retry failed
                 retry_layout = QtWidgets.QHBoxLayout()
-                retry_layout.addWidget(QLabel(_t('retry_failed', self._lang)))
+                retry_layout.addWidget(form_label(_t('retry_failed', self._lang)))
                 retry_spin = QSpinBox()
+                retry_spin.setFixedWidth(90)
                 retry_spin.setRange(0, 5)
                 try:
                     retry_spin.setValue(int(prefs.get('retry_failed', 0)))
                 except Exception:
                     retry_spin.setValue(0)
                 retry_layout.addWidget(retry_spin)
+                retry_layout.addStretch()
                 layout.addLayout(retry_layout)
 
                 # UI density
                 density_layout = QtWidgets.QHBoxLayout()
-                density_layout.addWidget(QLabel(_t('ui_density', self._lang)))
+                density_layout.addWidget(form_label(_t('ui_density', self._lang)))
                 density_combo = QtWidgets.QComboBox()
                 density_combo.addItems([_t('compact', self._lang), _t('comfortable', self._lang), _t('spacious', self._lang)])
                 try:
@@ -7446,11 +7715,12 @@ def main() -> None:
                 except Exception:
                     pass
                 density_layout.addWidget(density_combo)
+                density_layout.addStretch()
                 layout.addLayout(density_layout)
 
                 # Language selection
                 lang_layout = QtWidgets.QHBoxLayout()
-                lang_layout.addWidget(QLabel(_t('language')))
+                lang_layout.addWidget(form_label(_t('language')))
                 lang_combo = QtWidgets.QComboBox()
                 for code, name in LANGUAGE_NAMES.items():
                     lang_combo.addItem(name, code)
@@ -7461,6 +7731,7 @@ def main() -> None:
                 except Exception:
                     lang_combo.setCurrentIndex(0)
                 lang_layout.addWidget(lang_combo)
+                lang_layout.addStretch()
                 layout.addLayout(lang_layout)
                 
                 # Note about language change - updates dynamically when language selection changes
@@ -7489,7 +7760,7 @@ def main() -> None:
                 
                 # Proxy type selection
                 proxy_type_layout = QHBoxLayout()
-                proxy_type_layout.addWidget(QLabel(_t('proxy_type', self._lang) if 'proxy_type' in TRANSLATIONS.get(self._lang, {}) else 'Type:'))
+                proxy_type_layout.addWidget(form_label(_t('proxy_type', self._lang) if 'proxy_type' in TRANSLATIONS.get(self._lang, {}) else 'Type:'))
                 proxy_type_combo = QtWidgets.QComboBox()
                 proxy_type_combo.addItems([
                     '🧅 Tor (SOCKS5 - 127.0.0.1:9050)',
@@ -7502,6 +7773,7 @@ def main() -> None:
                 except Exception:
                     pass
                 proxy_type_layout.addWidget(proxy_type_combo)
+                proxy_type_layout.addStretch()
                 proxy_layout.addLayout(proxy_type_layout)
                 
                 # Custom proxy fields
@@ -7510,7 +7782,7 @@ def main() -> None:
                 custom_proxy_layout.setContentsMargins(0, 0, 0, 0)
                 
                 host_layout = QHBoxLayout()
-                host_layout.addWidget(QLabel(_t('proxy_host', self._lang) if 'proxy_host' in TRANSLATIONS.get(self._lang, {}) else 'Host:'))
+                host_layout.addWidget(form_label(_t('proxy_host', self._lang) if 'proxy_host' in TRANSLATIONS.get(self._lang, {}) else 'Host:'))
                 proxy_host_edit = QLineEdit()
                 proxy_host_edit.setPlaceholderText('127.0.0.1')
                 try:
@@ -7518,17 +7790,20 @@ def main() -> None:
                 except Exception:
                     pass
                 host_layout.addWidget(proxy_host_edit)
+                host_layout.addStretch()
                 custom_proxy_layout.addLayout(host_layout)
                 
                 port_layout = QHBoxLayout()
-                port_layout.addWidget(QLabel(_t('proxy_port', self._lang) if 'proxy_port' in TRANSLATIONS.get(self._lang, {}) else 'Port:'))
+                port_layout.addWidget(form_label(_t('proxy_port', self._lang) if 'proxy_port' in TRANSLATIONS.get(self._lang, {}) else 'Port:'))
                 proxy_port_spin = QSpinBox()
+                proxy_port_spin.setFixedWidth(110)
                 proxy_port_spin.setRange(1, 65535)
                 try:
                     proxy_port_spin.setValue(int(prefs.get('proxy_port', 9050)))
                 except Exception:
                     proxy_port_spin.setValue(9050)
                 port_layout.addWidget(proxy_port_spin)
+                port_layout.addStretch()
                 custom_proxy_layout.addLayout(port_layout)
                 
                 proxy_layout.addWidget(custom_proxy_widget)
@@ -10116,90 +10391,129 @@ def main() -> None:
                 else:
                     stats = {'total_scans': 0, 'total_findings': 0, 'total_bypasses': 0, 'severity_distribution': {}, 'top_techniques': []}
 
-                dlg = QtWidgets.QWidget()
-                dlg.setObjectName('DashboardPage')
-                dlg.setStyleSheet("""
-                    QDialog { background-color: #0f1112; }
-                    QLabel { color: #d7e1ea; }
-                    QGroupBox { color: #d7e1ea; border: 1px solid #2b2f33; margin-top: 10px; padding-top: 10px; }
-                    QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }
-                """)
-                
-                layout = QVBoxLayout(dlg)
-                
-                # Header
-                header = QLabel('📈 ' + (_t('statistics', self._lang) if 'statistics' in TRANSLATIONS.get(self._lang, {}) else 'Statistics'))
-                header.setFont(QFont('', 16, QFont.Bold))
-                header.setStyleSheet('color: #58a6ff;')
-                layout.addWidget(header)
-                
-                # Summary cards
-                summary_layout = QHBoxLayout()
-                
-                def create_stat_card(title, value, color='#d7e1ea'):
-                    card = QtWidgets.QFrame()
-                    card.setStyleSheet(f'background-color: #16181a; border: 1px solid #2b2f33; border-radius: 8px; padding: 15px;')
-                    card_layout = QVBoxLayout(card)
-                    val_label = QLabel(str(value))
-                    val_label.setFont(QFont('', 24, QFont.Bold))
-                    val_label.setStyleSheet(f'color: {color};')
-                    val_label.setAlignment(Qt.AlignCenter)
-                    title_label = QLabel(title)
-                    title_label.setStyleSheet('color: #8b949e; font-size: 12px;')
-                    title_label.setAlignment(Qt.AlignCenter)
-                    card_layout.addWidget(val_label)
-                    card_layout.addWidget(title_label)
-                    return card
-                
-                summary_layout.addWidget(create_stat_card(_t('total_scans', self._lang) if 'total_scans' in TRANSLATIONS.get(self._lang, {}) else 'Total Scans', stats.get('total_scans', 0), '#58a6ff'))
-                summary_layout.addWidget(create_stat_card(_t('total_findings', self._lang) if 'total_findings' in TRANSLATIONS.get(self._lang, {}) else 'Total Findings', stats.get('total_findings', 0), '#ffa500'))
-                summary_layout.addWidget(create_stat_card(_t('total_bypasses', self._lang) if 'total_bypasses' in TRANSLATIONS.get(self._lang, {}) else 'Bypasses', stats.get('total_bypasses', 0), '#22c55e'))
-                
-                layout.addLayout(summary_layout)
-                
-                # Severity distribution
-                sev_group = QtWidgets.QGroupBox(_t('severity_distribution', self._lang) if 'severity_distribution' in TRANSLATIONS.get(self._lang, {}) else 'Severity Distribution')
-                sev_layout = QHBoxLayout(sev_group)
-                
+                page = QtWidgets.QWidget()
+                page.setObjectName('DashboardPage')
+                layout = QVBoxLayout(page)
+                layout.setContentsMargins(22, 20, 22, 20)
+                layout.setSpacing(14)
+
+                header_row = QHBoxLayout()
+                title_box = QVBoxLayout()
+                title = QLabel('Dashboard')
+                title.setObjectName('PageTitle')
+                subtitle = QLabel('Scan history, finding mix, and workflow pressure.')
+                subtitle.setObjectName('FieldLabel')
+                title_box.addWidget(title)
+                title_box.addWidget(subtitle)
+                header_row.addLayout(title_box)
+                header_row.addStretch()
+                compare_btn = QPushButton('Compare Scans')
+                compare_btn.clicked.connect(lambda: self._show_compare_scans_dialog())
+                header_row.addWidget(compare_btn)
+                layout.addLayout(header_row)
+
+                metrics = QtWidgets.QFrame()
+                metrics.setObjectName('Card')
+                metrics_layout = QtWidgets.QGridLayout(metrics)
+                metrics_layout.setContentsMargins(14, 12, 14, 12)
+                metrics_layout.setHorizontalSpacing(18)
+                metric_values = [
+                    ('Scans', stats.get('total_scans', 0)),
+                    ('Findings', stats.get('total_findings', 0)),
+                    ('Bypasses', stats.get('total_bypasses', 0)),
+                    ('Targets', len(stats.get('top_targets', []) or [])),
+                ]
+                for col, (label, value) in enumerate(metric_values):
+                    val = QLabel(str(value))
+                    val.setFont(QFont('', 22, QFont.Bold))
+                    name = QLabel(label)
+                    name.setObjectName('FieldLabel')
+                    val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    name.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    metrics_layout.addWidget(val, 0, col)
+                    metrics_layout.addWidget(name, 1, col)
+                    metrics_layout.setColumnStretch(col, 1)
+                layout.addWidget(metrics)
+
                 sev_dist = stats.get('severity_distribution', {})
                 sev_colors = {'CRITICAL': '#dc2626', 'HIGH': '#ea580c', 'MEDIUM': '#ca8a04', 'LOW': '#2563eb', 'INFO': '#6b7280'}
-                
+                severity_frame = QtWidgets.QFrame()
+                severity_frame.setObjectName('Card')
+                severity_layout = QHBoxLayout(severity_frame)
+                severity_layout.setContentsMargins(12, 10, 12, 10)
+                severity_layout.setSpacing(8)
                 for sev in ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO']:
-                    count = sev_dist.get(sev, 0)
-                    sev_label = QLabel(f'{sev}: {count}')
-                    sev_label.setStyleSheet(f'color: {sev_colors.get(sev, "#d7e1ea")}; font-weight: bold; padding: 10px; background: #16181a; border-radius: 4px;')
-                    sev_layout.addWidget(sev_label)
-                
-                layout.addWidget(sev_group)
-                
-                # Top techniques
-                tech_group = QtWidgets.QGroupBox(_t('top_techniques', self._lang) if 'top_techniques' in TRANSLATIONS.get(self._lang, {}) else 'Top Techniques')
-                tech_layout = QVBoxLayout(tech_group)
-                
-                top_tech = stats.get('top_techniques', [])[:5]
-                for t in top_tech:
-                    tech_label = QLabel(f"• {t.get('technique', 'Unknown')}: {t.get('count', 0)}")
-                    tech_label.setStyleSheet('color: #d7e1ea; padding: 5px;')
-                    tech_layout.addWidget(tech_label)
-                
-                if not top_tech:
-                    tech_label = QLabel('No data available yet')
-                    tech_label.setStyleSheet('color: #8b949e; font-style: italic;')
-                    tech_layout.addWidget(tech_label)
-                
-                layout.addWidget(tech_group)
-                
-                # Compare scans button
-                compare_btn = QPushButton('🔍 ' + (_t('compare_scans', self._lang) if 'compare_scans' in TRANSLATIONS.get(self._lang, {}) else 'Compare Scans'))
-                compare_btn.clicked.connect(lambda: self._show_compare_scans_dialog())
-                layout.addWidget(compare_btn)
-                
-                # Close button -> back to Scan
-                close_btn = QPushButton(_t('close', self._lang))
-                close_btn.clicked.connect(lambda: self._navigate('scan'))
-                layout.addWidget(close_btn)
+                    item = QtWidgets.QFrame()
+                    item.setObjectName('DashboardPill')
+                    item_layout = QHBoxLayout(item)
+                    item_layout.setContentsMargins(10, 6, 10, 6)
+                    dot = QLabel('■')
+                    dot.setStyleSheet(f'color: {sev_colors.get(sev, "#d7e1ea")};')
+                    txt = QLabel(f'{sev.title()} {sev_dist.get(sev, 0)}')
+                    item_layout.addWidget(dot)
+                    item_layout.addWidget(txt)
+                    item_layout.addStretch()
+                    severity_layout.addWidget(item)
+                layout.addWidget(severity_frame)
 
-                return dlg
+                tables = QtWidgets.QSplitter()
+                tables.setOrientation(Qt.Orientation.Horizontal)
+                layout.addWidget(tables, 1)
+
+                tech_box = QtWidgets.QWidget()
+                tech_layout = QVBoxLayout(tech_box)
+                tech_layout.setContentsMargins(0, 0, 8, 0)
+                tech_title = QLabel('Top Techniques')
+                tech_title.setObjectName('FieldLabel')
+                tech_layout.addWidget(tech_title)
+                tech_table = QtWidgets.QTableWidget(0, 2)
+                tech_table.setHorizontalHeaderLabels(['Technique', 'Count'])
+                tech_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+                tech_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+                try:
+                    tech_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+                    tech_table.setColumnWidth(1, 80)
+                except Exception:
+                    pass
+                for t in (stats.get('top_techniques', []) or [])[:10]:
+                    r = tech_table.rowCount()
+                    tech_table.insertRow(r)
+                    tech_table.setItem(r, 0, QtWidgets.QTableWidgetItem(str(t.get('technique', 'Unknown'))))
+                    tech_table.setItem(r, 1, QtWidgets.QTableWidgetItem(str(t.get('count', 0))))
+                tech_layout.addWidget(tech_table)
+                tables.addWidget(tech_box)
+
+                activity_box = QtWidgets.QWidget()
+                activity_layout = QVBoxLayout(activity_box)
+                activity_layout.setContentsMargins(8, 0, 0, 0)
+                activity_title = QLabel('Recent Activity')
+                activity_title.setObjectName('FieldLabel')
+                activity_layout.addWidget(activity_title)
+                activity_table = QtWidgets.QTableWidget(0, 4)
+                activity_table.setHorizontalHeaderLabels(['Date', 'Scans', 'Findings', 'Bypasses'])
+                activity_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+                activity_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+                try:
+                    activity_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+                except Exception:
+                    pass
+                for item in (stats.get('recent_activity', []) or [])[:14]:
+                    r = activity_table.rowCount()
+                    activity_table.insertRow(r)
+                    activity_table.setItem(r, 0, QtWidgets.QTableWidgetItem(str(item.get('date', ''))))
+                    activity_table.setItem(r, 1, QtWidgets.QTableWidgetItem(str(item.get('scans', 0))))
+                    activity_table.setItem(r, 2, QtWidgets.QTableWidgetItem(str(item.get('findings', 0))))
+                    activity_table.setItem(r, 3, QtWidgets.QTableWidgetItem(str(item.get('bypasses', 0))))
+                activity_layout.addWidget(activity_table)
+                tables.addWidget(activity_box)
+                tables.setSizes([520, 520])
+
+                if not (stats.get('top_techniques') or stats.get('recent_activity')):
+                    empty = QLabel('No scan history yet.')
+                    empty.setObjectName('FieldLabel')
+                    layout.addWidget(empty)
+
+                return page
             except Exception as e:
                 QMessageBox.critical(self, 'Dashboard Error', str(e))
                 return None
@@ -11271,6 +11585,162 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                 QMessageBox.critical(self, 'Payloads Error', str(e))
                 return None
 
+        def _build_engagements_page(self):
+            """Bug bounty engagement workspace: scope, rules, and test notes."""
+            try:
+                dlg = QtWidgets.QWidget()
+                dlg.setObjectName('EngagementsPage')
+                layout = QVBoxLayout(dlg)
+                layout.setContentsMargins(22, 20, 22, 20)
+                layout.setSpacing(12)
+
+                header = QLabel('Engagements')
+                header.setFont(QFont('', 14, QFont.Bold))
+                layout.addWidget(header)
+
+                splitter = QtWidgets.QSplitter()
+                splitter.setOrientation(QtCore.Qt.Orientation.Horizontal)
+                layout.addWidget(splitter, 1)
+
+                table = QtWidgets.QTableWidget()
+                table.setColumnCount(4)
+                table.setHorizontalHeaderLabels(['Name', 'Scope', 'Status', 'Updated'])
+                table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+                table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+                try:
+                    table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+                    table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+                except Exception:
+                    pass
+                splitter.addWidget(table)
+
+                form = QtWidgets.QWidget()
+                form_layout = QVBoxLayout(form)
+                name_edit = QLineEdit()
+                name_edit.setPlaceholderText('Program / workspace name')
+                scope_edit = QTextEdit()
+                scope_edit.setPlaceholderText('In-scope domains or URLs, one per line')
+                scope_edit.setMaximumHeight(110)
+                exclusions_edit = QTextEdit()
+                exclusions_edit.setPlaceholderText('Excluded domains, URLs, paths, or notes, one per line')
+                exclusions_edit.setMaximumHeight(90)
+                rules_edit = QTextEdit()
+                rules_edit.setPlaceholderText('Rules of engagement, rate limits, prohibited tests, testing windows')
+                accounts_edit = QTextEdit()
+                accounts_edit.setPlaceholderText('Test-account notes. Do not store real passwords here.')
+                accounts_edit.setMaximumHeight(90)
+                status_combo = QtWidgets.QComboBox()
+                status_combo.addItems(['active', 'paused', 'archived'])
+                for label, widget in (
+                    ('Name', name_edit), ('Scope', scope_edit),
+                    ('Exclusions', exclusions_edit), ('Rules', rules_edit),
+                    ('Test Accounts', accounts_edit), ('Status', status_combo),
+                ):
+                    form_layout.addWidget(QLabel(label))
+                    form_layout.addWidget(widget)
+                btns = QHBoxLayout()
+                new_btn = QPushButton('New')
+                save_btn = QPushButton('Save')
+                archive_btn = QPushButton('Archive')
+                use_btn = QPushButton('Use For Scans')
+                btns.addWidget(new_btn)
+                btns.addWidget(save_btn)
+                btns.addWidget(archive_btn)
+                btns.addWidget(use_btn)
+                form_layout.addLayout(btns)
+                splitter.addWidget(form)
+
+                selected_id = {'value': None}
+
+                def _lines(text):
+                    return [line.strip() for line in str(text or '').splitlines() if line.strip()]
+
+                def refresh():
+                    table.setRowCount(0)
+                    if not self._db:
+                        return
+                    for row, engagement in enumerate(self._db.list_engagements(include_archived=True)):
+                        table.insertRow(row)
+                        table.setItem(row, 0, QtWidgets.QTableWidgetItem(engagement.get('name', '')))
+                        table.setItem(row, 1, QtWidgets.QTableWidgetItem(', '.join(engagement.get('scope') or [])))
+                        table.setItem(row, 2, QtWidgets.QTableWidgetItem(engagement.get('status', 'active')))
+                        table.setItem(row, 3, QtWidgets.QTableWidgetItem(engagement.get('updated_at', '') or ''))
+                        table.item(row, 0).setData(256, engagement)
+
+                def clear_form():
+                    selected_id['value'] = None
+                    name_edit.clear()
+                    scope_edit.clear()
+                    exclusions_edit.clear()
+                    rules_edit.clear()
+                    accounts_edit.clear()
+                    status_combo.setCurrentText('active')
+
+                def load_selected():
+                    items = table.selectedItems()
+                    if not items:
+                        return
+                    engagement = table.item(items[0].row(), 0).data(256) or {}
+                    selected_id['value'] = engagement.get('id')
+                    name_edit.setText(engagement.get('name', ''))
+                    scope_edit.setPlainText('\n'.join(engagement.get('scope') or []))
+                    exclusions_edit.setPlainText('\n'.join(engagement.get('exclusions') or []))
+                    rules_edit.setPlainText(engagement.get('rules_notes', '') or '')
+                    accounts_edit.setPlainText(engagement.get('test_accounts_notes', '') or '')
+                    status_combo.setCurrentText(engagement.get('status', 'active') or 'active')
+
+                def save():
+                    if not self._db:
+                        return
+                    name = name_edit.text().strip()
+                    if not name:
+                        QMessageBox.warning(dlg, 'Engagements', 'Name is required.')
+                        return
+                    eid = self._db.save_engagement(
+                        name=name,
+                        scope=_lines(scope_edit.toPlainText()),
+                        exclusions=_lines(exclusions_edit.toPlainText()),
+                        rules_notes=rules_edit.toPlainText().strip(),
+                        test_accounts_notes=accounts_edit.toPlainText().strip(),
+                        default_scan_profile=profile_from_prefs(_load_prefs()),
+                        status=status_combo.currentText(),
+                        engagement_id=selected_id['value'])
+                    selected_id['value'] = eid
+                    refresh()
+                    self._refresh_engagement_combo()
+
+                def archive():
+                    if self._db and selected_id['value']:
+                        self._db.delete_engagement(int(selected_id['value']))
+                        clear_form()
+                        refresh()
+                        self._refresh_engagement_combo()
+
+                def use_for_scans():
+                    if not selected_id['value']:
+                        load_selected()
+                    if selected_id['value']:
+                        try:
+                            prefs = _load_prefs()
+                            prefs['current_engagement_id'] = selected_id['value']
+                            _save_prefs(prefs)
+                            self._prefs = prefs
+                            self._refresh_engagement_combo()
+                            self._navigate('scan')
+                        except Exception:
+                            pass
+
+                table.itemSelectionChanged.connect(load_selected)
+                new_btn.clicked.connect(clear_form)
+                save_btn.clicked.connect(save)
+                archive_btn.clicked.connect(archive)
+                use_btn.clicked.connect(use_for_scans)
+                refresh()
+                return dlg
+            except Exception as e:
+                QMessageBox.critical(self, 'Engagements Error', str(e))
+                return None
+
         def _build_schedule_page(self):
             """Scheduled jobs (scan or recon) as an in-place page (rebuilt per visit)."""
             try:
@@ -11593,7 +12063,8 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                             status=status,
                             scan_id=self._current_scan_id,
                             findings_count=len(results),
-                            results=results
+                            results=results,
+                            engagement_id=getattr(self, '_current_engagement_id', None)
                         )
             except Exception:
                 pass
