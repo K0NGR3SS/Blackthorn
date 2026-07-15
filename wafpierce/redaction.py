@@ -22,6 +22,8 @@ _TEXT_RULES = [
      lambda m: f"{m.group(1)}{_REDACTED}"),
     (re.compile(r'(?i)(set-cookie\s*:\s*)[^\'"\r\n]+'),
      lambda m: f"{m.group(1)}{_REDACTED}"),
+    (re.compile(r'(?i)(proxy-authorization\s*:\s*)(bearer\s+|basic\s+)?[^\'"\r\n]+'),
+     lambda m: f"{m.group(1)}{m.group(2) or ''}{_REDACTED}"),
     (re.compile(r'(?i)((?:x-api-key|x-auth-token|api-key|apikey)\s*:\s*)[^\'"\r\n]+'),
      lambda m: f"{m.group(1)}{_REDACTED}"),
     # curl cookie flags: -b/--cookie <value>
@@ -35,11 +37,19 @@ _TEXT_RULES = [
                 r'api_key|apikey|secret|client_secret|session|sessionid|sid)'
                 r'(=|%3D)[^&\s\'"]+'),
      lambda m: f"{m.group(1)}{m.group(2)}{_REDACTED}"),
+    # JSON and JavaScript-style string properties.
+    (re.compile(r'''(?ix)(["'](?:password|passwd|pwd|token|access_token|refresh_token|
+                  api_key|apikey|secret|client_secret|session|sessionid|sid)["']
+                  \s*:\s*["'])[^"']*(["'])'''),
+     lambda m: f"{m.group(1)}{_REDACTED}{m.group(2)}"),
 ]
 
 # Finding keys whose *entire* value is sensitive header/cookie material.
 _SENSITIVE_KEYS = {'cookie', 'cookies', 'bearer', 'authorization', 'basic_auth',
-                   'auth', 'password', 'token', 'api_key', 'apikey', 'secret'}
+                   'auth', 'password', 'token', 'api_key', 'apikey', 'api-key',
+                   'x-api-key', 'x-auth-token', 'secret', 'passwd', 'pwd',
+                   'access_token', 'refresh_token', 'client_secret', 'session',
+                   'sessionid', 'sid', 'set-cookie', 'proxy-authorization'}
 
 
 def redact_text(s: str) -> str:

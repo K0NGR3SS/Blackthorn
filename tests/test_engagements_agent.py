@@ -38,6 +38,32 @@ def test_engagement_roundtrip_and_finding_state():
     assert db.get_scan_results('scan-1')[0]['workflow_state'] == 'validated'
 
 
+def test_scan_result_preserves_canonical_evidence_and_response_status():
+    db = _db()
+    db.create_scan('scan-proof', ['https://example.com'])
+    db.add_result('scan-proof', {
+        'target': 'https://example.com', 'technique': 'SSTI canary',
+        'category': 'SSTI', 'severity': 'HIGH', 'bypass': True,
+        'finding_id': 'bt-proof', 'fingerprint': 'proof',
+        'kind': 'finding', 'verification_status': 'confirmed',
+        'confidence': 'high', 'remediation': 'Render input as data.',
+        'request': {'method': 'GET', 'url': 'https://example.com/?q=probe'},
+        'response': {'status': 201, 'excerpt': 'BT-49'},
+        'evidence': [{'type': 'execution_marker', 'matched': 'BT-49'}],
+        'baseline': {'status': 200, 'scope': 'matched'},
+        'comparison': {'similarity': 0.2},
+    })
+
+    saved = db.get_scan_results('scan-proof')[0]
+    assert saved['response_code'] == 201
+    assert saved['verification_status'] == 'confirmed'
+    assert saved['request']['method'] == 'GET'
+    assert saved['response']['excerpt'] == 'BT-49'
+    assert saved['evidence'][0]['type'] == 'execution_marker'
+    assert saved['baseline']['scope'] == 'matched'
+    assert saved['comparison']['similarity'] == 0.2
+
+
 def test_agent_reads_scope_and_refuses_out_of_scope_scan():
     db = _db()
     eid = db.save_engagement('Scoped Program', scope=['example.com'])

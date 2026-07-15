@@ -1,6 +1,8 @@
 """Tests for v1.6 engine controls: CVSS, scope, safe-mode, jitter, proxy pool."""
 import time
 
+import requests
+
 from wafpierce.cvss import score, annotate, cwe_for
 from wafpierce.pierce import CloudFrontBypasser
 
@@ -50,6 +52,44 @@ def test_scope_include_restricts(mock_waf):
 def test_no_scope_allows_all(mock_waf):
     s = CloudFrontBypasser(mock_waf, threads=2, delay=0, timeout=3)
     assert s._in_scope(f"{mock_waf}/anything") is True
+
+
+def test_external_active_request_requires_authorization_pattern(mock_waf):
+    class RecordingSession:
+        def __init__(self):
+            self.calls = []
+
+        def request(self, **kwargs):
+            self.calls.append(kwargs)
+            response = requests.Response()
+            response.status_code = 200
+            response.url = kwargs['url']
+            return response
+
+    scanner = CloudFrontBypasser(mock_waf, threads=2, delay=0, timeout=3)
+    scanner._recon_session = RecordingSession()
+    assert scanner._scoped_safe_request('https://related.invalid/') is None
+    assert scanner._recon_session.calls == []
+
+    scanner.authorization_patterns = ['https://related.invalid']
+    assert scanner._scoped_safe_request('https://related.invalid/') is not None
+    assert len(scanner._recon_session.calls) == 1
+
+
+def test_passive_lookup_uses_sterile_session_without_active_authorization(mock_waf):
+    class RecordingSession:
+        def request(self, **kwargs):
+            response = requests.Response()
+            response.status_code = 200
+            response.url = kwargs['url']
+            return response
+
+    scanner = CloudFrontBypasser(mock_waf, threads=2, delay=0, timeout=3)
+    scanner._recon_session = RecordingSession()
+    response = scanner._scoped_safe_request(
+        'https://passive.invalid/query', passive_lookup=True
+    )
+    assert response is not None and response.status_code == 200
 
 
 # -- safe mode ------------------------------------------------------------ #

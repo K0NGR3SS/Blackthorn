@@ -1,7 +1,7 @@
 """
 Request importers — seed the scanner from recorded traffic.
 
-Feed a HAR capture, a Postman collection, or a Burp items export and WAFPierce
+Feed a HAR capture, a Postman collection, or a Burp items export and Blackthorn
 will fuzz those exact (often authenticated) requests instead of only what the
 crawler can reach. Each importer returns a list of normalized endpoint dicts:
 
@@ -23,10 +23,10 @@ logger = logging.getLogger(__name__)
 
 def _entry(url: str, method: str = 'GET', headers=None, body=None) -> Dict[str, Any]:
     parsed = urlparse(url)
+    # Keep the path and query model separate.  The injection builder appends the
+    # encoded params itself; retaining ``?query`` here produced ``...?a=1?a=x``.
     path = parsed.path or '/'
-    if parsed.query:
-        path = f"{path}?{parsed.query}"
-    params = dict(parse_qsl(parsed.query)) if parsed.query else {}
+    params = dict(parse_qsl(parsed.query, keep_blank_values=True)) if parsed.query else {}
     return {
         'path': path, 'params': params, 'method': (method or 'GET').upper(),
         'headers': dict(headers or {}), 'body': body, 'url': url,
@@ -155,7 +155,7 @@ def load_requests(path: str, fmt: Optional[str] = None) -> List[Dict[str, Any]]:
 
 # --------------------------------------------------------------------------- #
 # Finding importers (P6): bring external scanner *findings* (not requests) into
-# the WAFPierce results funnel. Siblings of the request importers above.
+# the Blackthorn results funnel. Siblings of the request importers above.
 # --------------------------------------------------------------------------- #
 def from_burp_issues(path: str) -> List[Dict[str, Any]]:
     """Parse a Burp Suite 'Report issues' XML export into canonical findings."""

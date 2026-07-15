@@ -129,7 +129,7 @@ class Crawler:
     def _seed_from_robots(self) -> List[str]:
         seeds = []
         resp = self._get(f"{self.base_url}/robots.txt")
-        if not resp or resp.status_code >= 400:
+        if resp is None or resp.status_code >= 400:
             return seeds
         for line in resp.text.splitlines():
             line = line.strip()
@@ -150,7 +150,7 @@ class Crawler:
             return []
         urls = []
         resp = self._get(sitemap_url)
-        if not resp or resp.status_code >= 400:
+        if resp is None or resp.status_code >= 400:
             return urls
         locs = re.findall(r'<loc>\s*([^<\s]+)\s*</loc>', resp.text, re.IGNORECASE)
         for loc in locs:
@@ -195,7 +195,7 @@ class Crawler:
 
             resp = self._get(url)
             pages_fetched += 1
-            if not resp or resp.status_code >= 400:
+            if resp is None or resp.status_code >= 400:
                 continue
             ctype = resp.headers.get('Content-Type', '')
             if 'html' not in ctype.lower():

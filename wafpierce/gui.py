@@ -14,7 +14,9 @@ import threading
 import subprocess
 import tempfile
 import json
+import html as _html_lib
 import os
+import shlex
 import time
 import concurrent.futures
 from typing import Optional
@@ -32,6 +34,7 @@ from .branding import (
     TRANSPARENT_LOGO,
     asset_path,
 )
+from .exporters import is_confirmed_result as _is_confirmed_result, result_state as _result_state
 
 LOGO_PATH = asset_path(TRANSPARENT_LOGO)
 SIDEBAR_LOGO_PATH = asset_path(DARK_LOGO)
@@ -46,13 +49,71 @@ from . import __version__
 # Pure helpers (no Qt dependency) — kept at module scope so they're unit-testable
 # without importing PySide6.
 # --------------------------------------------------------------------------- #
+def _is_candidate_result(finding: dict) -> bool:
+    return _result_state(finding if isinstance(finding, dict) else {}) == 'candidate'
+
+
+def _finding_status_label(finding: dict) -> str:
+    state = _result_state(finding if isinstance(finding, dict) else {})
+    if state == 'confirmed':
+        return '✅ CONFIRMED FINDING'
+    if state == 'candidate':
+        return '⚠️ CANDIDATE — verification required'
+    return 'ℹ️ Observation'
+
+
+def _advanced_cli_flags(opts: dict) -> list:
+    """Translate persisted GUI scan options into scanner CLI flags."""
+    opts = opts or {}
+    flags = []
+    if opts.get('safe_mode'):
+        flags.append('--safe-mode')
+    if opts.get('intrusive'):
+        flags.append('--intrusive')
+    if opts.get('dry_run'):
+        flags.append('--dry-run')
+    if opts.get('authorize'):
+        flags.extend(['--authorize', str(opts['authorize'])])
+    for pattern in opts.get('scope_include') or []:
+        if pattern:
+            flags.extend(['--scope-include', str(pattern)])
+    for pattern in opts.get('scope_exclude') or []:
+        if pattern:
+            flags.extend(['--scope-exclude', str(pattern)])
+    if opts.get('no_reconfirm'):
+        flags.append('--no-reconfirm')
+    if opts.get('impersonate'):
+        flags.extend(['--impersonate', str(opts['impersonate'])])
+    if opts.get('oob') and opts['oob'] != 'off':
+        flags.extend(['--oob', str(opts['oob'])])
+    if opts.get('jitter'):
+        flags.extend(['--jitter', str(opts['jitter'])])
+    if opts.get('export') and opts.get('export_path'):
+        flags.extend(['--export', str(opts['export_path']),
+                      '--export-format', str(opts['export'])])
+    if opts.get('ai_triage'):
+        flags.append('--ai-triage')
+    if opts.get('ai_provider'):
+        flags.extend(['--ai-provider', str(opts['ai_provider'])])
+    if opts.get('ai_model'):
+        flags.extend(['--ai-model', str(opts['ai_model'])])
+    if opts.get('ai_base_url'):
+        flags.extend(['--ai-base-url', str(opts['ai_base_url'])])
+    if opts.get('caido_proxy'):
+        flags.extend(['--proxy-pool', str(opts['caido_proxy'])])
+    return flags
+
+
 def _finding_url(finding: dict) -> str:
     """Best-effort absolute URL for a finding."""
-    url = finding.get('url') or finding.get('request_url')
+    request = finding.get('request') if isinstance(finding.get('request'), dict) else {}
+    if request.get('available') is False:
+        return ''
+    url = request.get('url') or finding.get('url') or finding.get('request_url')
     if url:
         return str(url)
     target = (finding.get('target') or '').rstrip('/')
-    path = finding.get('path') or '/'
+    path = request.get('path') or finding.get('path') or '/'
     return f"{target}{path}" if target else str(path)
 
 
@@ -61,24 +122,46 @@ def _finding_to_curl(finding: dict) -> str:
     curl = finding.get('curl')
     if curl:
         return str(curl)
-    method = str(finding.get('method') or 'GET').upper()
-    headers = finding.get('request_headers') or finding.get('headers') or {}
+    request = finding.get('request') if isinstance(finding.get('request'), dict) else {}
+    if request.get('available') is False:
+        return '# Exact request unavailable; no reproduction command generated.'
+    method = str(request.get('method') or finding.get('method') or 'GET').upper()
+    headers = request.get('headers')
+    if headers is None:
+        headers = finding.get('request_headers') or finding.get('headers') or {}
+    body = request.get('body') if 'body' in request else (
+        finding.get('request_body') if 'request_body' in finding else finding.get('data')
+    )
     parts = ['curl', '-i', '-s', '-k', '-X', method]
     if isinstance(headers, dict):
         for k, v in headers.items():
             parts.append('-H')
-            parts.append(f"'{k}: {v}'")
-    parts.append(f"'{_finding_url(finding)}'")
+            parts.append(shlex.quote(f'{k}: {v}'))
+    if body not in (None, '', b''):
+        if isinstance(body, (dict, list)):
+            body = json.dumps(body, ensure_ascii=False, separators=(',', ':'))
+        parts.extend(['--data-raw', shlex.quote(str(body))])
+    # Keep the URL visibly quoted in copy/paste output while still handling a
+    # literal apostrophe with the standard POSIX close/escape/reopen sequence.
+    url = _finding_url(finding).replace("'", "'\"'\"'")
+    parts.append(f"'{url}'")
     return ' '.join(parts)
 
 
 def _finding_to_python(finding: dict) -> str:
     """A copy-pasteable Python `requests` snippet reproducing the finding."""
-    method = str(finding.get('method') or 'GET').upper()
+    request = finding.get('request') if isinstance(finding.get('request'), dict) else {}
+    if request.get('available') is False:
+        return '# Exact request unavailable; no reproduction snippet generated.'
+    method = str(request.get('method') or finding.get('method') or 'GET').upper()
     url = _finding_url(finding)
-    headers = finding.get('request_headers') or finding.get('headers') or {}
+    headers = request.get('headers')
+    if headers is None:
+        headers = finding.get('request_headers') or finding.get('headers') or {}
     headers = headers if isinstance(headers, dict) else {}
-    body = finding.get('request_body') or finding.get('data')
+    body = request.get('body') if 'body' in request else (
+        finding.get('request_body') if 'request_body' in finding else finding.get('data')
+    )
     lines = [
         "import requests",
         "",
@@ -87,12 +170,212 @@ def _finding_to_python(finding: dict) -> str:
     ]
     if headers:
         lines.append(f"    headers={headers!r},")
-    if body:
+    if body not in (None, '', b''):
         lines.append(f"    data={body!r},")
     lines.append("    verify=False, allow_redirects=False, timeout=20,")
     lines.append(")")
     lines.append("print(resp.status_code, len(resp.content))")
     return '\n'.join(lines)
+
+
+def _detail_text(value, limit: int = 4000) -> str:
+    """Return a bounded, HTML-escaped representation for finding details.
+
+    Finding evidence is partly supplied by scanners and imported tools, so none
+    of it is trusted as markup.  Keeping this helper Qt-free also lets the detail
+    rendering be regression-tested without a display server.
+    """
+    if value in (None, '', [], {}):
+        return ''
+    if isinstance(value, (dict, list, tuple)):
+        try:
+            text = json.dumps(value, indent=2, ensure_ascii=False, default=str)
+        except Exception:
+            text = str(value)
+    else:
+        text = str(value)
+    if len(text) > limit:
+        text = text[:limit] + '\n… (truncated)'
+    return _html_lib.escape(text, quote=True)
+
+
+def _finding_proof_html(finding: dict) -> str:
+    """Build the structured proof portion of the GUI finding detail.
+
+    The scanner's canonical result schema carries a matched baseline, observed
+    response, evidence signals, and verification metadata.  Older/imported
+    findings are supported through top-level fallbacks.
+    """
+    finding = finding if isinstance(finding, dict) else {}
+    request = finding.get('request') if isinstance(finding.get('request'), dict) else {}
+    response = finding.get('response') if isinstance(finding.get('response'), dict) else {}
+    baseline = finding.get('baseline') if isinstance(finding.get('baseline'), dict) else {}
+    comparison = finding.get('comparison') if isinstance(finding.get('comparison'), dict) else {}
+
+    blocks = []
+
+    verification = finding.get('verification_status') or finding.get('verification')
+    confidence = finding.get('confidence')
+    confirmations = finding.get('confirmations')
+    kind = finding.get('kind')
+    verification_rows = []
+    for label, value in (
+        ('Verification', verification), ('Confidence', confidence),
+        ('Confirmations', confirmations), ('Finding type', kind),
+        ('CWE', finding.get('cwe_id') or finding.get('cwe')),
+        ('CVSS', finding.get('cvss_score')),
+    ):
+        if value not in (None, ''):
+            verification_rows.append(
+                f"<tr><td><b>{label}:</b></td><td>{_detail_text(value, 300)}</td></tr>"
+            )
+    if verification_rows:
+        blocks.append(
+            "<section><b>✓ Verification</b>"
+            "<table style='margin-top:4px;color:#d7e1ea'>"
+            + ''.join(verification_rows) + "</table></section>"
+        )
+
+    request_available = request.get('available') is not False
+    req_method = (request.get('method') or finding.get('method')) if request_available else None
+    req_url = (request.get('url') or finding.get('url') or finding.get('request_url')) \
+        if request_available else None
+    req_path = (request.get('path') or finding.get('path')) if request_available else None
+    req_headers = request.get('headers')
+    if req_headers is None:
+        req_headers = finding.get('request_headers') or finding.get('headers')
+    req_body = request.get('body') if 'body' in request else (
+        finding.get('request_body') if 'request_body' in finding else finding.get('data')
+    )
+    if not request_available:
+        req_headers = None
+        req_body = None
+    req_rows = []
+    for label, value in (('Method', req_method), ('URL', req_url), ('Path', req_path)):
+        if value not in (None, ''):
+            req_rows.append(f"<b>{label}:</b> {_detail_text(value, 1200)}")
+    req_parts = []
+    if req_rows:
+        req_parts.append("<div style='color:#a0aab5'>" + " &nbsp;|&nbsp; ".join(req_rows) + "</div>")
+    if req_headers:
+        req_parts.append(
+            "<details><summary>Request headers</summary>"
+            f"<pre>{_detail_text(req_headers)}</pre></details>"
+        )
+    if req_body not in (None, '', b''):
+        req_parts.append(
+            "<details><summary>Request body</summary>"
+            f"<pre>{_detail_text(req_body)}</pre></details>"
+        )
+    if not request_available:
+        note = request.get('note') or 'Exact request was not recorded'
+        blocks.append(
+            "<section><b>→ Request</b>"
+            f"<div style='color:#a0aab5'>{_detail_text(note, 1000)}</div></section>"
+        )
+    elif req_parts:
+        blocks.append("<section><b>→ Request</b>" + ''.join(req_parts) + "</section>")
+
+    payload = finding.get('payload')
+    insertion = finding.get('insertion_point')
+    if payload not in (None, '') or insertion not in (None, '', {}):
+        insertion_html = (
+            f"<div style='color:#a0aab5'><b>Insertion point:</b> {_detail_text(insertion, 1000)}</div>"
+            if insertion not in (None, '', {}) else ''
+        )
+        payload_html = (
+            f"<pre>{_detail_text(payload)}</pre>" if payload not in (None, '') else ''
+        )
+        blocks.append(f"<section><b>⚑ Payload</b>{insertion_html}{payload_html}</section>")
+
+    evidence = finding.get('evidence')
+    if isinstance(evidence, dict):
+        evidence = [evidence]
+    elif not isinstance(evidence, (list, tuple)):
+        evidence = [evidence] if evidence not in (None, '') else []
+    evidence_rows = []
+    for item in evidence:
+        if isinstance(item, dict):
+            title = item.get('type') or item.get('signal') or 'signal'
+            description = item.get('description') or item.get('reason') or ''
+            matched = item.get('matched')
+            excerpt = item.get('excerpt')
+            body = []
+            if description:
+                body.append(_detail_text(description, 1600))
+            if matched not in (None, ''):
+                body.append(f"<div><b>Matched:</b> <code>{_detail_text(matched, 1000)}</code></div>")
+            if excerpt not in (None, ''):
+                body.append(f"<pre>{_detail_text(excerpt, 2500)}</pre>")
+            evidence_rows.append(
+                f"<li><b>{_detail_text(title, 200)}</b><br>{''.join(body)}</li>"
+            )
+        else:
+            evidence_rows.append(f"<li>{_detail_text(item, 2000)}</li>")
+    if evidence_rows:
+        blocks.append(
+            "<section><b>◆ Evidence</b><ul style='margin:4px 0 0 18px;padding:0'>"
+            + ''.join(evidence_rows) + "</ul></section>"
+        )
+
+    def response_block(label, value, *, scope=''):
+        if not value:
+            return ''
+        meta = []
+        for name, key in (
+            ('Status', 'status'), ('Size', 'size'), ('Content type', 'content_type'),
+            ('SHA-256', 'sha256'),
+        ):
+            if value.get(key) not in (None, ''):
+                meta.append(f"<b>{name}:</b> {_detail_text(value.get(key), 300)}")
+        if scope:
+            meta.append(f"<b>Scope:</b> {_detail_text(scope, 100)}")
+        parts = ["<div style='color:#a0aab5'>" + " &nbsp;|&nbsp; ".join(meta) + "</div>"] if meta else []
+        if value.get('headers'):
+            parts.append(
+                f"<details><summary>{label} headers</summary>"
+                f"<pre>{_detail_text(value.get('headers'))}</pre></details>"
+            )
+        if value.get('excerpt') not in (None, ''):
+            parts.append(
+                f"<details open><summary>{label} excerpt</summary>"
+                f"<pre>{_detail_text(value.get('excerpt'), 3000)}</pre></details>"
+            )
+        return f"<section><b>{label}</b>{''.join(parts)}</section>"
+
+    if not response and any(finding.get(k) not in (None, '') for k in ('status', 'size')):
+        response = {'status': finding.get('status'), 'size': finding.get('size')}
+    observed_html = response_block('← Response', response)
+    if observed_html:
+        blocks.append(observed_html)
+    baseline_html = response_block('○ Matched baseline', baseline, scope=baseline.get('scope', ''))
+    if baseline_html:
+        blocks.append(baseline_html)
+    if comparison:
+        blocks.append(
+            "<section><b>≈ Comparison</b>"
+            f"<pre>{_detail_text(comparison, 2500)}</pre></section>"
+        )
+
+    remediation = (
+        finding.get('remediation') or finding.get('recommendation') or finding.get('solution')
+    )
+    if remediation not in (None, '', [], {}):
+        blocks.append(
+            "<section><b>⚒ Remediation</b>"
+            f"<div style='color:#a0aab5'>{_detail_text(remediation, 4000)}</div></section>"
+        )
+
+    if not blocks:
+        return ''
+    return (
+        "<div class='finding-proof'>"
+        "<style>.finding-proof section{border-top:1px solid #2b2f33;margin-top:8px;padding-top:8px}"
+        ".finding-proof pre{background:#0b0d0e;color:#cfe8ff;border:1px solid #2b2f33;"
+        "border-radius:4px;padding:7px;white-space:pre-wrap;word-break:break-all;"
+        "font-family:Consolas,monospace;font-size:11px}.finding-proof summary{color:#66b3ff}</style>"
+        + ''.join(blocks) + "</div>"
+    )
 
 
 # Scan-profile keys that are safe to export/import (NOT the API key — secrets
@@ -201,7 +484,7 @@ TRANSLATIONS = {
         'all_sites': '📋 All Sites',
         'findings': 'findings',
         'total': 'Total',
-        'bypasses': 'Bypasses',
+        'bypasses': 'Confirmed',
         'sort_by': 'Sort by:',
         'filter': 'Filter:',
         'search': 'Search:',
@@ -211,15 +494,15 @@ TRANSLATIONS = {
         'technique_az': 'Technique (A-Z)',
         'technique_za': 'Technique (Z-A)',
         'category': 'Category',
-        'bypass_status': 'Bypass Status',
+        'bypass_status': 'Verification Status',
         'all_results': 'All Results',
         'critical_only': '🔴 CRITICAL only',
         'high_only': '🟠 HIGH only',
         'medium_only': '🟡 MEDIUM only',
         'low_only': '🔵 LOW only',
         'info_only': 'ℹ️ INFO only',
-        'bypasses_only': '✅ Bypasses only',
-        'non_bypasses_only': '❌ Non-bypasses only',
+        'bypasses_only': '✅ Confirmed only',
+        'non_bypasses_only': '⚠️ Candidates / observations',
         'expand_all': 'Expand All',
         'collapse_all': 'Collapse All',
         'technique': 'Technique',
@@ -318,7 +601,7 @@ TRANSLATIONS = {
         'statistics': 'Statistics',
         'total_scans': 'Total Scans',
         'total_findings': 'Total Findings',
-        'total_bypasses': 'Total Bypasses',
+        'total_bypasses': 'Confirmed Findings',
         'severity_distribution': 'Severity Distribution',
         'recent_activity': 'Recent Activity',
         'top_techniques': 'Top Techniques',
@@ -484,7 +767,7 @@ The developers, contributors, distributors, and owners of Blackthorn assume no l
         'all_sites': '📋 جميع المواقع',
         'findings': 'نتيجة',
         'total': 'المجموع',
-        'bypasses': 'الاختراقات',
+        'bypasses': 'المؤكدة',
         'sort_by': 'ترتيب حسب:',
         'filter': 'تصفية:',
         'search': 'بحث:',
@@ -494,15 +777,15 @@ The developers, contributors, distributors, and owners of Blackthorn assume no l
         'technique_az': 'التقنية (أ-ي)',
         'technique_za': 'التقنية (ي-أ)',
         'category': 'الفئة',
-        'bypass_status': 'حالة الاختراق',
+        'bypass_status': 'حالة التحقق',
         'all_results': 'جميع النتائج',
         'critical_only': '🔴 حرج فقط',
         'high_only': '🟠 عالي فقط',
         'medium_only': '🟡 متوسط فقط',
         'low_only': '🔵 منخفض فقط',
         'info_only': 'ℹ️ معلومات فقط',
-        'bypasses_only': '✅ الاختراقات فقط',
-        'non_bypasses_only': '❌ غير المخترقة فقط',
+        'bypasses_only': '✅ المؤكدة فقط',
+        'non_bypasses_only': '⚠️ المرشحة / الملاحظات',
         'expand_all': 'توسيع الكل',
         'collapse_all': 'طي الكل',
         'technique': 'التقنية',
@@ -600,7 +883,7 @@ The developers, contributors, distributors, and owners of Blackthorn assume no l
         'statistics': 'الإحصائيات',
         'total_scans': 'إجمالي الفحوصات',
         'total_findings': 'إجمالي النتائج',
-        'total_bypasses': 'إجمالي التجاوزات',
+        'total_bypasses': 'النتائج المؤكدة',
         'severity_distribution': 'توزيع الخطورة',
         'recent_activity': 'النشاط الأخير',
         'top_techniques': 'أفضل التقنيات',
@@ -767,7 +1050,7 @@ The developers, contributors, distributors, and owners of Blackthorn assume no l
         'all_sites': '📋 Всі сайти',
         'findings': 'знахідок',
         'total': 'Всього',
-        'bypasses': 'Обходи',
+        'bypasses': 'Підтверджені',
         'sort_by': 'Сортувати:',
         'filter': 'Фільтр:',
         'search': 'Пошук:',
@@ -777,15 +1060,15 @@ The developers, contributors, distributors, and owners of Blackthorn assume no l
         'technique_az': 'Техніка (А-Я)',
         'technique_za': 'Техніка (Я-А)',
         'category': 'Категорія',
-        'bypass_status': 'Статус обходу',
+        'bypass_status': 'Статус перевірки',
         'all_results': 'Всі результати',
         'critical_only': '🔴 Тільки КРИТИЧНІ',
         'high_only': '🟠 Тільки ВИСОКІ',
         'medium_only': '🟡 Тільки СЕРЕДНІ',
         'low_only': '🔵 Тільки НИЗЬКІ',
         'info_only': 'ℹ️ Тільки ІНФО',
-        'bypasses_only': '✅ Тільки обходи',
-        'non_bypasses_only': '❌ Тільки без обходу',
+        'bypasses_only': '✅ Лише підтверджені',
+        'non_bypasses_only': '⚠️ Кандидати / спостереження',
         'expand_all': 'Розгорнути все',
         'collapse_all': 'Згорнути все',
         'technique': 'Техніка',
@@ -884,7 +1167,7 @@ The developers, contributors, distributors, and owners of Blackthorn assume no l
         'statistics': 'Статистика',
         'total_scans': 'Всього сканувань',
         'total_findings': 'Всього знахідок',
-        'total_bypasses': 'Всього обходів',
+        'total_bypasses': 'Підтверджені знахідки',
         'severity_distribution': 'Розподіл за серйозністю',
         'recent_activity': 'Остання активність',
         'top_techniques': 'Топ технік',
@@ -1238,7 +1521,7 @@ SCAN_CATEGORIES_GUI = {
     },
     'encoding_obfuscation': {
         'name_key': 'encoding_obfuscation',
-        'description': 'Tests for encoding-based WAF bypass including double encoding, Unicode normalization, case manipulation, and comment injection.',
+        'description': 'Tests parser and normalization differences using double encoding, Unicode, case variation, and comment boundaries.',
     },
     'protocol_level': {
         'name_key': 'protocol_level',
@@ -1436,42 +1719,7 @@ def main() -> None:
         def _advanced_flags(self):
             """Translate the advanced-options dict into CLI flags understood by
             both the frozen --scan-worker and `python -m wafpierce.pierce`."""
-            opts = self.advanced_opts or {}
-            flags = []
-            if opts.get('safe_mode'):
-                flags.append('--safe-mode')
-            if opts.get('dry_run'):
-                flags.append('--dry-run')
-            if opts.get('authorize'):
-                flags.extend(['--authorize', str(opts['authorize'])])
-            for pattern in opts.get('scope_include') or []:
-                if pattern:
-                    flags.extend(['--scope-include', str(pattern)])
-            for pattern in opts.get('scope_exclude') or []:
-                if pattern:
-                    flags.extend(['--scope-exclude', str(pattern)])
-            if opts.get('no_reconfirm'):
-                flags.append('--no-reconfirm')
-            if opts.get('impersonate'):
-                flags.extend(['--impersonate', str(opts['impersonate'])])
-            if opts.get('oob') and opts['oob'] != 'off':
-                flags.extend(['--oob', str(opts['oob'])])
-            if opts.get('jitter'):
-                flags.extend(['--jitter', str(opts['jitter'])])
-            if opts.get('export') and opts.get('export_path'):
-                flags.extend(['--export', str(opts['export_path']),
-                              '--export-format', str(opts['export'])])
-            if opts.get('ai_triage'):
-                flags.append('--ai-triage')
-            if opts.get('ai_provider'):
-                flags.extend(['--ai-provider', str(opts['ai_provider'])])
-            if opts.get('ai_model'):
-                flags.extend(['--ai-model', str(opts['ai_model'])])
-            if opts.get('ai_base_url'):
-                flags.extend(['--ai-base-url', str(opts['ai_base_url'])])
-            # Caido proxy passthrough — route every scan request through Caido.
-            if opts.get('caido_proxy'):
-                flags.extend(['--proxy-pool', str(opts['caido_proxy'])])
+            flags = _advanced_cli_flags(self.advanced_opts)
             # NB: the API key is passed via the ANTHROPIC_API_KEY env var (set in
             # run()), never as a CLI flag (which would be visible in the process list).
             return flags
@@ -2814,7 +3062,11 @@ def main() -> None:
             controls = QHBoxLayout()
             self._safe_mode_chk = QCheckBox('Safe mode')
             self._safe_mode_chk.setChecked(bool(adv.get('safe_mode', True)))
-            self._safe_mode_chk.setToolTip('Skip noisy/DoS-flavored and state-changing techniques')
+            self._safe_mode_chk.setToolTip('Skip noisy and DoS-flavored techniques')
+            self._intrusive_chk = QCheckBox('Intrusive workflows')
+            self._intrusive_chk.setChecked(bool(adv.get('intrusive', False)))
+            self._intrusive_chk.setToolTip(
+                'Enable guessed state-changing workflows only when explicitly authorized')
             self._dry_run_chk = QCheckBox('Dry run')
             self._dry_run_chk.setChecked(bool(adv.get('dry_run', False)))
             self._dry_run_chk.setToolTip('Print the scan plan without sending requests')
@@ -2830,7 +3082,8 @@ def main() -> None:
             self._oob_combo.addItem('Self-hosted', 'selfhosted')
             self._oob_combo.setCurrentIndex({'off': 0, 'interactsh': 1,
                                              'selfhosted': 2}.get(adv.get('oob', 'off'), 0))
-            for w in (self._safe_mode_chk, self._dry_run_chk, self._reconfirm_chk,
+            for w in (self._safe_mode_chk, self._intrusive_chk, self._dry_run_chk,
+                      self._reconfirm_chk,
                       self._impersonate_chk, self._ai_triage_chk):
                 controls.addWidget(w)
             controls.addWidget(self._oob_combo)
@@ -2911,6 +3164,7 @@ def main() -> None:
             advanced = {
                 'categories': selected,
                 'safe_mode': bool(self._safe_mode_chk.isChecked()),
+                'intrusive': bool(self._intrusive_chk.isChecked()),
                 'dry_run': bool(self._dry_run_chk.isChecked()),
                 'no_reconfirm': not bool(self._reconfirm_chk.isChecked()),
                 'impersonate': 'chrome' if self._impersonate_chk.isChecked() else None,
@@ -3549,7 +3803,7 @@ def main() -> None:
                     self._db.create_scan(
                         scan_id=self._current_scan_id,
                         targets=targets,
-                        settings={'threads': threads, 'delay': delay, 'concurrent': concurrent_val, 'categories': selected_categories, 'waf_detected': waf_name, 'safe_mode': advanced_opts.get('safe_mode'), 'dry_run': advanced_opts.get('dry_run')},
+                        settings={'threads': threads, 'delay': delay, 'concurrent': concurrent_val, 'categories': selected_categories, 'waf_detected': waf_name, 'safe_mode': advanced_opts.get('safe_mode'), 'intrusive': advanced_opts.get('intrusive'), 'dry_run': advanced_opts.get('dry_run')},
                         engagement_id=advanced_opts.get('engagement_id')
                     )
                     # Add timeline event for scan start
@@ -3561,6 +3815,7 @@ def main() -> None:
                                     'categories': selected_categories,
                                     'engagement_id': advanced_opts.get('engagement_id'),
                                     'safe_mode': advanced_opts.get('safe_mode'),
+                                    'intrusive': advanced_opts.get('intrusive'),
                                     'dry_run': advanced_opts.get('dry_run')}
                     )
             except Exception:
@@ -3784,8 +4039,12 @@ def main() -> None:
                 reconfirm_chk.setChecked(not adv.get('no_reconfirm', False))
                 reconfirm_chk.setToolTip('Replay each bypass to demote false positives')
                 safe_chk = QCheckBox('Safe mode')
-                safe_chk.setChecked(bool(adv.get('safe_mode', False)))
-                safe_chk.setToolTip('Skip noisy/DoS-flavored and state-changing techniques')
+                safe_chk.setChecked(bool(adv.get('safe_mode', True)))
+                safe_chk.setToolTip('Skip noisy and DoS-flavored techniques')
+                intrusive_chk = QCheckBox('Intrusive workflows')
+                intrusive_chk.setChecked(bool(adv.get('intrusive', False)))
+                intrusive_chk.setToolTip(
+                    'Enable guessed state-changing workflows only when explicitly authorized')
                 impersonate_chk = QCheckBox('Impersonate browser')
                 impersonate_chk.setChecked(bool(adv.get('impersonate')))
                 impersonate_chk.setToolTip('Spoof a Chrome TLS (JA3/JA4) + HTTP/2 fingerprint (curl_cffi)')
@@ -3802,10 +4061,12 @@ def main() -> None:
                 _oob_idx = {'off': 0, 'interactsh': 1, 'selfhosted': 2}.get(adv.get('oob', 'off'), 0)
                 oob_combo.setCurrentIndex(_oob_idx)
                 oob_combo.setToolTip('Confirm blind SSRF/Log4Shell/XXE via out-of-band callbacks')
-                for w in (reconfirm_chk, safe_chk, impersonate_chk, ai_triage_chk):
+                for w in (reconfirm_chk, safe_chk, intrusive_chk,
+                          impersonate_chk, ai_triage_chk):
                     w.setCursor(QCursor(Qt.PointingHandCursor))
                 adv_layout.addWidget(reconfirm_chk)
                 adv_layout.addWidget(safe_chk)
+                adv_layout.addWidget(intrusive_chk)
                 adv_layout.addWidget(impersonate_chk)
                 adv_layout.addWidget(ai_triage_chk)
                 adv_layout.addStretch()
@@ -3841,6 +4102,7 @@ def main() -> None:
                     self._pending_advanced = {
                         'no_reconfirm': not reconfirm_chk.isChecked(),
                         'safe_mode': safe_chk.isChecked(),
+                        'intrusive': intrusive_chk.isChecked(),
                         'impersonate': 'chrome' if impersonate_chk.isChecked() else None,
                         'oob': oob_combo.currentData(),
                         'ai_triage': ai_triage_chk.isChecked(),
@@ -5227,9 +5489,10 @@ def main() -> None:
                 if not QSystemTrayIcon.isSystemTrayAvailable():
                     return
                 total = len(self._results)
-                bypasses = sum(1 for r in self._results if r.get('bypass'))
+                confirmed = sum(1 for r in self._results if _is_confirmed_result(r))
                 crit = sum(1 for r in self._results
-                           if str(r.get('severity', '')).upper() in ('CRITICAL', 'HIGH'))
+                           if _is_confirmed_result(r)
+                           and str(r.get('severity', '')).upper() in ('CRITICAL', 'HIGH'))
                 if getattr(self, '_tray', None) is None:
                     icon = self.windowIcon()
                     if icon.isNull():
@@ -5240,7 +5503,7 @@ def main() -> None:
                 self._tray.show()
                 self._tray.showMessage(
                     'Blackthorn — scan complete',
-                    f'{total} findings • {bypasses} confirmed bypasses • {crit} critical/high',
+                    f'{total} results • {confirmed} confirmed • {crit} critical/high',
                     QSystemTrayIcon.MessageIcon.Information, 6000)
             except Exception:
                 pass
@@ -5267,7 +5530,9 @@ def main() -> None:
                 if self._db and self._current_scan_id:
                     # Count results and bypasses
                     total_findings = len(self._results)
-                    total_bypasses = sum(1 for r in self._results if r.get('bypass'))
+                    total_bypasses = sum(
+                        1 for r in self._results if _is_confirmed_result(r)
+                    )
                     
                     # Complete scan record
                     self._db.finish_scan(
@@ -7605,7 +7870,7 @@ def main() -> None:
             risk_spin = QSpinBox(); risk_spin.setRange(1, 3); risk_spin.setValue(1); g.addWidget(risk_spin, 3, 3)
             g.addWidget(QLabel('Tamper:'), 4, 0)
             tamper_edit = QLineEdit()
-            tamper_edit.setPlaceholderText('WAF bypass scripts — e.g. space2comment,between,randomcase')
+            tamper_edit.setPlaceholderText('Request transformation scripts — e.g. space2comment, between, randomcase')
             g.addWidget(tamper_edit, 4, 1, 1, 3)
             v.addLayout(g)
 
@@ -8707,154 +8972,18 @@ def main() -> None:
                     QMessageBox.critical(self, _t('save_failed', self._lang), str(e))
 
         def _save_html_report(self, path: str):
-            """Generate and save an HTML report."""
-            from datetime import datetime
-            
-            # Import CVE/CWE references
-            try:
-                from .database import get_cve_cwe_reference
-            except ImportError:
-                def get_cve_cwe_reference(t): return None
-            
-            severity_colors = {
-                'CRITICAL': '#dc2626',
-                'HIGH': '#ea580c',
-                'MEDIUM': '#ca8a04',
-                'LOW': '#2563eb',
-                'INFO': '#6b7280'
-            }
-            
-            # Group by target
-            by_target = {}
-            for r in self._results:
-                target = r.get('target', 'Unknown')
-                if target not in by_target:
-                    by_target[target] = []
-                by_target[target].append(r)
-            
-            # Count severities
-            severity_counts = {'CRITICAL': 0, 'HIGH': 0, 'MEDIUM': 0, 'LOW': 0, 'INFO': 0}
-            for r in self._results:
-                sev = r.get('severity', 'INFO')
-                if sev in severity_counts:
-                    severity_counts[sev] += 1
-            
-            # Build HTML
-            html = f'''<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Blackthorn Web Security Report</title>
-    <style>
-        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f1112; color: #d7e1ea; line-height: 1.6; padding: 20px; }}
-        .container {{ max-width: 1200px; margin: 0 auto; }}
-        h1 {{ color: #58a6ff; margin-bottom: 10px; }}
-        h2 {{ color: #d7e1ea; margin: 20px 0 10px; border-bottom: 1px solid #2b2f33; padding-bottom: 5px; }}
-        h3 {{ color: #8b949e; margin: 15px 0 8px; }}
-        .summary {{ display: flex; gap: 15px; flex-wrap: wrap; margin: 20px 0; }}
-        .stat-card {{ background: #16181a; border: 1px solid #2b2f33; border-radius: 8px; padding: 15px 20px; min-width: 120px; }}
-        .stat-card .value {{ font-size: 28px; font-weight: bold; }}
-        .stat-card .label {{ color: #8b949e; font-size: 12px; }}
-        .severity-CRITICAL {{ color: #dc2626; }}
-        .severity-HIGH {{ color: #ea580c; }}
-        .severity-MEDIUM {{ color: #ca8a04; }}
-        .severity-LOW {{ color: #2563eb; }}
-        .severity-INFO {{ color: #6b7280; }}
-        .finding {{ background: #16181a; border: 1px solid #2b2f33; border-radius: 8px; margin: 10px 0; padding: 15px; }}
-        .finding-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }}
-        .finding-technique {{ font-weight: bold; font-size: 16px; }}
-        .severity-badge {{ padding: 4px 10px; border-radius: 4px; font-size: 12px; font-weight: bold; }}
-        .finding-details {{ display: grid; grid-template-columns: 120px 1fr; gap: 5px 15px; font-size: 14px; }}
-        .finding-details dt {{ color: #8b949e; }}
-        .finding-details dd {{ color: #d7e1ea; word-break: break-all; }}
-        .bypass-yes {{ color: #22c55e; }}
-        .bypass-no {{ color: #ef4444; }}
-        .reference-link {{ color: #58a6ff; text-decoration: none; }}
-        .reference-link:hover {{ text-decoration: underline; }}
-        .target-section {{ margin: 30px 0; }}
-        .generated {{ color: #6b7280; font-size: 12px; margin-top: 30px; text-align: center; }}
-        .cvss {{ background: #2b2f33; padding: 2px 8px; border-radius: 4px; font-size: 12px; }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>Blackthorn Web Security Report</h1>
-        <p style="color: #8b949e;">Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
-        
-        <h2>📊 Summary</h2>
-        <div class="summary">
-            <div class="stat-card">
-                <div class="value">{len(self._results)}</div>
-                <div class="label">Total Findings</div>
-            </div>
-            <div class="stat-card">
-                <div class="value">{len(by_target)}</div>
-                <div class="label">Targets Scanned</div>
-            </div>
-            <div class="stat-card">
-                <div class="value">{len([r for r in self._results if r.get('bypass')])}</div>
-                <div class="label">Bypasses Found</div>
-            </div>
-            <div class="stat-card">
-                <div class="value severity-CRITICAL">{severity_counts['CRITICAL']}</div>
-                <div class="label">Critical</div>
-            </div>
-            <div class="stat-card">
-                <div class="value severity-HIGH">{severity_counts['HIGH']}</div>
-                <div class="label">High</div>
-            </div>
-            <div class="stat-card">
-                <div class="value severity-MEDIUM">{severity_counts['MEDIUM']}</div>
-                <div class="label">Medium</div>
-            </div>
-        </div>
-'''
-            
-            # Add findings by target
-            html += '        <h2>🎯 Findings by Target</h2>\n'
-            
-            for target, findings in by_target.items():
-                html += f'''        <div class="target-section">
-            <h3>{target} ({len(findings)} findings)</h3>
-'''
-                for r in sorted(findings, key=lambda x: ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO'].index(x.get('severity', 'INFO'))):
-                    technique = r.get('technique', 'Unknown')
-                    severity = r.get('severity', 'INFO')
-                    category = r.get('category', 'Other')
-                    reason = r.get('reason', '')
-                    bypass = r.get('bypass', False)
-                    
-                    # Get CVE/CWE reference
-                    ref = get_cve_cwe_reference(technique)
-                    
-                    html += f'''            <div class="finding">
-                <div class="finding-header">
-                    <span class="finding-technique">{technique}</span>
-                    <span class="severity-badge" style="background: {severity_colors.get(severity, '#6b7280')}; color: white;">{severity}</span>
-                </div>
-                <dl class="finding-details">
-                    <dt>Category:</dt><dd>{category}</dd>
-                    <dt>Bypass:</dt><dd class="{'bypass-yes' if bypass else 'bypass-no'}">{'✅ Yes' if bypass else '❌ No'}</dd>
-                    <dt>Reason:</dt><dd>{reason}</dd>
-'''
-                    if ref:
-                        html += f'''                    <dt>CVE/CWE:</dt><dd><a href="{ref.get('cwe_url', '#')}" class="reference-link" target="_blank">{ref.get('cwe_id', 'N/A')}</a> - {ref.get('cwe_name', '')}</dd>
-                    <dt>CVSS:</dt><dd><span class="cvss">{ref.get('cvss_base', 'N/A')}</span></dd>
-'''
-                    html += '''                </dl>
-            </div>
-'''
-                html += '        </div>\n'
-            
-            html += '''        <p class="generated">Report generated by Blackthorn — threat hunting and bug bounty web security toolkit</p>
-    </div>
-</body>
-</html>'''
-            
-            with open(path, 'w', encoding='utf-8') as f:
-                f.write(html)
+            """Save through the shared, escaped, evidence-aware HTML exporter."""
+            from .exporters import export as export_results
+
+            targets = sorted({
+                str(result.get('target')) for result in self._results
+                if isinstance(result, dict) and result.get('target')
+            })
+            report_target = targets[0] if len(targets) == 1 else (
+                f'{len(targets)} targets' if targets else 'Blackthorn workspace'
+            )
+            export_results(self._results, report_target, 'html', path, redact=True)
+
 
         def _build_results_page(self):
             """Results explorer as an in-place page (rebuilt fresh per visit)."""
@@ -8971,8 +9100,12 @@ def main() -> None:
             # Statistics summary at bottom of left panel
             stats_label = QLabel()
             total = len(self._results)
-            bypasses = len([r for r in self._results if r.get('bypass', False)])
-            stats_label.setText(f'{_t("total", self._lang)}: {total} | {_t("bypasses", self._lang)}: {bypasses}')
+            confirmed = sum(1 for r in self._results if _is_confirmed_result(r))
+            candidates = sum(1 for r in self._results if _is_candidate_result(r))
+            stats_label.setText(
+                f'{_t("total", self._lang)}: {total} | '
+                f'{_t("bypasses", self._lang)}: {confirmed} | Candidates: {candidates}'
+            )
             stats_label.setStyleSheet('color: #808080; padding: 5px;')
             left_panel.addWidget(stats_label)
             
@@ -9116,10 +9249,10 @@ def main() -> None:
                     results = [r for r in results if r.get('severity') == 'LOW']
                 elif filter_idx == 5:  # INFO only
                     results = [r for r in results if r.get('severity') == 'INFO']
-                elif filter_idx == 6:  # Bypasses only
-                    results = [r for r in results if r.get('bypass', False)]
-                elif filter_idx == 7:  # Non-bypasses only
-                    results = [r for r in results if not r.get('bypass', False)]
+                elif filter_idx == 6:  # Confirmed only
+                    results = [r for r in results if _is_confirmed_result(r)]
+                elif filter_idx == 7:  # Candidates / observations
+                    results = [r for r in results if not _is_confirmed_result(r)]
                 
                 # Apply sort
                 if sort_idx == 0:  # Severity High to Low
@@ -9133,7 +9266,12 @@ def main() -> None:
                 elif sort_idx == 4:  # Category
                     results.sort(key=lambda x: x.get('category', 'Other'))
                 elif sort_idx == 5:  # Bypass Status
-                    results.sort(key=lambda x: (0 if x.get('bypass', False) else 1, severity_order.index(x.get('severity', 'INFO')) if x.get('severity', 'INFO') in severity_order else 99))
+                    state_order = {'confirmed': 0, 'candidate': 1, 'observation': 2}
+                    results.sort(key=lambda x: (
+                        state_order.get(_result_state(x), 3),
+                        severity_order.index(x.get('severity', 'INFO'))
+                        if x.get('severity', 'INFO') in severity_order else 99,
+                    ))
                 
                 return results
             
@@ -9142,8 +9280,8 @@ def main() -> None:
                 accordion (expand-on-click) and the bottom Details panel so both
                 render identically. Additive: reuses the same data the panel used."""
                 import html as _html
-                bypass_status = '✅ BYPASS SUCCESSFUL' if r.get('bypass', False) else '❌ No bypass'
-                sev = r.get('severity', 'INFO')
+                bypass_status = _finding_status_label(r)
+                sev = str(r.get('severity') or 'INFO').upper()
                 technique = r.get('technique', 'Unknown')
                 exploit_desc = _get_exploit_description(technique)
 
@@ -9154,7 +9292,7 @@ def main() -> None:
                     ref = get_cve_cwe_reference(technique)
                     if ref:
                         cve_id = r.get('cve_id') or ref.get('cve', 'N/A')
-                        cwe_id = r.get('cwe_id') or ref.get('cwe', 'N/A')
+                        cwe_id = r.get('cwe_id') or r.get('cwe') or ref.get('cwe', 'N/A')
                         cvss_score = r.get('cvss_score') or ref.get('cvss', 0.0)
                         ref_desc = ref.get('description', '')
                         ref_url = r.get('reference_url') or ref.get('reference', '')
@@ -9171,48 +9309,36 @@ def main() -> None:
                             cvss_color, cvss_label = '#ffd700', 'MEDIUM'
                         else:
                             cvss_color, cvss_label = '#90ee90', 'LOW'
-                        cwe_num = str(cwe_id).replace('CWE-', '')
+                        cwe_num = ''.join(ch for ch in str(cwe_id) if ch.isdigit())
+                        cve_text = _html.escape(str(cve_id))
+                        cwe_text = _html.escape(str(cwe_id))
+                        cve_query = _html.escape(str(cve_id), quote=True)
+                        cwe_url = (f'https://cwe.mitre.org/data/definitions/{cwe_num}.html'
+                                   if cwe_num else 'https://cwe.mitre.org/')
                         cve_cwe_html = f"""
                         <hr style='border: 1px solid #2b2f33; margin: 8px 0;'>
                         <b>\U0001F510 {_t('cve_cwe_references', self._lang)}:</b><br>
                         <table style='margin-top: 5px; color: #d7e1ea;'>
-                            <tr><td><b>CVE:</b></td><td style='padding-left: 10px;'><a href='https://cve.mitre.org/cgi-bin/cvename.cgi?name={cve_id}' style='color: #66b3ff;'>{cve_id}</a></td></tr>
-                            <tr><td><b>CWE:</b></td><td style='padding-left: 10px;'><a href='https://cwe.mitre.org/data/definitions/{cwe_num}.html' style='color: #66b3ff;'>{cwe_id}</a></td></tr>
-                            <tr><td><b>CVSS:</b></td><td style='padding-left: 10px;'><span style='color: {cvss_color}; font-weight: bold;'>{cvss_score} ({cvss_label})</span></td></tr>
+                            <tr><td><b>CVE:</b></td><td style='padding-left: 10px;'><a href='https://cve.mitre.org/cgi-bin/cvename.cgi?name={cve_query}' style='color: #66b3ff;'>{cve_text}</a></td></tr>
+                            <tr><td><b>CWE:</b></td><td style='padding-left: 10px;'><a href='{cwe_url}' style='color: #66b3ff;'>{cwe_text}</a></td></tr>
+                            <tr><td><b>CVSS:</b></td><td style='padding-left: 10px;'><span style='color: {cvss_color}; font-weight: bold;'>{_html.escape(str(cvss_score))} ({cvss_label})</span></td></tr>
                         </table>
                         """
                         if r.get('cvss_vector'):
                             cve_cwe_html += f"<p style='color:#a0aab5; font-size:11px;'><b>Vector:</b> <code>{_html.escape(str(r.get('cvss_vector')))}</code></p>"
                         if ref_desc:
-                            cve_cwe_html += f"<p style='color: #a0aab5; font-size: 11px; margin-top: 5px;'>{ref_desc}</p>"
-                        if ref_url:
-                            cve_cwe_html += f"<p><a href='{ref_url}' style='color: #66b3ff; font-size: 11px;'>\U0001F4DA {_t('reference_link', self._lang)}</a></p>"
+                            cve_cwe_html += f"<p style='color: #a0aab5; font-size: 11px; margin-top: 5px;'>{_html.escape(str(ref_desc))}</p>"
+                        if ref_url and str(ref_url).lower().startswith(('https://', 'http://')):
+                            safe_ref = _html.escape(str(ref_url), quote=True)
+                            cve_cwe_html += f"<p><a href='{safe_ref}' style='color: #66b3ff; font-size: 11px;'>\U0001F4DA {_t('reference_link', self._lang)}</a></p>"
                         if common_cves:
-                            common_cves_links = ', '.join([f"<a href='https://cve.mitre.org/cgi-bin/cvename.cgi?name={cve}' style='color: #66b3ff;'>{cve}</a>" for cve in common_cves[:3]])
+                            common_cves_links = ', '.join(
+                                f"<a href='https://cve.mitre.org/cgi-bin/cvename.cgi?name={_html.escape(str(cve), quote=True)}' style='color: #66b3ff;'>{_html.escape(str(cve))}</a>"
+                                for cve in common_cves[:3]
+                            )
                             cve_cwe_html += f"<p style='font-size: 11px;'><b>{_t('related_cves', self._lang)}:</b> {common_cves_links}</p>"
                 except Exception:
                     pass
-
-                # Request summary (method / url / status / size / payload) when present
-                req_bits = []
-                if r.get('method'):
-                    req_bits.append(f"<b>Method:</b> {_html.escape(str(r.get('method')))}")
-                _url = r.get('url') or r.get('path')
-                if _url:
-                    req_bits.append(f"<b>URL:</b> {_html.escape(str(_url))}")
-                _status = r.get('status') if r.get('status') is not None else r.get('response_code')
-                if _status is not None:
-                    req_bits.append(f"<b>Status:</b> {_html.escape(str(_status))}")
-                if r.get('size') is not None:
-                    req_bits.append(f"<b>Size:</b> {_html.escape(str(r.get('size')))}")
-                req_html = ''
-                if req_bits:
-                    req_html = ("<hr style='border:1px solid #2b2f33; margin:8px 0;'>"
-                                "<b>\U0001F310 Request</b><br><span style='color:#a0aab5; font-size:11px;'>"
-                                + ' &nbsp;|&nbsp; '.join(req_bits) + "</span>")
-                if r.get('payload'):
-                    req_html += (f"<p style='font-size:11px; margin-top:4px;'><b>Payload:</b> "
-                                 f"<code style='color:#e0b0ff;'>{_html.escape(str(r.get('payload'))[:400])}</code></p>")
 
                 # Repro curl (attached by the engine for most findings via repro.build_curl)
                 curl_html = ''
@@ -9223,20 +9349,21 @@ def main() -> None:
                                  "<pre style='background:#0b0d0e; color:#9ee6a0; border:1px solid #2b2f33; "
                                  "border-radius:4px; padding:8px; white-space:pre-wrap; word-break:break-all; "
                                  f"font-family:Consolas,monospace; font-size:11px;'>{_html.escape(str(curl_cmd))}</pre>")
+                proof_html = _finding_proof_html(r)
 
                 return f"""
                 <div style='color: #d7e1ea; font-size: 12px;'>
                     <b>{_t('technique', self._lang)}:</b> {_html.escape(str(technique))}<br>
-                    <b>{_t('severity', self._lang)}:</b> <span style='color: {severity_colors.get(sev, "#808080")};'>{severity_icons.get(sev, '')} {sev}</span><br>
-                    <b>{_t('status', self._lang)}:</b> {bypass_status}<br>
+                    <b>{_t('severity', self._lang)}:</b> <span style='color: {severity_colors.get(sev, "#808080")};'>{severity_icons.get(sev, '')} {_html.escape(sev)}</span><br>
+                    <b>{_t('status', self._lang)}:</b> {_html.escape(bypass_status)}<br>
                     <b>{_t('category', self._lang)}:</b> {_html.escape(str(r.get('category', 'Other')))}<br>
                     <b>{_t('target', self._lang)}:</b> {_html.escape(str(r.get('target', 'N/A')))}<br>
                     <b>{_t('reason', self._lang)}:</b> {_html.escape(str(r.get('reason', 'N/A')))}<br>
                     <hr style='border: 1px solid #2b2f33; margin: 8px 0;'>
                     <b>\U0001F4D6 {_t('description', self._lang)}:</b><br>
-                    <span style='color: #a0aab5; font-style: italic;'>{exploit_desc}</span>
+                    <span style='color: #a0aab5; font-style: italic;'>{_html.escape(str(exploit_desc))}</span>
                     {cve_cwe_html}
-                    {req_html}
+                    {proof_html}
                     {curl_html}
                 </div>
                 """
@@ -9276,11 +9403,13 @@ def main() -> None:
                         sev = r.get('severity', 'INFO')
                         category = r.get('category', 'Other')
                         reason = r.get('reason', '')
-                        bypass = r.get('bypass', False)
-                        
-                        # Add bypass indicator to technique
-                        if bypass:
+                        state = _result_state(r)
+
+                        # Keep candidates visually distinct from confirmed findings.
+                        if state == 'confirmed':
                             technique = f'\u2705 {technique}'
+                        elif state == 'candidate':
+                            technique = f'⚠️ {technique}'
                         
                         child = QTreeWidgetItem([technique, f'{severity_icons.get(sev, "")} {sev}', category, reason])
                         try:
@@ -9318,75 +9447,9 @@ def main() -> None:
                     details_text.clear()
                     return
 
-                # Build details HTML with exploit description
-                bypass_status = '\u2705 BYPASS SUCCESSFUL' if r.get('bypass', False) else '\u274C No bypass'
-                sev = r.get('severity', 'INFO')
-                technique = r.get('technique', 'Unknown')
-                
-                # Get detailed exploit description
-                exploit_desc = _get_exploit_description(technique)
-                
-                # Get CVE/CWE references
-                cve_cwe_html = ''
-                try:
-                    from .database import get_cve_cwe_reference
-                    ref = get_cve_cwe_reference(technique)
-                    if ref:
-                        cve_id = ref.get('cve', 'N/A')
-                        cwe_id = ref.get('cwe', 'N/A')
-                        cvss_score = ref.get('cvss', 0.0)
-                        ref_desc = ref.get('description', '')
-                        ref_url = ref.get('reference', '')
-                        common_cves = ref.get('common_cves', [])
-                        
-                        # CVSS color coding
-                        if cvss_score >= 9.0:
-                            cvss_color = '#ff3333'
-                            cvss_label = 'CRITICAL'
-                        elif cvss_score >= 7.0:
-                            cvss_color = '#ff8c00'
-                            cvss_label = 'HIGH'
-                        elif cvss_score >= 4.0:
-                            cvss_color = '#ffd700'
-                            cvss_label = 'MEDIUM'
-                        else:
-                            cvss_color = '#90ee90'
-                            cvss_label = 'LOW'
-                        
-                        cve_cwe_html = f"""
-                        <hr style='border: 1px solid #2b2f33; margin: 8px 0;'>
-                        <b>🔐 {_t('cve_cwe_references', self._lang)}:</b><br>
-                        <table style='margin-top: 5px; color: #d7e1ea;'>
-                            <tr><td><b>CVE:</b></td><td style='padding-left: 10px;'><a href='https://cve.mitre.org/cgi-bin/cvename.cgi?name={cve_id}' style='color: #66b3ff;'>{cve_id}</a></td></tr>
-                            <tr><td><b>CWE:</b></td><td style='padding-left: 10px;'><a href='https://cwe.mitre.org/data/definitions/{cwe_id.replace("CWE-", "")}.html' style='color: #66b3ff;'>{cwe_id}</a></td></tr>
-                            <tr><td><b>CVSS:</b></td><td style='padding-left: 10px;'><span style='color: {cvss_color}; font-weight: bold;'>{cvss_score} ({cvss_label})</span></td></tr>
-                        </table>
-                        """
-                        if ref_desc:
-                            cve_cwe_html += f"<p style='color: #a0aab5; font-size: 11px; margin-top: 5px;'>{ref_desc}</p>"
-                        if ref_url:
-                            cve_cwe_html += f"<p><a href='{ref_url}' style='color: #66b3ff; font-size: 11px;'>📚 {_t('reference_link', self._lang)}</a></p>"
-                        if common_cves:
-                            common_cves_links = ', '.join([f"<a href='https://cve.mitre.org/cgi-bin/cvename.cgi?name={cve}' style='color: #66b3ff;'>{cve}</a>" for cve in common_cves[:3]])
-                            cve_cwe_html += f"<p style='font-size: 11px;'><b>{_t('related_cves', self._lang)}:</b> {common_cves_links}</p>"
-                except Exception:
-                    pass
-                
-                details_html = f"""
-                <div style='color: #d7e1ea; font-size: 12px;'>
-                    <b>{_t('technique', self._lang)}:</b> {technique}<br>
-                    <b>{_t('severity', self._lang)}:</b> <span style='color: {severity_colors.get(sev, "#808080")};'>{severity_icons.get(sev, '')} {sev}</span><br>
-                    <b>{_t('status', self._lang)}:</b> {bypass_status}<br>
-                    <b>{_t('category', self._lang)}:</b> {r.get('category', 'Other')}<br>
-                    <b>{_t('target', self._lang)}:</b> {r.get('target', 'N/A')}<br>
-                    <b>{_t('reason', self._lang)}:</b> {r.get('reason', 'N/A')}<br>
-                    <hr style='border: 1px solid #2b2f33; margin: 8px 0;'>
-                    <b>📖 {_t('description', self._lang)}:</b><br>
-                    <span style='color: #a0aab5; font-style: italic;'>{exploit_desc}</span>
-                    {cve_cwe_html}
-                </div>
-                """
-                details_text.setHtml(details_html)
+                # The bottom panel and inline accordion intentionally share one
+                # renderer, so verification/evidence cannot silently diverge.
+                details_text.setHtml(build_finding_detail_html(r))
             
             def on_finding_expanded(item):
                 """Lazily render a finding's inline detail the first time it is
@@ -9523,8 +9586,10 @@ def main() -> None:
                 sev = str(r.get('severity', 'INFO')).upper()
                 if flt == 'All':
                     return True
-                if flt == 'Bypasses only':
-                    return bool(r.get('bypass'))
+                if flt == 'Confirmed only':
+                    return _is_confirmed_result(r)
+                if flt == 'Candidates only':
+                    return _is_candidate_result(r)
                 return sev == flt
 
             rows = list(self._results)
@@ -9534,8 +9599,11 @@ def main() -> None:
             for r in shown:
                 sev = str(r.get('severity', 'INFO')).upper()
                 tech = r.get('technique', '')
-                if r.get('bypass'):
+                state = _result_state(r)
+                if state == 'confirmed':
                     tech = '✅ ' + str(tech)
+                elif state == 'candidate':
+                    tech = '⚠️ ' + str(tech)
                 item = QTreeWidgetItem([f"{self._LIVE_ICONS.get(sev, '')} {sev}", str(tech),
                                         str(r.get('category', '')), str(r.get('reason', ''))])
                 try:
@@ -9545,9 +9613,11 @@ def main() -> None:
                 item.setData(0, 257, r)  # for the context menu / send-to-repeater
                 tree.addTopLevelItem(item)
             if getattr(self, '_live_count_lbl', None):
-                byp = sum(1 for r in rows if r.get('bypass'))
+                confirmed = sum(1 for r in rows if _is_confirmed_result(r))
+                candidates = sum(1 for r in rows if _is_candidate_result(r))
                 self._live_count_lbl.setText(
-                    f"{len(rows)} findings  •  {byp} bypasses  •  showing {len(shown)}")
+                    f"{len(rows)} results  •  {confirmed} confirmed  •  "
+                    f"{candidates} candidates  •  showing {len(shown)}")
 
         def _build_live_page(self):
             """Live, color-coded, filterable findings as an in-place page. The page
@@ -9579,7 +9649,7 @@ def main() -> None:
             top.addWidget(QLabel('Filter:'))
             self._live_filter = QComboBox()
             self._live_filter.addItems(['All', 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO',
-                                        'Bypasses only'])
+                                        'Confirmed only', 'Candidates only'])
             self._live_filter.currentIndexChanged.connect(lambda *_: self._live_refresh())
             top.addWidget(self._live_filter)
             v.addLayout(top)
@@ -11478,7 +11548,7 @@ def main() -> None:
 Example Blackthorn Plugin Template
 ---------------------------------
 
-This file shows how to create your own custom WAF bypass plugin.
+This file shows how to create your own custom Blackthorn scan plugin.
 
 To create your own plugin, you mainly need to change:
 
@@ -12190,7 +12260,7 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                 form_layout.addWidget(QLabel('Type:'), 3, 0)
                 jobtype_combo = QtWidgets.QComboBox()
                 jobtype_combo.addItems(['Scan', 'Recon'])
-                jobtype_combo.setToolTip('Scan = WAF bypass scan. Recon = subfinder/amass/dnsx/httpx/nmap.')
+                jobtype_combo.setToolTip('Scan = web security scan. Recon = subfinder/amass/dnsx/httpx/nmap.')
                 form_layout.addWidget(jobtype_combo, 3, 1)
 
                 layout.addWidget(form_group)
