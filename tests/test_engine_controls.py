@@ -1,8 +1,11 @@
 """Tests for v1.6 engine controls: CVSS, scope, safe-mode, jitter, proxy pool."""
+import json
 import time
 
+import pytest
 import requests
 
+import wafpierce.pierce as pierce
 from wafpierce.cvss import score, annotate, cwe_for
 from wafpierce.pierce import CloudFrontBypasser
 
@@ -90,6 +93,93 @@ def test_passive_lookup_uses_sterile_session_without_active_authorization(mock_w
         'https://passive.invalid/query', passive_lookup=True
     )
     assert response is not None and response.status_code == 200
+
+
+# -- result finalization -------------------------------------------------- #
+def test_plugin_live_response_is_normalized_before_reporting(mock_waf):
+    class Plugin:
+        name = 'Legacy response plugin'
+
+    response = requests.Response()
+    response.status_code = 200
+    response.url = f'{mock_waf}/probe?q=test'
+    response.headers['Content-Type'] = 'text/plain'
+    response._content = b'plugin evidence'
+
+    scanner = CloudFrontBypasser(mock_waf, threads=2, delay=0, timeout=3)
+    results = scanner._normalize_plugin_results(Plugin(), {
+        'success': True,
+        'bypass': True,
+        'response': response,
+        'technique': 'Legacy plugin result',
+    })
+
+    assert len(results) == 1
+    assert results[0]['response']['status'] == 200
+    assert results[0]['response']['excerpt'] == 'plugin evidence'
+    assert results[0]['path'] == '/probe?q=test'
+    json.dumps(results)  # regression: a live Response previously stopped GUI at 98%
+
+
+def test_category_limited_scan_runs_only_matching_plugins(mock_waf):
+    calls = []
+
+    class Plugin:
+        enabled = True
+
+        def __init__(self, name, category):
+            self.name = name
+            self.category = category
+
+        def execute(self, *_args, **_kwargs):
+            calls.append(self.name)
+            return {'success': False, 'bypass': False, 'response': None}
+
+    scanner = CloudFrontBypasser(
+        mock_waf, threads=2, delay=0, timeout=3,
+        plugins=[Plugin('Injection plugin', 'injection'),
+                 Plugin('Encoding plugin', 'encoding')],
+    )
+    scanner._run_plugins(['injection_testing'])
+
+    assert calls == ['Injection plugin']
+
+
+def test_atomic_result_writer_sanitizes_unknown_plugin_values(tmp_path):
+    response = requests.Response()
+    response.status_code = 201
+    response.headers['Content-Type'] = 'text/plain'
+    response._content = b'created'
+    destination = tmp_path / 'results.json'
+
+    pierce._write_json_atomic(str(destination), [{
+        'response': response,
+        'callback': lambda: None,
+    }])
+
+    saved = json.loads(destination.read_text(encoding='utf-8'))
+    assert saved[0]['response']['status'] == 201
+    assert saved[0]['callback'] == '[unsupported function omitted]'
+    assert not list(tmp_path.glob('results.json.writing-*'))
+
+
+def test_atomic_result_writer_does_not_expose_partial_json(
+        tmp_path, monkeypatch):
+    destination = tmp_path / 'results.json'
+    destination.write_text('[{"previous": true}]', encoding='utf-8')
+
+    def fail_after_prefix(_data, handle, **_kwargs):
+        handle.write('[{"partial":')
+        raise TypeError('unserializable plugin value')
+
+    monkeypatch.setattr(pierce.json, 'dump', fail_after_prefix)
+    with pytest.raises(TypeError, match='unserializable'):
+        pierce._write_json_atomic(str(destination), [{'new': True}])
+
+    assert json.loads(destination.read_text(encoding='utf-8')) == [
+        {'previous': True}
+    ]
+    assert not list(tmp_path.glob('results.json.writing-*'))
 
 
 # -- safe mode ------------------------------------------------------------ #

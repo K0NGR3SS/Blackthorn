@@ -521,6 +521,7 @@ If Blackthorn helps identify a vulnerability:
 
 - [Nazariy Buryak](https://github.com/K0NGR3SS)
 - [Marwan Fayad](https://github.com/Marwan-verse)
+- [Mykhailo Kholiev](https://github.com/classified-mick)
 
 ## License and legal notice
 

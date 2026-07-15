@@ -89,7 +89,7 @@ class BypassPlugin(ABC):
             Dict with keys:
                 - success: bool
                 - bypass: bool (did it bypass the WAF?)
-                - response: response object or None
+                - response: JSON-safe response record (use ``response_record``)
                 - technique: str (name of technique used)
                 - reason: str (why this is considered a bypass/success)
                 - severity: str (CRITICAL, HIGH, MEDIUM, LOW, INFO)
@@ -147,6 +147,20 @@ class BypassPlugin(ABC):
                          headers=headers, **kwargs)
         else:
             return s.request(method, target, headers=headers, **kwargs)
+
+    @staticmethod
+    def response_record(response: Any) -> Dict[str, Any]:
+        """Convert a live HTTP response into report-safe plugin evidence."""
+        if response is None:
+            return {
+                'status': 0, 'size': 0, 'content_type': '',
+                'headers': {}, 'excerpt': '',
+            }
+        try:
+            from .evidence import snapshot_response, public_response
+        except ImportError:  # plugin module loaded through a legacy import path
+            from wafpierce.evidence import snapshot_response, public_response
+        return public_response(snapshot_response(response, lambda text: text))
     
     def is_blocked(self, response: Any) -> bool:
         """Check if the response indicates WAF blocking."""
@@ -278,7 +292,8 @@ class UnicodeBypassPlugin(BypassPlugin):
             return {
                 'success': True,
                 'bypass': bypassed,
-                'response': resp,
+                'response': self.response_record(resp),
+                'status': resp.status_code,
                 'technique': self.name,
                 'reason': 'Unicode fullwidth characters bypassed filter' if bypassed else 'Blocked',
                 'severity': 'HIGH' if bypassed else 'INFO',
