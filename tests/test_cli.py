@@ -15,8 +15,8 @@ from wafpierce.exporters import to_sarif
 def test_version_is_single_sourced():
     # User-Agent and SARIF tool version both derive from __init__.__version__.
     assert wafpierce.__version__ in constants.DEFAULT_USER_AGENT
-    assert 'DrWAFPierce' not in constants.DEFAULT_USER_AGENT
-    assert 'K0NGR3SS/WAFPierce' in constants.DEFAULT_USER_AGENT
+    assert constants.DEFAULT_USER_AGENT.startswith('Blackthorn/')
+    assert 'authorized web security research' in constants.DEFAULT_USER_AGENT
 
     doc = json.loads(to_sarif('https://example.com', []))
     assert doc['runs'][0]['tool']['driver']['version'] == wafpierce.__version__
@@ -60,7 +60,7 @@ def test_cli_version_subcommand(capsys):
 
 def test_cli_no_args_shows_usage(capsys):
     assert cli.main([]) == 0
-    assert 'usage: wafpierce' in capsys.readouterr().out
+    assert 'usage: blackthorn' in capsys.readouterr().out
 
 
 def test_cli_doctor(capsys):

@@ -218,7 +218,7 @@ def push_findings(cfg: MsfConfig, results: List[Dict[str, Any]],
             summary['notes'] += 1
         if note['severity'] in ('CRITICAL', 'HIGH'):
             if _call('db.report_vuln', {
-                    'host': host_addr, 'name': f"WAFPierce: {note['technique']}",
+                    'host': host_addr, 'name': f"Blackthorn: {note['technique']}",
                     'info': note['reason'][:500]}):
                 summary['vulns'] += 1
 
@@ -287,7 +287,7 @@ def run_aux_scanners(cfg: MsfConfig, target: str,
 
 
 # --------------------------------------------------------------------------- #
-# CLI entry point  (`wafpierce msf ...`)
+# CLI entry point  (`blackthorn msf ...`)
 # --------------------------------------------------------------------------- #
 def _add_conn_flags(p) -> None:
     p.add_argument('--msf-host', default=None, help='msfrpcd host (default 127.0.0.1)')
@@ -311,7 +311,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     import json
 
     p = argparse.ArgumentParser(
-        prog='wafpierce msf',
+        prog='blackthorn msf',
         description='Metasploit RPC integration (handoff + aux scanners).')
     sub = p.add_subparsers(dest='action', required=True)
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Entry point for WAFPierce GUI application.
+Entry point for the Blackthorn desktop application.
 This file is used by PyInstaller to create the executable.
 """
 import sys
@@ -48,7 +48,7 @@ if bundle_dir not in sys.path:
     sys.path.insert(0, bundle_dir)
 
 def main():
-    """Launch the WAFPierce GUI."""
+    """Launch the Blackthorn GUI."""
     try:
         from wafpierce.gui import main as gui_main
         gui_main()

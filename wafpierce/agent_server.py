@@ -199,7 +199,7 @@ class AgentAPI:
 
     def _fallback_report(self, target: str, findings: Iterable[Dict[str, Any]]) -> str:
         rows = list(findings)
-        lines = [f'# WAFPierce Report: {target}', '',
+        lines = [f'# Blackthorn Report: {target}', '',
                  '## Summary',
                  f'- Findings reviewed: {len(rows)}',
                  '- AI provider was not available; this is a structured local draft.',
@@ -231,7 +231,7 @@ def serve_stdio(api: Optional[AgentAPI] = None, stdin=None, stdout=None) -> int:
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(prog='wafpierce agent-server',
+    parser = argparse.ArgumentParser(prog='blackthorn agent-server',
                                      description='Local JSON-lines agent bridge')
     parser.add_argument('--stdio', action='store_true',
                         help='Serve JSON-lines requests over stdin/stdout')

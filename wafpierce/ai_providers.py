@@ -1,4 +1,4 @@
-"""Provider-neutral AI helpers for WAFPierce.
+"""Provider-neutral AI helpers for Blackthorn.
 
 Supported providers:
   * anthropic            Existing Claude integration via ``anthropic`` package.
@@ -123,7 +123,7 @@ def triage_results(provider: str, target: str, results: List[Dict],
     } for idx, r in enumerate(candidates)]
     prompt = (
         "You are helping with an authorized bug bounty workflow. Review these "
-        f"automated WAFPierce findings for {target}. Return ONLY a JSON array, "
+        f"automated Blackthorn findings for {target}. Return ONLY a JSON array, "
         "one object per finding, with keys: i, false_positive, confidence, "
         "adjusted_severity (CRITICAL/HIGH/MEDIUM/LOW/INFO), rationale. "
         "Be conservative and avoid overstating automated evidence.\n\n"

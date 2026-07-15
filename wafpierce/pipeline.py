@@ -34,7 +34,7 @@ SCHEMA_VERSION = 1
 
 # Supported stage types and the config keys they understand.
 STAGE_TYPES = {
-    'wafpierce_scan': 'WAFPierce scan',     # config: {categories: [..], threads, delay, safe_mode}
+    'wafpierce_scan': 'Blackthorn scan',    # config: {categories: [..], threads, delay, safe_mode}
     'external_tool': 'External tool',        # config: {tool: <key>, extra_args, wordlist}
     'report': 'Report / export',             # config: {format: html|json|sarif|nuclei|pdf, path}
 }

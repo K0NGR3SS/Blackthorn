@@ -1,4 +1,4 @@
-# WAFPierce Plugin SDK
+# Blackthorn Plugin SDK
 
 Plugins let you add custom bypass/detection logic without touching the core
 engine. They run as a scan phase and their findings are merged into the report

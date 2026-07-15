@@ -1,22 +1,25 @@
-"""Unified WAFPierce command-line entry point.
+"""Unified Blackthorn command-line entry point.
 
-Historically the installed ``wafpierce`` console script pointed at the minimal
-:func:`wafpierce.chain.main`, so none of the documented scanner flags
+The primary installed command is ``blackthorn``. A legacy console-script alias
+continues to route here so existing automation remains functional.
+
+Historically the console script pointed at the minimal :func:`wafpierce.chain.main`,
+so none of the documented scanner flags
 (``--oob``, ``--impersonate``, ``--resume``, ``--import-har`` …) were reachable
 from the entry point users actually install. This dispatcher fixes that by
 exposing subcommands:
 
-    wafpierce scan   <url> [rich scanner flags]   # full technique scanner
-    wafpierce recon  <domain> [...]               # external-tool reconnaissance
-    wafpierce chain  <url> [...]                  # bypass->enum->scan->recon chain
-    wafpierce msf    <check|scan|push> [...]      # Metasploit RPC integration
-    wafpierce caido  <check|push|export> [...]    # Caido proxy integration
-    wafpierce doctor                              # environment preflight
-    wafpierce agent-server --stdio                # local agent bridge
-    wafpierce gui                                 # launch the desktop GUI
-    wafpierce --version | -V
+    blackthorn scan   <url> [rich scanner flags]   # web security investigation
+    blackthorn recon  <domain> [...]               # external-tool reconnaissance
+    blackthorn chain  <url> [...]                  # discovery->test->recon->report
+    blackthorn msf    <check|scan|push> [...]      # Metasploit RPC integration
+    blackthorn caido  <check|push|export> [...]    # Caido proxy integration
+    blackthorn doctor                              # environment preflight
+    blackthorn agent-server --stdio                # local agent bridge
+    blackthorn gui                                 # launch the desktop GUI
+    blackthorn --version | -V
 
-A bare ``wafpierce <url>`` (no recognized subcommand) defaults to ``scan`` so the
+A bare ``blackthorn <url>`` (no recognized subcommand) defaults to ``scan`` so the
 documented flags Just Work.
 """
 from __future__ import annotations
@@ -25,15 +28,16 @@ import sys
 from typing import List, Optional
 
 from . import __version__
+from .branding import CLI_NAME, PRODUCT_NAME, TAGLINE
 
 _SUBCOMMANDS = {'scan', 'recon', 'chain', 'msf', 'caido', 'agent-server',
                 'doctor', 'gui', 'version', 'help'}
 
 
 def _print_usage() -> None:
-    print(f"""WAFPierce {__version__} - WAF/CDN assessment & bypass validation
+    print(f"""{PRODUCT_NAME} {__version__} - {TAGLINE}
 
-usage: wafpierce <command> [options]
+usage: {CLI_NAME} <command> [options]
 
 commands:
   scan <url> [flags]   Run the full technique scanner (all documented flags:
@@ -41,8 +45,8 @@ commands:
                        --export, --ai-*, scope/auth, --dry-run, ...).
                        This is the default if you pass a URL with no command.
   recon <domain>       External-tool recon (subfinder/amass/dnsx/httpx/nmap).
-                       Requires those tools on PATH; `wafpierce doctor` checks.
-  chain <url> [flags]  Run the bypass -> enum -> scan -> recon -> report chain.
+                       Requires those tools on PATH; `{CLI_NAME} doctor` checks.
+  chain <url> [flags]  Run discovery -> test -> recon -> report as one workflow.
   msf <sub> [flags]    Metasploit RPC: check | scan <target> | push <results>.
   caido <sub> [flags]  Caido: check | push <results> | export <results> -o.
   agent-server --stdio Local JSON-lines bridge for authorized AI/agent workflows.
@@ -52,13 +56,13 @@ commands:
 
 global:
   -V, --version        Same as `version`.
-  -h, --help           Show this message. `wafpierce scan -h` for scanner flags.
+  -h, --help           Show this message. `{CLI_NAME} scan -h` for scanner flags.
 
 examples:
-  wafpierce scan https://target --impersonate chrome --oob interactsh
-  wafpierce scan https://target --dry-run --safe-mode
-  wafpierce https://target            # == wafpierce scan https://target
-  wafpierce doctor
+  {CLI_NAME} scan https://target --impersonate chrome --oob interactsh
+  {CLI_NAME} scan https://target --dry-run --safe-mode
+  {CLI_NAME} https://target            # == {CLI_NAME} scan https://target
+  {CLI_NAME} doctor
 """)
 
 
@@ -129,7 +133,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return agent_main(argv[1:])
 
     # No recognized subcommand -> treat the whole argv as a `scan` invocation so
-    # `wafpierce https://target --oob ...` behaves like `wafpierce scan ...`.
+    # `blackthorn https://target --oob ...` behaves like `blackthorn scan ...`.
     from .pierce import main as scan_main
     return scan_main(argv)
 

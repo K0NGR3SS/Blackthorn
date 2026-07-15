@@ -182,21 +182,21 @@ def export_requests(results: List[Dict[str, Any]], path: str,
     Returns the number of requests written."""
     selected = _select(results, confirmed_only)
     blocks = [format_raw_request(r) for r in selected if _finding_url(r)]
-    sep = "\r\n\r\n" + ("#" * 70) + "  WAFPierce -> Caido  " + ("#" * 8) + "\r\n\r\n"
+    sep = "\r\n\r\n" + ("#" * 70) + "  Blackthorn -> Caido  " + ("#" * 8) + "\r\n\r\n"
     with open(path, 'w', encoding='utf-8', newline='') as f:
         f.write(sep.join(blocks))
     return len(blocks)
 
 
 # --------------------------------------------------------------------------- #
-# CLI entry point  (`wafpierce caido ...`)
+# CLI entry point  (`blackthorn caido ...`)
 # --------------------------------------------------------------------------- #
 def main(argv: Optional[List[str]] = None) -> int:
     import argparse
     import json
 
     p = argparse.ArgumentParser(
-        prog='wafpierce caido',
+        prog='blackthorn caido',
         description='Caido integration (proxy check / push / export).')
     p.add_argument('--proxy-url', default=None, help='Caido proxy listener (default http://127.0.0.1:8080)')
     p.add_argument('--api-url', default=None, help='Caido GraphQL endpoint')

@@ -1,5 +1,5 @@
-"""WAFPierce - WAF/CDN assessment and bypass validation toolkit."""
+"""Blackthorn threat hunting and bug bounty web security toolkit."""
 
-__title__ = "wafpierce"
+__title__ = "blackthorn"
 __version__ = "1.7"
-__description__ = "WAF/CDN assessment and bypass validation tool for authorized security testing"
+__description__ = "Threat hunting and bug bounty web security toolkit for authorized testing"

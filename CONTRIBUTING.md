@@ -1,41 +1,44 @@
-# Contributing to WAFPierce
+# Contributing to Blackthorn
 
-First off, thank you for considering contributing to WAFPierce! It's people like you that make this tool a powerful asset for the penetration testing and security research community. 
+Thank you for helping improve Blackthorn. Contributions should support its role as a practical threat-hunting and bug bounty web security workspace.
 
-Whether you're fixing a bug, adding a new WAF bypass technique, or improving the PySide6 GUI, your help is greatly appreciated.
+## Report bugs
 
----
+Open an issue after checking that the problem has not already been reported. Include:
 
-## 🐞 Reporting Bugs
+- Operating system and version.
+- Python and PySide6 versions.
+- A minimal sequence that reproduces the problem.
+- A redacted traceback, log, or sample artifact.
+- Whether the issue occurs in the GUI, CLI, packaged executable, or all three.
 
-If you find a bug, please help us squash it by opening an issue on our [GitHub repository](https://github.com/K0NGR3SS/WAFPierce). Before creating a new issue, please check the existing open and closed issues to see if it has already been reported.
+Report vulnerabilities in Blackthorn privately under [SECURITY.md](SECURITY.md), not in a public issue.
 
-When reporting a bug, please include:
-* **Your operating system and version.**
-* **Your Python version** (WAFPierce requires Python 3.8+).
-* **Your PySide6 version** (requires 6.10.1+).
-* **A clear description of the issue**, including steps to reproduce the crash or unexpected behavior.
-* **Error tracebacks or logs**, especially if the GUI crashes or a specific module (like the Plugin Manager) throws an exception.
+## Propose tests and enhancements
 
-*(Note: If you've found a security vulnerability within the tool itself, please refer to our [SECURITY.md](SECURITY.md) instead of opening a public issue.)*
+Explain the researcher workflow first: what question the feature answers, what evidence it produces, and how it stays within declared scope. For a new probe, include a safe test fixture, expected positive and negative behavior, false-positive considerations, and a reference where possible.
 
----
+UI proposals should follow [docs/BLACKTHORN_PRODUCT_PLAN.md](docs/BLACKTHORN_PRODUCT_PLAN.md): restrained color, clear hierarchy, plain language, keyboard access, and evidence-first results.
 
-## 💡 Suggesting Enhancements & New Tests
+## Development setup
 
-WAFPierce thrives on having the latest and greatest bypass techniques. If you have ideas for new attack vectors (SQLi, SSRF, JWT, GraphQL, etc.), new WAF/CDN fingerprints, or GUI improvements:
+```bash
+git clone <your-fork-url> blackthorn
+cd blackthorn
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+python3 -m pytest
+ruff check .
+```
 
-1. **Open a Feature Request Issue**: Detail how the new technique works and provide sample payloads or heuristic baselines if possible.
-2. **Direct Contact**: You can also reach out directly to **Marwan** or **Nazariy** to discuss new tests or community suggestions.
+The public CLI is `blackthorn`. The existing Python module path remains in place during the rebrand for compatibility.
 
----
+## Pull requests
 
-## 🛠️ Setting Up Your Development Environment
-
-To start contributing code, you'll need to set up the project locally:
-
-1. **Fork the repository** on GitHub.
-2. **Clone your fork** to your local machine:
-   ```bash
-   git clone [https://github.com/K0NGR3SS/WAFPierce.git](https://github.com/K0NGR3SS/WAFPierce.git)
-   cd WAFPierce
+- Keep each pull request focused.
+- Add or update tests for behavior changes.
+- Avoid live third-party targets in tests; use local fixtures and mocked network boundaries.
+- Preserve authorization checks, redaction, and safe-mode behavior.
+- Explain user-visible copy or layout decisions and include screenshots for GUI changes.
+- Note commands run and anything that could not be verified.

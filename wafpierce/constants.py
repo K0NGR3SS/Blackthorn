@@ -4,6 +4,7 @@ Centralized constants for the entire application
 """
 
 from . import __version__
+from .branding import PRODUCT_NAME
 
 # Timeouts (seconds)
 DEFAULT_TIMEOUT = 30
@@ -31,7 +32,7 @@ QT_GEOMETRY = '1000x640'
 DEFAULT_FONT_SIZE = 12
 
 # Network
-DEFAULT_USER_AGENT = f'WAFPierce/{__version__} (https://github.com/K0NGR3SS/WAFPierce)'
+DEFAULT_USER_AGENT = f'{PRODUCT_NAME}/{__version__} (authorized web security research)'
 MAX_REDIRECTS = 5
 CONNECTION_POOL_CONNECTIONS = 10
 CONNECTION_POOL_MAXSIZE = 20

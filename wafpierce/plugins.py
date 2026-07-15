@@ -238,7 +238,7 @@ class PluginManager:
         example_path = os.path.join(self.plugins_dir, 'example_plugin.py')
         if not os.path.exists(example_path):
             example_code = '''"""
-Example WAFPierce Plugin
+Example Blackthorn Plugin
 This is a template for creating your own bypass plugins.
 """
 try:
@@ -252,7 +252,7 @@ class UnicodeBypassPlugin(BypassPlugin):
     
     name = "Unicode Normalization Bypass"
     version = "1.0.0"
-    author = "WAFPierce Community"
+    author = "Blackthorn Community"
     description = "Uses Unicode character variations to bypass WAF filters"
     category = "encoding"
     tags = ["unicode", "encoding", "obfuscation"]
@@ -608,9 +608,9 @@ def validate_plugin(plugin: BypassPlugin) -> List[str]:
 
 # Community Plugin Marketplace (placeholder for future implementation)
 class PluginMarketplace:
-    """Interface to the WAFPierce community plugin marketplace."""
+    """Interface to the planned Blackthorn community plugin marketplace."""
     
-    MARKETPLACE_URL = "https://wafpierce.github.io/plugins"  # Placeholder
+    MARKETPLACE_URL = None
     
     def __init__(self, manager: PluginManager):
         self.manager = manager

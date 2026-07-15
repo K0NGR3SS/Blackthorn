@@ -12,6 +12,7 @@ import sys
 from typing import List, Optional, Tuple
 
 from . import __version__
+from .branding import CLI_NAME, PRODUCT_NAME
 
 
 # (import_name, friendly_label, what it powers, pip install hint)
@@ -24,8 +25,8 @@ OPTIONAL_COMPONENTS: List[Tuple[str, str, str, Optional[str]]] = [
     ('cryptography', 'cryptography', 'SSL/TLS cert analysis + Interactsh OOB crypto', 'pip install cryptography'),
     ('playwright', 'playwright', 'Headless-browser tests: DOM XSS / CSPT', 'pip install playwright && python -m playwright install chromium'),
     ('anthropic', 'anthropic', 'AI triage / AI report (--ai-triage / --ai-report)', 'pip install anthropic'),
-    ('PySide6', 'PySide6', 'Desktop GUI (wafpierce gui / run_gui.py)', 'pip install PySide6'),
-    ('pymetasploit3', 'pymetasploit3', 'Metasploit RPC integration (wafpierce msf)', 'pip install pymetasploit3'),
+    ('PySide6', 'PySide6', 'Desktop GUI (blackthorn gui / run_gui.py)', 'pip install PySide6'),
+    ('pymetasploit3', 'pymetasploit3', 'Metasploit RPC integration (blackthorn msf)', 'pip install pymetasploit3'),
 ]
 
 
@@ -98,7 +99,7 @@ def print_version(no_color: bool = False, stream=None) -> None:
     """Print version + which optional components are actually importable."""
     out = stream or sys.stdout
     ok, bad = _marks(no_color)
-    print(f"WAFPierce {__version__}", file=out)
+    print(f"{PRODUCT_NAME} {__version__}", file=out)
     print(f"Python {platform.python_version()} on {sys.platform}", file=out)
     print("", file=out)
     print("Optional components:", file=out)
@@ -115,7 +116,7 @@ def _check_network_egress(timeout: float = 5.0) -> Tuple[bool, str]:
     try:
         import urllib.request
         req = urllib.request.Request('https://example.com', method='HEAD',
-                                     headers={'User-Agent': 'WAFPierce-doctor'})
+                                     headers={'User-Agent': f'{PRODUCT_NAME}-doctor'})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return True, f"reachable (HTTP {resp.status})"
     except Exception as e:
@@ -171,7 +172,7 @@ def run_doctor(no_color: bool = False, check_network: bool = True) -> int:
     """Green/red preflight checklist. Returns a process exit code (0 = all core OK)."""
     no_color = no_color or bool(os.environ.get('NO_COLOR'))
     ok, bad = _marks(no_color)
-    print(f"WAFPierce {__version__} - doctor\n")
+    print(f"{PRODUCT_NAME} {__version__} - doctor\n")
 
     core_ok = True
 
@@ -208,8 +209,8 @@ def run_doctor(no_color: bool = False, check_network: bool = True) -> int:
     oob_ok, oob_msg = _check_oob()
     print(f"  {ok if oob_ok else bad} OOB: {oob_msg}")
 
-    # 5b. Recon external tools (required for `wafpierce recon`)
-    print("\n  Recon tools (required for `wafpierce recon`):")
+    # 5b. Recon external tools (required for the recon subcommand)
+    print(f"\n  Recon tools (required for `{CLI_NAME} recon`):")
     recon_rows = _check_recon_tools()
     for label, avail, info in recon_rows:
         mark = ok if avail else bad

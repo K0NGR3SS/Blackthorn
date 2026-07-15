@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Build script for creating WAFPierce executable.
+Build script for creating the Blackthorn executable.
 Run this script to build the standalone executable.
 
 Usage:
@@ -18,7 +18,7 @@ if sys.platform == 'win32':
 
 def main():
     print("=" * 60)
-    print("WAFPierce Executable Builder")
+    print("Blackthorn Executable Builder")
     print("=" * 60)
     
     # Check if PyInstaller is installed
@@ -53,7 +53,7 @@ def main():
     if result.returncode == 0:
         print("-" * 60)
         print("\n[OK] Build successful!")
-        print(f"\nExecutable location: {os.path.join(os.path.dirname(__file__), 'dist', 'WAFPierce.exe')}")
+        print(f"\nExecutable location: {os.path.join(os.path.dirname(__file__), 'dist', 'Blackthorn.exe')}")
         print("\nYou can distribute this single .exe file to users.")
     else:
         print("\n[X] Build failed. Check the output above for errors.")

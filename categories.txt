@@ -1,4 +1,4 @@
-WAFPierce Scan Categories
+Blackthorn Scan Categories
 =========================
 
 The following scan categories are available for selection in the GUI:

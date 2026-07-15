@@ -114,7 +114,7 @@ class NullProxyEngine:
 def _make_handler():
     class _ProxyHandler(BaseHTTPRequestHandler):
         protocol_version = 'HTTP/1.1'
-        server_version = 'WAFPierceProxy/1.0'
+        server_version = 'BlackthornProxy/1.0'
 
         def log_message(self, *a):
             pass
@@ -129,7 +129,7 @@ def _make_handler():
                 status, reason, rheaders, content, elapsed = _forward(
                     self.command, url, self.headers, body, engine.upstream_proxies)
             except Exception as e:
-                self.send_error(502, f'WAFPierce proxy error: {e}')
+                self.send_error(502, f'Blackthorn proxy error: {e}')
                 return
             self._relay(status, reason, rheaders, content)
             engine.record(_make_flow('proxy', self.command, url, self.headers, body,

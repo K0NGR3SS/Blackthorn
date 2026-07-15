@@ -3,11 +3,20 @@
 These live at module scope in wafpierce.gui specifically so they can be unit
 tested without a display or Qt installed.
 """
+import os
+
 from wafpierce.gui import (
     _finding_url, _finding_to_curl, _finding_to_python,
     profile_from_prefs, merge_profile, PROFILE_KEYS,
     _load_prefs, _normalize_language, _save_prefs,
+    BANNER_PATH, LOGO_PATH, SIDEBAR_LOGO_PATH,
 )
+
+
+def test_blackthorn_brand_assets_are_available():
+    paths = {BANNER_PATH, LOGO_PATH, SIDEBAR_LOGO_PATH}
+    assert len(paths) == 3
+    assert all(os.path.isfile(path) for path in paths)
 
 
 def test_finding_url_prefers_explicit_url():

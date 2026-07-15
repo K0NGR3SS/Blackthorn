@@ -67,8 +67,8 @@ class CertAuthority:
     def _create_ca(self):
         key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         subject = issuer = x509.Name([
-            x509.NameAttribute(NameOID.COMMON_NAME, 'WAFPierce Proxy CA'),
-            x509.NameAttribute(NameOID.ORGANIZATION_NAME, 'WAFPierce'),
+            x509.NameAttribute(NameOID.COMMON_NAME, 'Blackthorn Proxy CA'),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, 'Blackthorn'),
         ])
         now = _fixed_now()
         cert = (
@@ -153,7 +153,7 @@ class CertAuthority:
         return ['certutil', '-addstore', '-user', 'Root', self.ca_cert_path]
 
     def certutil_del_cmd(self) -> list:
-        return ['certutil', '-delstore', '-user', 'Root', 'WAFPierce Proxy CA']
+        return ['certutil', '-delstore', '-user', 'Root', 'Blackthorn Proxy CA']
 
 
 def _safe(host: str) -> str:

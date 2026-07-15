@@ -1,7 +1,4 @@
-"""
-Full Pentest Chain: Bypass -> Enum -> Scan -> Recon -> Report
-WAF/CDN assessment workflow with comprehensive error handling
-"""
+"""Blackthorn discovery -> test -> recon -> report workflow."""
 import os
 import json
 import sys
@@ -85,14 +82,8 @@ logger = logging.getLogger(__name__)
 DISCLAIMER_BANNER = """
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║                                                                              ║
-║   ██╗    ██╗ █████╗ ███████╗██████╗ ██╗███████╗██████╗  ██████╗███████╗      ║
-║   ██║    ██║██╔══██╗██╔════╝██╔══██╗██║██╔════╝██╔══██╗██╔════╝██╔════╝      ║
-║   ██║ █╗ ██║███████║█████╗  ██████╔╝██║█████╗  ██████╔╝██║     █████╗        ║
-║   ██║███╗██║██╔══██║██╔══╝  ██╔═══╝ ██║██╔══╝  ██╔══██╗██║     ██╔══╝        ║
-║   ╚███╔███╔╝██║  ██║██║     ██║     ██║███████╗██║  ██║╚██████╗███████╗      ║
-║    ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝     ╚═╝     ╚═╝╚══════╝╚═╝  ╚═╝ ╚═════╝╚══════╝      ║
-║                                                                              ║
-║                     WAF/CDN Bypass & Reconnaissance Scanner                  ║
+║                                BLACKTHORN                                    ║
+║               THREAT HUNTING & BUG BOUNTY WEB SECURITY TOOL                 ║
 ║                                                                              ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
 ║                                                                              ║
@@ -100,7 +91,7 @@ DISCLAIMER_BANNER = """
 ║                                                                              ║
 ║  This tool is designed for AUTHORIZED security testing ONLY.                 ║
 ║                                                                              ║
-║  By using WAFPierce, you acknowledge and agree that:                         ║
+║  By using Blackthorn, you acknowledge and agree that:                        ║
 ║                                                                              ║
 ║  1. You have EXPLICIT WRITTEN AUTHORIZATION to test the target system        ║
 ║  2. You will use this tool RESPONSIBLY and ETHICALLY                         ║
@@ -120,7 +111,7 @@ DISCLAIMER_BANNER = """
 
 
 def print_banner():
-    """Display the WAFPierce banner and disclaimer"""
+    """Display the Blackthorn banner and disclaimer."""
     print(DISCLAIMER_BANNER)
 
 
@@ -775,7 +766,7 @@ class FullPentestChain:
             # Total backend origins detected
             total_backends = len(s3) + len(load_balancers) + len(ec2_instances) + len(media_services) + len(custom_servers)
             
-            report = f"""# WAFPierce Penetration Test Report
+            report = f"""# Blackthorn Web Security Investigation Report
 **Target:** {self.target}  
 **Date:** {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  
 **Risk Level:** {risk_level} (Score: {risk_score})
@@ -783,7 +774,7 @@ class FullPentestChain:
 ## Executive Summary
 | Metric | Count |
 |--------|-------|
-| WAF Bypasses | {len(self.bypasses)} |
+| Confirmed Bypasses | {len(self.bypasses)} |
 | Live Paths | {len(live_paths)} |
 | Vulnerabilities | {len(vulns)} |
 | **Backend Origins Detected** | **{total_backends}** |
@@ -793,7 +784,7 @@ class FullPentestChain:
 | MediaPackage/MediaStore | {len(media_services)} |
 | Custom HTTP Servers | {len(custom_servers)} |
 
-## 1. WAF Bypass Findings
+## 1. Edge-Control and Routing Findings
 
 ### Critical Bypasses
 """
@@ -888,7 +879,7 @@ class FullPentestChain:
 ## 4. Remediation Recommendations
 
 ### High Priority
-1. **WAF Configuration**: Review and strengthen WAF rules
+1. **Edge Security Configuration**: Review and strengthen request-filtering rules
    - Block suspicious header combinations (X-Forwarded-For: 127.0.0.1, etc.)
    - Implement strict Host header validation
    - Add rate limiting per IP
@@ -915,7 +906,7 @@ class FullPentestChain:
 
 ## 5. Testing Methodology
 This assessment used the following techniques:
-- WAF/CDN bypass testing (12 techniques)
+- Edge-control and request-routing validation (12 technique groups)
 - Directory enumeration ({len(live_paths)} paths found)
 - Vulnerability scanning (XSS, injection)
 - AWS resource enumeration:
@@ -1030,12 +1021,14 @@ def main(argv=None):
     """Main entry point with comprehensive error handling.
 
     Accepts an explicit ``argv`` so the unified :mod:`wafpierce.cli` dispatcher can
-    route ``wafpierce chain ...`` here; falls back to ``sys.argv`` when run directly.
+    route ``blackthorn chain ...`` here; falls back to ``sys.argv`` when run directly.
     """
     from argparse import ArgumentParser
 
-    parser = ArgumentParser(prog='wafpierce chain',
-                            description='WAFPierce Full WAF/CDN Penetration Test Chain')
+    parser = ArgumentParser(
+        prog='blackthorn chain',
+        description='Blackthorn discovery, testing, reconnaissance, and reporting workflow',
+    )
     parser.add_argument("target", help="Target URL (e.g., https://example.com)")
     parser.add_argument("-o", "--output", default="pentest_results", help="Output directory")
     parser.add_argument("-t", "--threads", type=int, default=10, help="Number of threads")
@@ -1064,8 +1057,8 @@ def main(argv=None):
         sys.exit(130)
     
     except WAFPierceError as e:
-        print(f"[!] WAFPierce Error: {e}")
-        logger.error(f"WAFPierce error: {e}")
+        print(f"[!] Blackthorn Error: {e}")
+        logger.error(f"Blackthorn error: {e}")
         sys.exit(1)
     
     except Exception as e:

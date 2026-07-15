@@ -37,7 +37,7 @@ class _FakeSession:
 def test_discord_payload_and_send():
     payload = integrations.format_discord('https://t', SAMPLE)
     assert 'content' in payload and len(payload['content']) <= 2000
-    assert 'WAFPierce scan' in payload['content']
+    assert 'Blackthorn investigation' in payload['content']
     sess = _FakeSession()
     assert integrations.send_discord('https://discord/webhook', 'https://t', SAMPLE, session=sess) is True
     assert sess.calls and sess.calls[0][0] == 'https://discord/webhook'

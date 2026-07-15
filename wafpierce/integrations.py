@@ -38,7 +38,7 @@ def format_slack(target: str, results: List[Dict[str, Any]]) -> Dict[str, Any]:
     summary = '  '.join(f"{_SEV_EMOJI.get(s,'')} {s}: {counts.get(s,0)}"
                         for s in ('CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO')
                         if counts.get(s))
-    lines = [f"*WAFPierce scan* — `{target}`", summary or "_no findings_"]
+    lines = [f"*Blackthorn investigation* — `{target}`", summary or "_no findings_"]
     top = _top_findings(results)
     if top:
         lines.append("")
@@ -71,7 +71,7 @@ def _summary_lines(target: str, results: List[Dict[str, Any]]) -> List[str]:
     summary = '  '.join(f"{s}: {counts.get(s, 0)}"
                         for s in ('CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO')
                         if counts.get(s))
-    lines = [f"WAFPierce scan — {target}", summary or "no findings"]
+    lines = [f"Blackthorn investigation — {target}", summary or "no findings"]
     top = _top_findings(results)
     if top:
         lines.append("")
@@ -117,9 +117,9 @@ def format_teams(target: str, results: List[Dict[str, Any]]) -> Dict[str, Any]:
         '@type': 'MessageCard',
         '@context': 'http://schema.org/extensions',
         'themeColor': 'D7263D' if crit else '0078D7',
-        'summary': f"WAFPierce scan of {target}",
+        'summary': f"Blackthorn investigation of {target}",
         'sections': [{
-            'activityTitle': f"WAFPierce scan — {target}",
+            'activityTitle': f"Blackthorn investigation — {target}",
             'facts': facts or [{'name': 'findings', 'value': '0'}],
             'text': detail,
             'markdown': True,
@@ -146,7 +146,7 @@ def send_teams(webhook_url: str, target: str, results: List[Dict[str, Any]],
 def format_generic(target: str, results: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Generic JSON payload for arbitrary webhooks / SIEM ingestion."""
     return {
-        'tool': 'WAFPierce', 'target': target,
+        'tool': 'Blackthorn', 'target': target,
         'summary': _counts(results),
         'total': len(results),
         'confirmed': sum(1 for r in results if r.get('bypass')),

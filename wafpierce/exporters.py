@@ -1,5 +1,5 @@
 """
-WAFPierce Exporters
+Blackthorn exporters
 
 Turn scan results into portable artifacts:
 
@@ -16,6 +16,7 @@ import datetime
 from typing import List, Dict, Any
 
 from . import __version__
+from .branding import PRODUCT_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,7 @@ def _rule_id(result: Dict[str, Any]) -> str:
     cat = (result.get('category') or 'finding').lower().replace(' ', '_')
     tech = (result.get('technique') or 'unknown').split(':')[0].strip().lower()
     tech = ''.join(ch if ch.isalnum() else '_' for ch in tech)[:40]
-    return f"wafpierce.{cat}.{tech}"
+    return f"blackthorn.{cat}.{tech}"
 
 
 # --------------------------------------------------------------------- SARIF
@@ -72,8 +73,7 @@ def to_sarif(target: str, results: List[Dict[str, Any]]) -> str:
         'version': '2.1.0',
         'runs': [{
             'tool': {'driver': {
-                'name': 'WAFPierce',
-                'informationUri': 'https://github.com/K0NGR3SS/WAFPierce',
+                'name': PRODUCT_NAME,
                 'version': __version__,
                 'rules': list(rules.values()),
             }},
@@ -102,11 +102,11 @@ def to_nuclei(target: str, results: List[Dict[str, Any]]) -> str:
         doc = (
             f"id: {rid}\n"
             f"info:\n"
-            f"  name: {_yaml_escape(r.get('technique', 'WAFPierce finding'))}\n"
-            f"  author: wafpierce\n"
+            f"  name: {_yaml_escape(r.get('technique', 'Blackthorn finding'))}\n"
+            f"  author: blackthorn\n"
             f"  severity: {sev}\n"
             f"  description: {_yaml_escape(r.get('reason', ''))}\n"
-            f"  tags: wafpierce,{(r.get('category') or 'misc').lower()}\n"
+            f"  tags: blackthorn,{(r.get('category') or 'misc').lower()}\n"
             f"http:\n"
             f"  - method: {method}\n"
             f"    path:\n"
@@ -215,7 +215,7 @@ def to_html(target: str, results: List[Dict[str, Any]]) -> str:
 
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
-<title>WAFPierce Report — {html.escape(target)}</title>
+<title>Blackthorn Report — {html.escape(target)}</title>
 <style>
  body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;margin:0;background:#0f1115;color:#e6e6e6}}
  header{{background:#161a22;padding:24px 32px;border-bottom:1px solid #262b36}}
@@ -248,7 +248,7 @@ def to_html(target: str, results: List[Dict[str, Any]]) -> str:
 </style></head>
 <body>
  <header>
-  <h1>WAFPierce Security Report</h1>
+  <h1>Blackthorn Web Security Report</h1>
   <div class="sub">Target: {html.escape(target)} &nbsp;•&nbsp; Generated: {ts} &nbsp;•&nbsp; <span id="count">{len(results)}</span> shown</div>
  </header>
  <div class="wrap">
@@ -258,7 +258,7 @@ def to_html(target: str, results: List[Dict[str, Any]]) -> str:
     <div><span class="k">Total findings:</span> <span class="v">{len(results)}</span></div>
     <div><span class="k">Confirmed bypasses:</span> <span class="v">{bypasses}</span></div>
     <div><span class="k">Critical / High:</span> <span class="v">{counts.get('CRITICAL',0)} / {counts.get('HIGH',0)}</span></div>
-    <div><span class="k">WAF / CDN:</span> <span class="v">{html.escape(detected_str)}</span></div>
+    <div><span class="k">Edge security:</span> <span class="v">{html.escape(detected_str)}</span></div>
     <div><span class="k">Top categories:</span> <span class="v">{html.escape(top_cats_str)}</span></div>
    </div>
   </div>
@@ -317,8 +317,8 @@ def to_pdf(target: str, results: List[Dict[str, Any]], path: str) -> bool:
     ts = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     ordered = sorted(results, key=lambda r: _SEV_RANK.get(r.get('severity', 'INFO'), 5))
 
-    doc = SimpleDocTemplate(path, pagesize=A4, title=f"WAFPierce — {target}")
-    story = [Paragraph("WAFPierce Security Report", styles['Title']),
+    doc = SimpleDocTemplate(path, pagesize=A4, title=f"Blackthorn — {target}")
+    story = [Paragraph("Blackthorn Web Security Report", styles['Title']),
              Paragraph(f"Target: {target} &nbsp; • &nbsp; Generated: {ts} &nbsp; • &nbsp; "
                        f"{len(results)} findings", styles['Normal']),
              Spacer(1, 6 * mm)]
@@ -373,7 +373,7 @@ def to_junit(target: str, results: List[Dict[str, Any]]) -> str:
     total = len(results)
     total_fail = sum(1 for r in results if _is_failure(r))
     lines = ['<?xml version="1.0" encoding="utf-8"?>']
-    lines.append(f'<testsuites name="WAFPierce" tests="{total}" '
+    lines.append(f'<testsuites name="Blackthorn" tests="{total}" '
                  f'failures="{total_fail}" errors="0">')
     for cat, items in by_cat.items():
         fails = sum(1 for r in items if _is_failure(r))
@@ -434,18 +434,18 @@ def to_prometheus(target: str, results: List[Dict[str, Any]]) -> str:
     bypasses = sum(1 for r in results if r.get('bypass'))
     t = esc(target)
     lines = [
-        '# HELP wafpierce_findings_total Findings from the last scan, by severity.',
-        '# TYPE wafpierce_findings_total gauge',
+        '# HELP blackthorn_findings_total Findings from the last scan, by severity.',
+        '# TYPE blackthorn_findings_total gauge',
     ]
     for s in ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO']:
-        lines.append(f'wafpierce_findings_total{{target="{t}",severity="{s}"}} {counts.get(s, 0)}')
+        lines.append(f'blackthorn_findings_total{{target="{t}",severity="{s}"}} {counts.get(s, 0)}')
     lines += [
-        '# HELP wafpierce_bypasses_total Confirmed bypasses from the last scan.',
-        '# TYPE wafpierce_bypasses_total gauge',
-        f'wafpierce_bypasses_total{{target="{t}"}} {bypasses}',
-        '# HELP wafpierce_findings All findings, total.',
-        '# TYPE wafpierce_findings gauge',
-        f'wafpierce_findings{{target="{t}"}} {len(results)}',
+        '# HELP blackthorn_bypasses_total Confirmed bypasses from the last scan.',
+        '# TYPE blackthorn_bypasses_total gauge',
+        f'blackthorn_bypasses_total{{target="{t}"}} {bypasses}',
+        '# HELP blackthorn_findings All findings, total.',
+        '# TYPE blackthorn_findings gauge',
+        f'blackthorn_findings{{target="{t}"}} {len(results)}',
     ]
     return '\n'.join(lines) + '\n'
 
@@ -478,7 +478,7 @@ def to_har(target: str, results: List[Dict[str, Any]]) -> str:
         })
     doc = {'log': {
         'version': '1.2',
-        'creator': {'name': 'WAFPierce', 'version': __version__},
+        'creator': {'name': PRODUCT_NAME, 'version': __version__},
         'entries': entries,
     }}
     return json.dumps(doc, indent=2, default=str)
@@ -523,7 +523,7 @@ def to_html_diff(target: str, old: List[Dict[str, Any]], new: List[Dict[str, Any
                 f"<th>Path</th><th>Reason</th></tr></thead><tbody>{body}</tbody></table>")
 
     return f"""<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>WAFPierce Diff — {html.escape(target)}</title>
+<html lang="en"><head><meta charset="utf-8"><title>Blackthorn Diff — {html.escape(target)}</title>
 <style>
  body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;margin:0;background:#0f1115;color:#e6e6e6}}
  header{{background:#161a22;padding:24px 32px;border-bottom:1px solid #262b36}}
@@ -535,7 +535,7 @@ def to_html_diff(target: str, old: List[Dict[str, Any]], new: List[Dict[str, Any
  .muted{{color:#5b6472}} .new{{color:#ff7b7b}} .res{{color:#5bd98a}}
  .pill{{padding:4px 10px;border-radius:4px;margin-right:8px;font-weight:600}}
 </style></head>
-<body><header><h1>WAFPierce Scan Diff</h1>
+<body><header><h1>Blackthorn Scan Diff</h1>
  <div class="sub">Target: {html.escape(target)} &nbsp;•&nbsp; {ts} &nbsp;•&nbsp;
   <span class="pill" style="background:#3a1b1b;color:#ff7b7b">+{len(d['new'])} new</span>
   <span class="pill" style="background:#1b3a2b;color:#5bd98a">-{len(d['resolved'])} resolved</span>

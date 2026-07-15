@@ -108,9 +108,9 @@ def test_new_formats_export_nonempty(fmt):
 
 def test_prometheus_exposition():
     out = to_prometheus('https://t.example', SAMPLE)
-    assert '# TYPE wafpierce_findings_total gauge' in out
-    assert 'wafpierce_findings_total{target="https://t.example",severity="HIGH"} 1' in out
-    assert 'wafpierce_bypasses_total{target="https://t.example"} 1' in out
+    assert '# TYPE blackthorn_findings_total gauge' in out
+    assert 'blackthorn_findings_total{target="https://t.example",severity="HIGH"} 1' in out
+    assert 'blackthorn_bypasses_total{target="https://t.example"} 1' in out
 
 
 def test_har_is_valid_and_importable():

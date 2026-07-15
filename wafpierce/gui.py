@@ -1,4 +1,4 @@
-"""PySide6 GUI for WAFPierce (subprocess-backed)
+"""PySide6 GUI for Blackthorn (subprocess-backed)
 
 This GUI runs the existing CLI module `wafpierce.pierce` in a subprocess so
 we don't need to modify any scanner code. That lets the GUI provide a
@@ -23,8 +23,19 @@ import io
 # Check if we're running as a frozen executable
 IS_FROZEN = getattr(sys, 'frozen', False) or os.environ.get('WAFPIERCE_FROZEN') == '1'
 
-# path to bundled logo (used for watermark/icon)
-LOGO_PATH = os.path.join(os.path.dirname(__file__), 'logo_Temp', 'logo_wafpierce.png')
+# Public identity and brand assets. The lookup supports source, installed, and
+# PyInstaller-frozen layouts while the internal package name remains stable.
+from .branding import (
+    BRAND_BANNER,
+    DARK_LOGO,
+    PRODUCT_NAME,
+    TRANSPARENT_LOGO,
+    asset_path,
+)
+
+LOGO_PATH = asset_path(TRANSPARENT_LOGO)
+SIDEBAR_LOGO_PATH = asset_path(DARK_LOGO)
+BANNER_PATH = asset_path(BRAND_BANNER)
 
 # Use shared config module
 from .config import get_gui_prefs_path
@@ -162,7 +173,7 @@ def _load_prefs() -> dict:
 # ==================== TRANSLATIONS ====================
 TRANSLATIONS = {
     'en': {
-        'window_title': 'WAFPierce - GUI (Qt)',
+        'window_title': 'Blackthorn - Web Security Workspace',
         'target_url': 'Target URL:',
         'add': 'Add',
         'remove': 'Remove',
@@ -238,7 +249,7 @@ TRANSLATIONS = {
         'restart_confirm_msg': 'Language changed. Restart now to apply?',
         'yes': 'Yes',
         'no': 'No',
-        'legal_disclaimer_title': 'WAFPierce - Legal Disclaimer',
+        'legal_disclaimer_title': 'Blackthorn - Legal Disclaimer',
         'legal_disclaimer_header': '⚠️ LEGAL DISCLAIMER ⚠️',
         'i_agree': 'I Agree',
         'i_decline': 'I Decline',
@@ -391,7 +402,7 @@ TRANSLATIONS = {
         'security_issues': 'Security Issues',
         'no_security_issues': 'No security issues detected',
         'export_ssl_info': 'Export Info',
-        'legal_disclaimer': """WAFPierce – Legal Disclaimer
+        'legal_disclaimer': """Blackthorn – Legal Disclaimer
 
 FOR AUTHORIZED SECURITY TESTING ONLY
 
@@ -407,7 +418,7 @@ By clicking "I Agree", you acknowledge and confirm that:
 • You understand that misuse of this tool may result in legal consequences
 
 Limitation of Liability:
-The developers, contributors, distributors, and owners of WAFPierce assume no liability for misuse, damage, legal consequences, data loss, service disruption, or any other harm resulting from the use or inability to use this tool. This software is provided "as is", without warranty of any kind, expressed or implied. You agree that you use this tool entirely at your own risk.""",
+The developers, contributors, distributors, and owners of Blackthorn assume no liability for misuse, damage, legal consequences, data loss, service disruption, or any other harm resulting from the use or inability to use this tool. This software is provided "as is", without warranty of any kind, expressed or implied. You agree that you use this tool entirely at your own risk.""",
         # Timeline & Plugins translations
         'scan_timeline': 'Scan Timeline',
         'timeline_viewer': 'Timeline Viewer',
@@ -445,7 +456,7 @@ The developers, contributors, distributors, and owners of WAFPierce assume no li
         'queue_saved': 'Scan queue saved',
     },
     'ar': {
-        'window_title': 'WAFPierce - واجهة المستخدم',
+        'window_title': 'Blackthorn - واجهة المستخدم',
         'target_url': 'رابط الهدف:',
         'add': 'إضافة',
         'remove': 'إزالة',
@@ -521,7 +532,7 @@ The developers, contributors, distributors, and owners of WAFPierce assume no li
         'restart_confirm_msg': 'تم تغيير اللغة. إعادة التشغيل الآن للتطبيق؟',
         'yes': 'نعم',
         'no': 'لا',
-        'legal_disclaimer_title': 'WAFPierce - إخلاء المسؤولية القانونية',
+        'legal_disclaimer_title': 'Blackthorn - إخلاء المسؤولية القانونية',
         'legal_disclaimer_header': '⚠️ إخلاء المسؤولية القانونية ⚠️',
         'i_agree': 'أوافق',
         'i_decline': 'أرفض',
@@ -669,7 +680,7 @@ The developers, contributors, distributors, and owners of WAFPierce assume no li
         'security_issues': 'مشاكل الأمان',
         'no_security_issues': 'لم يتم اكتشاف مشاكل أمنية',
         'export_ssl_info': 'تصدير المعلومات',
-        'legal_disclaimer': """WAFPierce - إخلاء المسؤولية القانونية
+        'legal_disclaimer': """Blackthorn - إخلاء المسؤولية القانونية
 
 لاختبار الأمان المصرح به فقط
 
@@ -685,7 +696,7 @@ The developers, contributors, distributors, and owners of WAFPierce assume no li
 • تفهم أن سوء استخدام هذه الأداة قد يؤدي إلى عواقب قانونية
 
 حدود المسؤولية:
-لا يتحمل المطورون والمساهمون والموزعون وأصحاب WAFPierce أي مسؤولية عن سوء الاستخدام أو الضرر أو العواقب القانونية أو فقدان البيانات أو انقطاع الخدمة أو أي ضرر آخر ناتج عن استخدام هذه الأداة أو عدم القدرة على استخدامها. يتم توفير هذا البرنامج "كما هو" بدون أي ضمان من أي نوع. أنت توافق على أنك تستخدم هذه الأداة على مسؤوليتك الخاصة بالكامل.""",
+لا يتحمل المطورون والمساهمون والموزعون وأصحاب Blackthorn أي مسؤولية عن سوء الاستخدام أو الضرر أو العواقب القانونية أو فقدان البيانات أو انقطاع الخدمة أو أي ضرر آخر ناتج عن استخدام هذه الأداة أو عدم القدرة على استخدامها. يتم توفير هذا البرنامج "كما هو" بدون أي ضمان من أي نوع. أنت توافق على أنك تستخدم هذه الأداة على مسؤوليتك الخاصة بالكامل.""",
         # Timeline & Plugins translations
         'scan_timeline': 'الجدول الزمني للفحص',
         'timeline_viewer': 'عارض الجدول الزمني',
@@ -723,7 +734,7 @@ The developers, contributors, distributors, and owners of WAFPierce assume no li
         'queue_saved': 'تم حفظ قائمة الانتظار',
     },
     'uk': {
-        'window_title': 'WAFPierce - Інтерфейс',
+        'window_title': 'Blackthorn - Інтерфейс',
         'target_url': 'URL цілі:',
         'add': 'Додати',
         'remove': 'Видалити',
@@ -804,7 +815,7 @@ The developers, contributors, distributors, and owners of WAFPierce assume no li
         'restart_confirm_msg': 'Мову змінено. Перезапустити зараз?',
         'yes': 'Так',
         'no': 'Ні',
-        'legal_disclaimer_title': 'WAFPierce - ЛЕГАЛЬНИЙ ДИСКЛЕЙМЕР',
+        'legal_disclaimer_title': 'Blackthorn - ЛЕГАЛЬНИЙ ДИСКЛЕЙМЕР',
         'legal_disclaimer_header': '⚠️ ЛЕГАЛЬНИЙ ДИСКЛЕЙМЕР ⚠️',
         'i_agree': 'Погоджуюсь',
         'i_decline': 'Відхиляю',
@@ -953,7 +964,7 @@ The developers, contributors, distributors, and owners of WAFPierce assume no li
         'security_issues': 'Проблеми безпеки',
         'no_security_issues': 'Проблем безпеки не виявлено',
         'export_ssl_info': 'Експортувати інформацію',
-        'legal_disclaimer': """WAFPierce – Юридична відомість
+        'legal_disclaimer': """Blackthorn – Юридична відомість
 
 ТІЛЬКИ ДЛЯ АВТОРИЗОВАНОГО ТЕСТУВАННЯ БЕЗПЕКИ
 
@@ -969,7 +980,7 @@ The developers, contributors, distributors, and owners of WAFPierce assume no li
 • Ви розумієте, що неправильне використання цього інструменту може призвести до юридичних наслідків
 
 Обмеження відповідальності:
-Розробники, учасники, дистриб'ютори та власники WAFPierce не несуть жодної відповідальності за неправильне використання, збитки, юридичні наслідки, втрату даних, переривання обслуговування або будь-яку іншу шкоду, що виникає внаслідок використання або неможливості використання цього інструменту. Це програмне забезпечення надається "як є" без будь-яких гарантій. Ви погоджуєтесь, що використовуєте цей інструмент повністю на власний ризик.""",
+Розробники, учасники, дистриб'ютори та власники Blackthorn не несуть жодної відповідальності за неправильне використання, збитки, юридичні наслідки, втрату даних, переривання обслуговування або будь-яку іншу шкоду, що виникає внаслідок використання або неможливості використання цього інструменту. Це програмне забезпечення надається "як є" без будь-яких гарантій. Ви погоджуєтесь, що використовуєте цей інструмент повністю на власний ризик.""",
         # Timeline & Plugins translations
         'scan_timeline': 'Хронологія сканувань',
         'timeline_viewer': 'Переглядач хронології',
@@ -1151,7 +1162,7 @@ def _save_prefs(prefs: dict) -> None:
         pass
 
 
-LEGAL_DISCLAIMER = """WAFPierce – Legal Disclaimer
+LEGAL_DISCLAIMER = """Blackthorn – Legal Disclaimer
 
 FOR AUTHORIZED SECURITY TESTING ONLY
 
@@ -1167,7 +1178,7 @@ By clicking "I Agree", you acknowledge and confirm that:
 • You understand that misuse of this tool may result in legal consequences
 
 Limitation of Liability:
-The developers, contributors, distributors, and owners of WAFPierce assume no liability for misuse, damage, legal consequences, data loss, service disruption, or any other harm resulting from the use or inability to use this tool. This software is provided "as is", without warranty of any kind, expressed or implied. You agree that you use this tool entirely at your own risk."""
+The developers, contributors, distributors, and owners of Blackthorn assume no liability for misuse, damage, legal consequences, data loss, service disruption, or any other harm resulting from the use or inability to use this tool. This software is provided "as is", without warranty of any kind, expressed or implied. You agree that you use this tool entirely at your own risk."""
 
 
 def _show_missing_packages_error():
@@ -1181,8 +1192,8 @@ def _show_missing_packages_error():
             import ctypes
             ctypes.windll.user32.MessageBoxW(
                 0,
-                "WAFPierce failed to start.\n\nThe application bundle appears to be corrupted or incomplete.\nPlease re-download the application.",
-                "WAFPierce - Error",
+                "Blackthorn failed to start.\n\nThe application bundle appears to be corrupted or incomplete.\nPlease re-download the application.",
+                "Blackthorn - Error",
                 0x10  # MB_ICONERROR
             )
         except Exception:
@@ -1193,7 +1204,7 @@ def _show_missing_packages_error():
     print("\n" + "="*70)
     print("❌ MISSING REQUIRED PACKAGES")
     print("="*70)
-    print("\nWAFPierce requires PySide6 for the graphical user interface.")
+    print("\nBlackthorn requires PySide6 for the graphical user interface.")
     print("\nTo install the required packages, run:")
     print("\n    pip install PySide6>=6.10.1")
     print("\n    -- OR --")
@@ -1293,7 +1304,7 @@ def _show_disclaimer_qt(app) -> bool:
     from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
                                    QLabel, QPushButton, QTextEdit)
     from PySide6.QtCore import Qt
-    from PySide6.QtGui import QFont, QFontDatabase
+    from PySide6.QtGui import QFont, QFontDatabase, QPixmap
     
     # Get current language from prefs
     lang = _load_prefs().get('language', 'en')
@@ -1313,7 +1324,7 @@ def _show_disclaimer_qt(app) -> bool:
     
     dialog = QDialog()
     dialog.setWindowTitle(_t('legal_disclaimer_title', lang))
-    dialog.setFixedSize(650, 520)
+    dialog.setFixedSize(680, 700)
     dialog.setStyleSheet(f"""
         QDialog {{ background-color: #0f1112; }}
         QLabel {{ color: #d7e1ea; font-family: '{selected_font}'; }}
@@ -1324,6 +1335,17 @@ def _show_disclaimer_qt(app) -> bool:
     layout = QVBoxLayout(dialog)
     layout.setSpacing(15)
     layout.setContentsMargins(20, 20, 20, 20)
+
+    # Supplied wide identity artwork: shown as a calm launch surface before the
+    # high-stakes authorization copy, never as a decorative workspace texture.
+    if os.path.exists(BANNER_PATH):
+        banner = QLabel()
+        banner.setAlignment(Qt.AlignCenter)
+        pixmap = QPixmap(BANNER_PATH)
+        if not pixmap.isNull():
+            banner.setPixmap(pixmap.scaled(440, 220, Qt.KeepAspectRatio,
+                                           Qt.SmoothTransformation))
+            layout.addWidget(banner)
     
     # Header
     header = QLabel(_t('legal_disclaimer_header', lang))
@@ -2169,8 +2191,8 @@ def main() -> None:
             brand.setSpacing(10)
             logo = QLabel()
             try:
-                if os.path.exists(LOGO_PATH):
-                    pm = QPixmap(LOGO_PATH)
+                if os.path.exists(SIDEBAR_LOGO_PATH):
+                    pm = QPixmap(SIDEBAR_LOGO_PATH)
                     if not pm.isNull():
                         logo.setPixmap(pm.scaledToHeight(30, Qt.SmoothTransformation))
             except Exception:
@@ -2178,7 +2200,7 @@ def main() -> None:
             brand.addWidget(logo)
             name_box = QVBoxLayout()
             name_box.setSpacing(0)
-            name_lbl = QLabel('WAFPierce')
+            name_lbl = QLabel(PRODUCT_NAME)
             name_lbl.setObjectName('BrandName')
             tag_lbl = QLabel(f"v{'.'.join(__version__.split('.')[:2])}")
             tag_lbl.setObjectName('BrandTag')
@@ -3017,7 +3039,7 @@ def main() -> None:
             try:
                 self._hacker_mode = not self._hacker_mode
                 if self._hacker_mode:
-                    self.setWindowTitle('WAFPierce - [HACKER MODE ACTIVATED] 💀')
+                    self.setWindowTitle('Blackthorn - [HACKER MODE ACTIVATED] 💀')
                     self.append_log('\n' + '='*50)
                     self.append_log('🎮 KONAMI CODE ACTIVATED!')
                     self.append_log('💀 H A C K E R   M O D E   E N G A G E D 💀')
@@ -3029,7 +3051,7 @@ def main() -> None:
                         QWidget { border: 2px solid #00ff00; }
                     ''')
                 else:
-                    self.setWindowTitle('WAFPierce - GUI (Qt)')
+                    self.setWindowTitle(_t('window_title', self._lang))
                     self.append_log('\n[*] Hacker mode deactivated. Back to normal.\n')
                     # Remove glow - reload theme
                     try:
@@ -4028,7 +4050,7 @@ def main() -> None:
             ''')
             outer = QVBoxLayout(dlg)
 
-            banner = QLabel('Detect-&-drive: WAFPierce runs tools already installed on this machine. '
+            banner = QLabel('Detect-and-drive: Blackthorn runs tools already installed on this machine. '
                             'Nothing is installed for you. Authorized targets only.')
             banner.setStyleSheet('color:#8b949e; padding:2px;')
             banner.setWordWrap(True)
@@ -4523,7 +4545,7 @@ def main() -> None:
 
         def _build_proxy_page(self):
             """Built-in intercepting proxy + Burp/ZAP-style Repeater. Records HTTP(S)
-            traffic to the unified history store; HTTPS needs the WAFPierce CA trusted."""
+            traffic to the unified history store; HTTPS needs the Blackthorn CA trusted."""
             from .config import get_proxy_ca_dir
             dlg = QtWidgets.QWidget()
             dlg.setWindowTitle('Proxy + Repeater')
@@ -4568,7 +4590,7 @@ def main() -> None:
             ca_export = QPushButton('Export CA cert')
             ca_install = QPushButton('Install CA (current user)')
             ca_remove = QPushButton('Remove CA')
-            caline.addWidget(QLabel('HTTPS needs the WAFPierce CA trusted:'))
+            caline.addWidget(QLabel('HTTPS needs the Blackthorn CA trusted:'))
             caline.addWidget(ca_export); caline.addWidget(ca_install); caline.addWidget(ca_remove); caline.addStretch()
             pv.addLayout(caline)
 
@@ -4628,7 +4650,7 @@ def main() -> None:
                 self._stop_proxy(); set_running(False, 'stopped')
 
             def export_ca():
-                p, _ = QFileDialog.getSaveFileName(dlg, 'Export CA cert', 'wafpierce_ca.pem', 'PEM (*.pem)')
+                p, _ = QFileDialog.getSaveFileName(dlg, 'Export CA cert', 'blackthorn_ca.pem', 'PEM (*.pem)')
                 if p:
                     try:
                         from .proxy_ca import CertAuthority
@@ -5075,7 +5097,7 @@ def main() -> None:
                 import uuid as _uuid
                 collector = collector_combo.currentText()
                 cpath = sh_path.text().strip() if collector == 'sharphound' else ah_path.text().strip()
-                outdir = outdir_edit.text().strip() or os.path.join(tempfile.gettempdir(), 'wafpierce_ad')
+                outdir = outdir_edit.text().strip() or os.path.join(tempfile.gettempdir(), 'blackthorn_ad')
                 os.makedirs(outdir, exist_ok=True)
                 P['adint_output_dir'] = outdir
                 try:
@@ -5214,10 +5236,10 @@ def main() -> None:
                         icon = QApplication.style().standardIcon(
                             QtWidgets.QStyle.StandardPixmap.SP_MessageBoxInformation)
                     self._tray = QSystemTrayIcon(icon, self)
-                    self._tray.setToolTip('WAFPierce')
+                    self._tray.setToolTip(PRODUCT_NAME)
                 self._tray.show()
                 self._tray.showMessage(
-                    'WAFPierce — scan complete',
+                    'Blackthorn — scan complete',
                     f'{total} findings • {bypasses} confirmed bypasses • {crit} critical/high',
                     QSystemTrayIcon.MessageIcon.Information, 6000)
             except Exception:
@@ -5717,7 +5739,7 @@ def main() -> None:
                 else:
                     base = [sys.executable, '-u', '-m', 'wafpierce.msf', 'push']
                 # recon findings are informational -> push them all, not just confirmed
-                base += ['--all', '--workspace', str(prefs.get('msf_workspace', 'wafpierce'))]
+                base += ['--all', '--workspace', str(prefs.get('msf_workspace', 'blackthorn'))]
                 if prefs.get('msf_host'):
                     base += ['--msf-host', str(prefs['msf_host'])]
                 if prefs.get('msf_port'):
@@ -6778,7 +6800,7 @@ def main() -> None:
                                      'headers': [{'name': k, 'value': str(vv)} for k, vv in (t.get('respHeaders') or {}).items()],
                                      'content': {'size': t.get('length') or 0, 'text': t.get('respBody', '')}},
                     })
-                har = {'log': {'version': '1.2', 'creator': {'name': 'WAFPierce', 'version': '1'},
+                har = {'log': {'version': '1.2', 'creator': {'name': 'Blackthorn', 'version': '1'},
                                'entries': entries}}
                 try:
                     with open(path, 'w', encoding='utf-8') as f:
@@ -7854,7 +7876,7 @@ def main() -> None:
                     return
                 try:
                     from .ai_providers import write_report
-                    text = write_report(args['provider'], 'current WAFPierce workspace',
+                    text = write_report(args['provider'], 'current Blackthorn workspace',
                                         findings, api_key=args['api_key'],
                                         model=args['model'], base_url=args['base_url'])
                 except Exception:
@@ -7944,7 +7966,7 @@ def main() -> None:
 
         def _local_ai_fallback_report(self, findings):
             rows = list(findings or [])
-            lines = ['# WAFPierce Report Draft', '', '## Summary',
+            lines = ['# Blackthorn Report Draft', '', '## Summary',
                      f'- Findings reviewed: {len(rows)}',
                      '- AI provider was unavailable; this is a local structured draft.',
                      '', '## Findings']
@@ -8248,8 +8270,8 @@ def main() -> None:
                 msf_row2.addWidget(msf_pw_edit, 1)
                 msf_row2.addWidget(msf_show)
                 msf_row2.addWidget(QLabel('Workspace:'))
-                msf_ws_edit = QLineEdit(); msf_ws_edit.setPlaceholderText('wafpierce')
-                msf_ws_edit.setText(str(prefs.get('msf_workspace', 'wafpierce') or 'wafpierce'))
+                msf_ws_edit = QLineEdit(); msf_ws_edit.setPlaceholderText('blackthorn')
+                msf_ws_edit.setText(str(prefs.get('msf_workspace', 'blackthorn') or 'blackthorn'))
                 msf_row2.addWidget(msf_ws_edit)
                 integ_layout.addLayout(msf_row2)
 
@@ -8291,7 +8313,7 @@ def main() -> None:
                 def _export_profile():
                     try:
                         path, _ = QFileDialog.getSaveFileName(
-                            dlg, 'Export scan profile', 'wafpierce-profile.json',
+                            dlg, 'Export scan profile', 'blackthorn-profile.json',
                             'JSON files (*.json)')
                         if not path:
                             return
@@ -8366,7 +8388,7 @@ def main() -> None:
                         prefs['msf_host'] = msf_host_edit.text().strip() or '127.0.0.1'
                         prefs['msf_port'] = int(msf_port_spin.value())
                         prefs['msf_password'] = msf_pw_edit.text().strip()
-                        prefs['msf_workspace'] = msf_ws_edit.text().strip() or 'wafpierce'
+                        prefs['msf_workspace'] = msf_ws_edit.text().strip() or 'blackthorn'
                         prefs['msf_no_ssl'] = bool(msf_nossl_chk.isChecked())
                         prefs['caido_proxy_url'] = caido_proxy_edit.text().strip() or 'http://127.0.0.1:8080'
                         prefs['caido_route_scans'] = bool(caido_route_chk.isChecked())
@@ -8723,7 +8745,7 @@ def main() -> None:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WAFPierce Scan Report</title>
+    <title>Blackthorn Web Security Report</title>
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f1112; color: #d7e1ea; line-height: 1.6; padding: 20px; }}
@@ -8758,7 +8780,7 @@ def main() -> None:
 </head>
 <body>
     <div class="container">
-        <h1>🛡️ WAFPierce Scan Report</h1>
+        <h1>Blackthorn Web Security Report</h1>
         <p style="color: #8b949e;">Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
         
         <h2>📊 Summary</h2>
@@ -8826,7 +8848,7 @@ def main() -> None:
 '''
                 html += '        </div>\n'
             
-            html += '''        <p class="generated">Report generated by WAFPierce - Web Application Firewall Bypass Scanner</p>
+            html += '''        <p class="generated">Report generated by Blackthorn — threat hunting and bug bounty web security toolkit</p>
     </div>
 </body>
 </html>'''
@@ -9599,7 +9621,7 @@ def main() -> None:
             import html as _html
             import re as _re
 
-            # ---- built-in fuzzing payload sets (WAFPierce is a WAF-bypass tool) ----
+            # ---- built-in web-security fuzzing payload sets ----
             PAYLOADS = {
                 'XSS': ['<script>alert(1)</script>', '"><script>alert(1)</script>',
                         "'><script>alert(1)</script>", '<img src=x onerror=alert(1)>',
@@ -9732,7 +9754,7 @@ def main() -> None:
             req_lay = QVBoxLayout(req_box); req_lay.setContentsMargins(0, 0, 0, 0)
             req_lay.addWidget(QLabel('REQUEST HEADERS  (one per line: Name: value)'))
             headers_edit = QPlainTextEdit()
-            headers_edit.setPlaceholderText('User-Agent: WAFPierce-Repeater\nX-Forwarded-For: 127.0.0.1')
+            headers_edit.setPlaceholderText('User-Agent: Blackthorn-Repeater\nX-Forwarded-For: 127.0.0.1')
             headers_edit.setMaximumHeight(150)
             req_lay.addWidget(headers_edit)
             req_lay.addWidget(QLabel('REQUEST BODY  (optional)'))
@@ -11436,7 +11458,7 @@ def main() -> None:
                 create_tab = QWidget()
                 create_layout = QVBoxLayout(create_tab)
                 
-                create_info = QLabel('🔧 Create Your Own Plugin\\n\\nWAFPierce plugins are Python files that inherit from the BypassPlugin base class.')
+                create_info = QLabel('🔧 Create Your Own Plugin\\n\\nBlackthorn plugins are Python files that inherit from the BypassPlugin base class.')
                 create_info.setStyleSheet('color: #d7e1ea; padding: 10px;')
                 create_layout.addWidget(create_info)
 
@@ -11453,7 +11475,7 @@ def main() -> None:
                 code_example.setStyleSheet('background-color: #16181a; color: #d7e1ea; font-family: monospace; border: 1px solid #2b2f33;')
                 code_example.setPlainText('''
 """
-Example WAFPierce Plugin Template
+Example Blackthorn Plugin Template
 ---------------------------------
 
 This file shows how to create your own custom WAF bypass plugin.
@@ -11474,7 +11496,7 @@ Rename this file to something meaningful, for example:
 
 # -----------------------------------------------------
 # REQUIRED IMPORT
-# All WAFPierce plugins must inherit from BypassPlugin
+# All Blackthorn plugins must inherit from BypassPlugin
 # -----------------------------------------------------
 try:
     from wafpierce.plugins import BypassPlugin
@@ -11494,7 +11516,7 @@ class DoubleEncodingBypassPlugin(BypassPlugin):
 
     # -------------------------------------------------
     # EDIT THESE METADATA FIELDS
-    # These appear in the WAFPierce plugin list/UI
+    # These appear in the Blackthorn plugin list/UI
     # -------------------------------------------------
 
     name = "Double URL Encoding Bypass"   # Change to your technique name
@@ -11629,7 +11651,7 @@ class DoubleEncodingBypassPlugin(BypassPlugin):
 # -----------------------------------------------------
 # REQUIRED PLUGIN REGISTRATION
 #
-# WAFPierce automatically loads plugins using this
+# Blackthorn automatically loads plugins using this
 # variable, so it must point to your plugin class.
 #
 # If you change the class name, update it here too.

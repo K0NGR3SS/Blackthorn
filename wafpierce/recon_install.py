@@ -145,7 +145,7 @@ def _platform() -> Tuple[str, str]:
 
 def _fetch_bytes(url: str, timeout: float = 60.0,
                  progress: Optional[Callable[[int, int], None]] = None) -> bytes:
-    req = urllib.request.Request(url, headers={'User-Agent': 'WAFPierce-installer'})
+    req = urllib.request.Request(url, headers={'User-Agent': 'Blackthorn-installer'})
     with urllib.request.urlopen(req, timeout=timeout, context=_ctx()) as r:
         total = int(r.headers.get('Content-Length') or 0)
         chunks = []
@@ -163,7 +163,7 @@ def _fetch_bytes(url: str, timeout: float = 60.0,
 
 def _fetch_text(url: str, timeout: float = 30.0) -> str:
     req = urllib.request.Request(
-        url, headers={'User-Agent': 'WAFPierce-installer',
+        url, headers={'User-Agent': 'Blackthorn-installer',
                       'Accept': 'application/vnd.github+json'})
     with urllib.request.urlopen(req, timeout=timeout, context=_ctx()) as r:
         return r.read().decode('utf-8', 'replace')

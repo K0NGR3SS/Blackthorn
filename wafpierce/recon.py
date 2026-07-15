@@ -23,7 +23,7 @@ whose stdout it streams)::
 
 or via the unified CLI::
 
-    wafpierce recon example.com
+    blackthorn recon example.com
 """
 from __future__ import annotations
 
@@ -128,7 +128,7 @@ def format_preflight_error(missing: Sequence[Tuple[str, str, str, str]]) -> str:
         lines.append(f"        install:  {hint}")
     lines.append("")
     lines.append("Install the tools above, ensure they are on your PATH, then re-run recon.")
-    lines.append("Tip: `wafpierce doctor` re-checks recon readiness.")
+    lines.append("Tip: `blackthorn doctor` re-checks recon readiness.")
     return "\n".join(lines)
 
 
@@ -751,7 +751,7 @@ def run_recon(target: str, *, timeout: float = 300.0, top_ports: int = 100,
 # --------------------------------------------------------------------------- #
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog='wafpierce recon',
+        prog='blackthorn recon',
         description='External-tool reconnaissance (subfinder/amass/dnsx/httpx/nmap).')
     p.add_argument('target', help='domain or URL, e.g. example.com or https://example.com')
     p.add_argument('-o', '--output', help='write findings JSON to this file')

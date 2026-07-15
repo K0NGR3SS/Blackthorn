@@ -1,12 +1,12 @@
 # Security Policy
 
-Thank you for helping keep WAFPierce and its users safe. WAFPierce is a
-penetration-testing and security-research tool, so please distinguish between:
+Thank you for helping keep Blackthorn and its users safe. Blackthorn is a
+threat-hunting and bug bounty web security tool, so please distinguish between:
 
-- vulnerabilities in WAFPierce itself; and
-- findings discovered while using WAFPierce against a third-party system.
+- vulnerabilities in Blackthorn itself; and
+- findings discovered while using Blackthorn against a third-party system.
 
-This policy covers vulnerabilities in WAFPierce itself.
+This policy covers vulnerabilities in Blackthorn itself.
 
 ## Supported Versions
 
@@ -31,14 +31,14 @@ Examples of in-scope issues include:
 - unsafe handling of proxies, certificates, imported scan data, or external
   tool output; and
 - dependency or packaging issues that create a practical exploit path for
-  WAFPierce users.
+  Blackthorn users.
 
 Out-of-scope reports include:
 
-- vulnerabilities in third-party targets tested with WAFPierce;
-- payloads or bypass techniques that work as intended against a WAF/CDN;
+- vulnerabilities in third-party targets tested with Blackthorn;
+- payloads or edge-control techniques that work as intended against a target;
 - missing detections, false positives, or scanner accuracy issues without a
-  security impact on WAFPierce users;
+  security impact on Blackthorn users;
 - social engineering, spam, physical attacks, or denial-of-service testing
   against project infrastructure; and
 - issues that require a malicious local user on an already-compromised machine
@@ -48,17 +48,15 @@ Out-of-scope reports include:
 
 Please do not open a public GitHub issue for security vulnerabilities.
 
-Report vulnerabilities privately by using GitHub's private Security Advisories
-feature on the WAFPierce repository:
-
-<https://github.com/K0NGR3SS/WAFPierce/security/advisories/new>
+Report vulnerabilities privately through the repository's GitHub Security tab
+using a private Security Advisory.
 
 If GitHub advisories are not available to you, contact the maintainers directly:
 Nazariy Buryak or Marwan Fayad.
 
 Please include as much of the following as possible:
 
-- the affected WAFPierce version or commit;
+- the affected Blackthorn version or commit;
 - your operating system and Python version;
 - a clear description of the issue and impact;
 - reproduction steps, proof-of-concept input, or a minimal test case;
@@ -80,14 +78,14 @@ in release notes or changelogs if they want recognition.
 
 If we decline a report, we will explain why, for example when the behavior is a
 documented limitation, a third-party target finding, or not a practical security
-risk for WAFPierce users.
+risk for Blackthorn users.
 
 ## Safe Harbor
 
 We will not pursue legal action or request law-enforcement investigation for
 good-faith research that follows this policy. Good-faith research means you:
 
-- test only WAFPierce or systems you are authorized to test;
+- test only Blackthorn or systems you are authorized to test;
 - avoid privacy violations, data destruction, persistence, or service
   disruption;
 - stop testing and report promptly if you discover sensitive data;
@@ -95,5 +93,5 @@ good-faith research that follows this policy. Good-faith research means you:
 - do not use the vulnerability for personal gain or to harm others.
 
 This safe harbor does not authorize testing third-party systems without
-permission. When using WAFPierce against external systems, obtain explicit
+permission. When using Blackthorn against external systems, obtain explicit
 authorization and follow responsible disclosure practices.

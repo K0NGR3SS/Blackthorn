@@ -1,4 +1,4 @@
-# Ruff configuration for WAFPierce.
+# Ruff configuration for Blackthorn.
 # Lint is advisory in CI (the codebase predates it); these rules catch real bugs
 # without forcing a mass reformat.
 target-version = "py38"

@@ -1,5 +1,5 @@
 """
-Sample WAFPierce plugin — a complete, copy-me template.
+Sample Blackthorn plugin — a complete, copy-me template.
 
 Drop a file like this into your plugins directory
 (``%APPDATA%/wafpierce/plugins`` on Windows, ``~/.config/wafpierce/plugins``
@@ -23,7 +23,7 @@ except Exception:  # when loaded as a top-level module by the plugin manager
 class TrustedHeaderBypassPlugin(BypassPlugin):
     name = "Trusted-Header Bypass"
     version = "1.0.0"
-    author = "WAFPierce Community"
+    author = "Blackthorn Community"
     description = "Tries internal/trust headers that some WAFs allow-list."
     category = "header"   # must be one of the SDK's validated categories
     tags = ["headers", "access-control", "bypass"]

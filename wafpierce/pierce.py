@@ -10202,7 +10202,7 @@ def _print_category_list() -> None:
         n = len(cat.get('techniques', []))
         print(f"  {key:<22} {n:>3} techniques   {cat.get('name', '')}")
     print(f"\n  {len(SCAN_CATEGORIES)} categories total. "
-          f"`wafpierce scan --list-techniques` for the full breakdown.")
+          f"`blackthorn scan --list-techniques` for the full breakdown.")
 
 
 def _print_technique_list() -> None:
@@ -10319,7 +10319,7 @@ def main(argv=None):
     """Standalone scanner with comprehensive error handling.
 
     Accepts an explicit ``argv`` (list of args *after* the subcommand) so the
-    unified :mod:`wafpierce.cli` dispatcher can route ``wafpierce scan ...`` here;
+    unified :mod:`wafpierce.cli` dispatcher can route ``blackthorn scan ...`` here;
     falls back to ``sys.argv[1:]`` when run directly.
     """
     from argparse import ArgumentParser
@@ -10345,7 +10345,10 @@ def main(argv=None):
         _print_technique_list()
         return 0
 
-    parser = ArgumentParser(prog='wafpierce scan', description='WAFPierce WAF Bypass Scanner')
+    parser = ArgumentParser(
+        prog='blackthorn scan',
+        description='Blackthorn authorized web security investigation scanner',
+    )
     parser.add_argument('target', nargs='?', help='Target URL (or set it in --config)')
     parser.add_argument('-V', '--version', action='store_true',
                        help='Show version + installed optional components, then exit')
@@ -10780,7 +10783,7 @@ def main(argv=None):
                 print(f"{sev_icon['summary']}Summary:")
                 print(f"   Total Findings: {len(results)}")
                 print(f"   Actual Bypasses: {len(bypasses)}")
-                print(f"   WAF/CDN Detections: {len(detections)}")
+                print(f"   Edge Security Detections: {len(detections)}")
                 print()
                 for label, group, always_reason in (
                     ('CRITICAL', critical, True), ('HIGH', high, True),

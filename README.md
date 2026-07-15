@@ -1,158 +1,448 @@
 <div align="center">
-  <img src="promotion1.png" alt="WAFPierce Logo" width="400"/>
-  
-  <h1>WAFPierce</h1>
-  <b>Teaching firewalls humility, one bypass at a time</b>
-  <br><br>
-  <a href="https://img.shields.io/badge/version-1.7-blue"><img src="https://img.shields.io/badge/version-1.7-blue"/></a>
-  <a href="https://img.shields.io/badge/python-3.8+-green"><img src="https://img.shields.io/badge/python-3.8+-green"/></a>
-  <a href="https://img.shields.io/badge/license-MIT-orange"><img src="https://img.shields.io/badge/license-MIT-orange"/></a>
+  <img src="blackthornlogo-background.jpg" alt="Blackthorn" width="100%" />
+  <h1>Blackthorn</h1>
+  <p><strong>Threat hunting and bug bounty web security toolkit</strong></p>
+  <p>Discover attack surface, test web applications, validate findings, reproduce evidence, and build reports from a desktop workspace or CLI.</p>
+  <p>
+    <img src="https://img.shields.io/badge/version-1.7-1f2937" alt="Version 1.7" />
+    <img src="https://img.shields.io/badge/technique_groups-128-1f2937" alt="128 technique groups" />
+    <img src="https://img.shields.io/badge/categories-16-1f2937" alt="16 categories" />
+    <img src="https://img.shields.io/badge/python-3.8%2B-1f2937" alt="Python 3.8+" />
+    <img src="https://img.shields.io/badge/license-MIT-1f2937" alt="MIT license" />
+  </p>
 </div>
 
----
+> Use Blackthorn only on systems you own or are explicitly authorized to test. Use `--authorize`, `--safe-mode`, and scope rules when testing production-like targets.
 
-<details>
-<summary><b>Table of Contents</b></summary>
+## Run it now
 
-- [What is WAFPierce?](#what-is-wafpierce)
-- [Key Features](#key-features)
-- [Changelog](#changelog)
-- [Installation](#installation)
-- [Usage](#usage)
-- [Bypass Techniques](#bypass-techniques)
-- [Future Roadmap](#future-roadmap)
-- [Requirements](#requirements)
-- [Responsible Disclosure](#responsible-disclosure)
-- [Educational Resources](#educational-resources)
-- [Authors](#authors)
-- [Legal Disclaimer](#legal-disclaimer)
-
-</details>
-
----
-
-## What is WAFPierce?
-
-WAFPierce is a powerful WAF/CDN assessment and bypass validation tool for penetration testing and security research.
-
-It fingerprints 17+ WAF vendors and 12+ CDN providers, then tests <b>100+ bypass/evasion techniques</b> using baseline + heuristic comparisons (status codes, response size, hashes) to confirm real bypasses—even when defenses return OK.
-
-It also supports rate-limit detection, API endpoint and directory discovery, protocol-level testing (request smuggling, HTTP/2 downgrade, WebSocket tunneling), comprehensive injection testing (SQLi, XSS, SSRF, NoSQL, LDAP, XXE, SSTI, Log4Shell), cloud-specific tests, a clean GUI, optimized parallel performance, and automated Markdown reporting.
-
-<p align="center">
-  <b>▶️ <a href="https://youtu.be/O_iT_AuvczY">Watch the Trailer</a></b>
-</p>
-
----
-
-## Key Features
-
-<details>
-<summary><b>Click to expand full feature list</b></summary>
-
-- <b>WAF Detection & Fingerprinting</b> — Identifies 17+ WAF vendors (Cloudflare, AWS WAF, Akamai, Imperva, F5, Sucuri, ModSecurity, and more)
-- <b>CDN Detection</b> — Detects 12+ CDN providers (CloudFront, Akamai, Fastly, Cloudflare, etc.)
-- <b>WAF Bypass Detection</b> — Tests 100+ different bypass techniques
-- <b>Smart WAF Bypass</b> — Uses baseline comparison and heuristic analysis (size, hash, status codes) to detect bypasses even when WAFs return 200 OK
-- <b>Payload Evasion Testing</b> — SQLi, XSS, Command Injection, Path Traversal, SSRF bypass payloads
-- <b>Advanced Injection Testing</b> — NoSQL, LDAP, SSTI, XXE, CRLF, Prototype Pollution, Deserialization, Log4Shell
-- <b>Protocol-Level Attacks</b> — HTTP Request Smuggling, HTTP/2 Downgrade, H2C Smuggling, WebSocket CSWSH, HTTP Desync
-- <b>Security Misconfiguration</b> — CORS, Open Redirect, Security Headers, Cookie Security, Clickjacking
-- <b>Cloud Security Testing</b> — AWS S3, Azure Blob, GCP Buckets, Kubernetes API, Serverless Functions
-- <b>Information Disclosure</b> — Git/SVN/Env files, Backups, Debug endpoints, Sensitive configs, API Key Exposure
-- <b>Business Logic Testing</b> — IDOR, Mass Assignment, Race Conditions, File Upload Bypass, Integer Overflow
-- <b>Advanced Attacks</b> — JWT Exploitation, GraphQL Attacks, Web Cache Deception, DNS Rebinding, CSS/XSLT Injection
-- <b>Rate Limit Detection</b> — Identifies request thresholds and rate limiting behavior
-- <b>API Endpoint Discovery</b> — Finds unprotected API routes and debug endpoints
-- <b>Subdomain Takeover Detection</b> — Identifies vulnerable subdomains across 25+ services
-- <b>Automated Reporting</b> — Generates detailed markdown reports
-- <b>GUI system</b> — Clean and efficient GUI system made for the users comfort
-- <b>Optimized Performance</b> — Connection pooling, response caching, and parallel batch testing
-
-</details>
-
----
-
-
----
-
-## 🚀 Quick Start
+### Desktop GUI
 
 ```bash
-git clone https://github.com/K0NGR3SS/WAFPierce.git
-cd WAFPierce
-pip3 install -r requirements.txt
+git clone https://github.com/K0NGR3SS/WAFPierce.git blackthorn
+cd blackthorn
+
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+pip install -e .
+
 python3 run_gui.py
 ```
 
----
-
-## 📦 Installation
+After installation, the same GUI can be opened with:
 
 ```bash
-# Clone repository
-git clone https://github.com/K0NGR3SS/WAFPierce.git
-cd WAFPierce
-
-# Install dependencies
-pip3 install -r requirements.txt
-
-# (Optional) Install in development mode
-pip3 install -e .
+blackthorn gui
 ```
 
-### pipx (isolated CLI install)
-```bash
-pipx install .
-wafpierce doctor
-```
+On Windows, activate the environment with `.venv\Scripts\activate` and use `python run_gui.py`.
 
-### Docker (headless CLI, no GUI)
-```bash
-docker build -t wafpierce .
-docker run --rm wafpierce scan https://target --safe-mode
-docker run --rm wafpierce doctor
-```
-
----
-
-## 🖥️ Usage
-
-### Run the GUI
-```bash
-python3 run_gui.py
-```
-
-### Command line
-
-After `pip install -e .` the unified `wafpierce` command exposes subcommands
-(all the documented scanner flags live under `scan`):
+### CLI
 
 ```bash
-wafpierce scan https://target            # full technique scanner
-wafpierce scan https://target --impersonate chrome --oob interactsh
-wafpierce scan https://target --dry-run --safe-mode      # plan only, no requests
-wafpierce chain https://target           # bypass -> enum -> scan -> recon chain
-wafpierce doctor                         # environment preflight
-wafpierce gui                            # launch the desktop GUI
-wafpierce --version                      # version + which optional deps are installed
+git clone https://github.com/K0NGR3SS/WAFPierce.git blackthorn
+cd blackthorn
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+
+blackthorn doctor
+blackthorn scan https://target.example --dry-run --safe-mode
 ```
 
-A bare `wafpierce https://target` (no subcommand) is treated as `scan`. Run
-`wafpierce scan -h` for the full flag list, or `wafpierce scan --list-techniques`
-to see every technique grouped by category.
+Passing a URL without a subcommand defaults to `scan`:
 
-Without installing, the equivalent is `python3 -m wafpierce <command> ...`.
+```bash
+blackthorn https://target.example --dry-run
+```
 
-Helpful flags: `--dry-run`, `--list-categories`, `--list-techniques`, `-q/--quiet`,
-`--no-color` (also honors the `NO_COLOR` env var), `--max-time <seconds>`,
-`--seed <n>`, `--profile stealth|normal|aggressive`.
+### Docker
 
-**Config file** — stop retyping flags (`--config wp.toml [--config-profile staging]`,
-JSON or TOML; explicit flags still win):
+```bash
+docker build -t blackthorn .
+docker run --rm blackthorn doctor
+docker run --rm blackthorn scan https://target.example --safe-mode
+```
+
+The Docker entrypoint is the headless CLI.
+
+## Capability summary
+
+The counts below come from the version 1.7 registered scanner and tool catalogs. A technique group is a distinct test implementation; many groups send multiple payloads, encodings, headers, paths, methods, or confirmation requests.
+
+| Capability | Current coverage |
+| --- | ---: |
+| Active web-security technique groups | **128** |
+| Scan categories | **16** |
+| External tool drivers | **23** |
+| Export formats | **9** |
+| Recorded-traffic import formats | **3** |
+| AI provider types | **3** |
+| Desktop workspace sections | **22** |
+
+To verify the current scanner catalog from the installed version:
+
+```bash
+blackthorn scan --list-categories
+blackthorn scan --list-techniques
+```
+
+## What Blackthorn can do
+
+### Attack-surface discovery
+
+- Crawl same-host links, forms, and parameters.
+- Parse `robots.txt` and `sitemap.xml`.
+- Ingest OpenAPI/Swagger documents and GraphQL schemas.
+- Discover API routes, debug endpoints, sensitive files, JavaScript bundles, and content paths.
+- Enumerate subdomains and check DNS resolution, certificate transparency, historical DNS, and zone-transfer exposure.
+- Fingerprint frameworks, servers, CMS platforms, cloud providers, edge controls, and known vulnerable software versions.
+- Detect subdomain takeover conditions across supported provider signatures.
+- Run a dedicated external reconnaissance workflow with Subfinder, Amass, dnsx, httpx, and Nmap.
+
+### Active web-security testing
+
+- Test authentication, authorization, IDOR, mass assignment, API-version exposure, and role-related logic.
+- Test SQL injection, XSS, command injection, NoSQL, LDAP, SSTI, XXE, CRLF, SSI, XSLT, CSS injection, deserialization, prototype pollution, and traversal behavior.
+- Test JWT, OAuth/OIDC, SAML, GraphQL, WebSocket, SSRF, cloud metadata, file upload, cache, race, and request-smuggling behavior.
+- Exercise parser differences using alternate methods, encodings, content types, duplicate parameters, multipart boundaries, transfer encodings, and HTTP protocol variations.
+- Run optional browser-backed DOM XSS and client-side path traversal checks.
+- Probe AI/LLM-backed endpoints for prompt-injection behavior.
+
+### Finding validation and evidence
+
+- Establish a multi-sample response baseline and normalize dynamic values before comparison.
+- Compare status, size, content similarity, and response behavior instead of relying on status code alone.
+- Re-run candidate bypasses with cache disabled and record confirmation counts.
+- Attach confidence, severity, CVSS v3.1 score/vector, CWE, request details, and reproduction `curl` data where available.
+- Confirm blind SSRF, XXE, and JNDI-style behavior through Interactsh or the self-hosted OOB listener.
+- Redact cookies, tokens, authorization headers, and other secrets from saved reports by default.
+- Save scan history, compare runs, identify new/resolved findings, and monitor a target over time.
+
+### Real traffic and authenticated testing
+
+- Import HAR captures, Postman v2 collections, and Burp items XML.
+- Seed testing from real application routes and parameters instead of only the target root.
+- Supply cookies, repeatable custom headers, bearer tokens, or HTTP Basic credentials.
+- Authenticate through a login URL with form data and a configurable success marker.
+- Re-authenticate when a configured session expires during a scan.
+- Send captured requests between the Browser, Proxy, Repeater, Fuzzer, and findings workflow.
+
+### Execution controls
+
+- Run specific categories or the complete catalog.
+- Use `stealth`, `normal`, or `aggressive` profiles.
+- Control threads, per-request delay, timeout, jitter, seed, and maximum runtime.
+- Rotate a proxy pool or route traffic through Tor.
+- Resume interrupted scans from checkpoints.
+- Run multiple targets from the GUI queue with per-target and total progress.
+- Use dry-run mode to inspect the plan without sending requests.
+- Use safe mode to skip noisy, denial-of-service, and state-changing probes.
+
+### Reporting and automation
+
+- Export HTML, JSON, PDF, SARIF, Nuclei YAML, JUnit XML, CSV, Prometheus/OpenMetrics, or HAR.
+- Emit JSON to stdout for pipelines.
+- Return exit code `10` when a finding meets a configured `--fail-on` severity threshold.
+- Generate standalone HTML diffs against a previous JSON result set.
+- Push summaries to Slack, Discord, Microsoft Teams, or a generic webhook.
+- Map confirmed findings into DefectDojo-compatible records.
+- Hand findings to Metasploit RPC or replay/export them through Caido.
+- Run a local JSON-lines agent bridge over standard input/output.
+
+### Extensibility and AI
+
+- Load user plugins without changing the core scanner.
+- Add database-backed custom payloads and evasion profiles.
+- Build typed pipelines from Blackthorn scans, external tools, and report stages.
+- Use Anthropic Claude, a local Ollama model, or an OpenAI-compatible endpoint.
+- Run opt-in false-positive triage, report drafting, and payload-mutation assistance.
+- Continue scanning when an optional AI provider is unavailable; AI is never required for the core engine.
+
+## Detailed scanner coverage: 128 technique groups
+
+### Header Manipulation — 9
+
+- Host header injection
+- `X-Forwarded-For` behavior
+- `X-Forwarded-Host` behavior
+- `X-Original-URL` / rewrite-path behavior
+- Header injection
+- Origin header manipulation
+- Custom header fuzzing
+- IP-spoofing header variants
+- Extended host-header attacks
+
+### Encoding & Obfuscation — 9
+
+- URL encoding variations
+- Double encoding
+- Case manipulation
+- Comment injection
+- Whitespace manipulation
+- Unicode normalization
+- Payload mutation
+- Polyglot payloads
+- Extended path normalization
+
+### Protocol-Level Attacks — 19
+
+- HTTP method bypass
+- HTTP method override
+- Content-type bypass
+- HTTP parameter pollution
+- Transfer-Encoding request smuggling
+- HTTP/2 downgrade behavior
+- HTTP/2-specific attacks
+- WebSocket upgrade behavior
+- WebSocket security checks
+- Chunked transfer variations
+- HTTP pipelining
+- Extended request smuggling
+- HTTP desynchronization
+- Extended verb tampering
+- Multipart boundary bypass
+- WebSocket fuzzing
+- CL.0 / 0.CL smuggling
+- gRPC detection
+- HTTP/3 detection
+
+### Cache & Control — 6
+
+- Cache-Control manipulation
+- Range-header behavior
+- Cache poisoning
+- Web cache deception
+- Extended range attacks
+- Deep cache poisoning
+
+### Injection Testing — 22
+
+- SQL injection bypass
+- XSS bypass
+- Command injection bypass
+- Windows command injection
+- Path traversal bypass
+- NoSQL injection
+- LDAP injection
+- Server-side template injection
+- XML external entity injection
+- CRLF injection
+- Prototype pollution
+- JSON injection and parser differentials
+- Insecure deserialization
+- Server-Side Includes injection
+- Log4Shell/JNDI patterns
+- Dangling markup
+- CSS injection
+- XSLT injection
+- JSON-based SQL injection bypass
+- DOM XSS
+- Client-side path traversal
+- Mutation fuzzing
+
+### Security Misconfigurations — 8
+
+- CORS misconfiguration
+- Open redirect
+- Security-header audit
+- Cookie-security audit
+- Clickjacking
+- Content sniffing
+- HTTP response splitting
+- Content Security Policy analysis
+
+### Business Logic & Authorization — 8
+
+- API versioning bypass
+- Mass assignment
+- IDOR patterns
+- Business-logic boundary checks
+- Email-header injection
+- File-upload bypass
+- Rate-limit detection
+- Race-condition testing
+
+### JWT & Authentication Attacks — 6
+
+- JWT/OAuth bypass cases
+- JWT algorithm, key, and claim attacks
+- OAuth/OIDC configuration and redirect behavior
+- Embedded JWK self-signing
+- SAML XML Signature Wrapping surface checks
+- Authentication and authorization logic checks
+
+### GraphQL Attacks — 3
+
+- GraphQL bypass cases
+- Deep GraphQL testing, introspection, batching, depth, and alias behavior
+- GraphQL CSRF
+
+### AI / LLM Attacks — 1
+
+- LLM prompt-injection and system-prompt leakage behavior
+
+### SSRF Advanced — 3
+
+- SSRF bypass variants
+- SSRF protocol smuggling
+- DNS rebinding
+
+### PDF / Document Attacks — 3
+
+- PDF generator injection
+- `postMessage` security checks
+- Relative Path Overwrite
+
+### Cloud Security — 8
+
+- Azure Blob enumeration
+- Google Cloud Storage bucket discovery
+- Serverless function detection
+- Kubernetes API exposure
+- Cloud-provider detection
+- Cloud metadata enumeration
+- Extended multi-cloud metadata testing
+- Amazon S3 bucket enumeration
+
+### Advanced Payloads — 7
+
+- Time-based detection
+- Buffer and size limits
+- Integer overflow boundaries
+- Bot-detection evasion
+- IPv6 representation bypass
+- Charset and overlong-UTF-8 confusion
+- HTTP/2 single-packet race testing
+
+### Information Disclosure — 6
+
+- Sensitive-file and configuration disclosure
+- Subdomain takeover detection
+- API key and secret exposure
+- Timing-based discovery
+- Error-based disclosure
+- Secrets in JavaScript bundles
+
+### Detection & Reconnaissance — 10
+
+- Edge rule-version detection
+- JavaScript challenge and bot-control detection
+- API endpoint discovery
+- DNS zone-transfer testing
+- Subdomain enumeration
+- Historical DNS lookup
+- Certificate-transparency lookup
+- Technology-stack fingerprinting
+- CVE fingerprinting
+- Content discovery
+
+## Desktop GUI workspace
+
+The PySide6 desktop application exposes the following sections from one persistent workspace:
+
+| Area | Sections and tools |
+| --- | --- |
+| Operate | Scan, Pipeline, AI / Automation, Recon, Browser, Proxy |
+| Analyze | Results, Dashboard, Timeline, Live Logs |
+| Tools | External Tools, Repeater, Fuzzer, SQLi, Secrets, Payloads, ZAP/Burp, AD / Internal |
+| Manage | Engagements, Schedule, Plugins, Settings |
+
+GUI functionality includes:
+
+- Multi-target queue with configurable concurrent targets, thread count, delay, and category selection.
+- Engagement selection, authorization file, include/exclude scope rules, safe mode, dry run, re-confirmation, impersonation, AI triage, and OOB settings.
+- Results Explorer with target grouping, search, category/severity filtering, sorting, finding details, and export.
+- Dashboard statistics, scan comparison, historical timeline, and live logs.
+- Built-in intercepting proxy, local CA management, traffic history, and Repeater.
+- Browser workspace and ZAP/Burp handoff.
+- Fuzzer, SQLi helper, secrets workflow, payload management, and custom payload packs.
+- External-tool detection, execution, output streaming, and normalized findings.
+- Engagement management, scheduled scans, scan-profile import/export, plugins, and persistent settings.
+
+## External tool drivers — 23
+
+Blackthorn does not silently install these tools. When already available on the host, it can detect and drive:
+
+| Purpose | Tools |
+| --- | --- |
+| Reconnaissance | Nmap, Masscan, Naabu, Subfinder, OWASP Amass, dnsx, httpx, WhatWeb, Katana |
+| Content discovery | ffuf, Feroxbuster, Gobuster, dirsearch |
+| Vulnerability testing | Nuclei, Nikto, WPScan, Dalfox, SSLyze, sqlmap |
+| Secrets and cloud | TruffleHog, Gitleaks, ScoutSuite, Prowler |
+
+The dedicated `blackthorn recon` workflow expects Subfinder, Amass, dnsx, ProjectDiscovery httpx, and Nmap. Check readiness with:
+
+```bash
+blackthorn doctor
+blackthorn recon example.com
+```
+
+## CLI commands
+
+| Command | Function |
+| --- | --- |
+| `blackthorn scan <url>` | Run the built-in 128-group web-security scanner |
+| `blackthorn recon <domain>` | Run the external-tool reconnaissance workflow |
+| `blackthorn chain <url>` | Run discovery, testing, reconnaissance, and reporting as one workflow |
+| `blackthorn msf ...` | Check Metasploit RPC, run auxiliary scanners, or push findings |
+| `blackthorn caido ...` | Check Caido, replay findings through its proxy, or export raw requests |
+| `blackthorn agent-server --stdio` | Start the local JSON-lines agent bridge |
+| `blackthorn doctor` | Check dependencies, configuration, OOB support, recon tools, and integrations |
+| `blackthorn gui` | Open the desktop application |
+| `blackthorn version` | Show the version and optional component availability |
+
+### Practical scan examples
+
+```bash
+# Inspect the request plan without sending traffic
+blackthorn scan https://target.example --dry-run --safe-mode
+
+# Authorized, allowlisted scan with browser impersonation
+blackthorn scan https://target.example \
+  --authorize scope.txt \
+  --safe-mode \
+  --impersonate chrome \
+  --export report.html \
+  --export-format html
+
+# Authenticated scan
+blackthorn scan https://target.example \
+  --bearer "$TOKEN" \
+  --header "X-Researcher: handle" \
+  --scope-include '^https://target\.example/'
+
+# Seed testing from captured traffic
+blackthorn scan https://target.example \
+  --import-har session.har \
+  --safe-mode
+
+# OOB confirmation for blind findings
+blackthorn scan https://target.example \
+  --oob interactsh \
+  --oob-wait 15
+
+# CI output and severity gate
+blackthorn scan https://target.example \
+  --json \
+  --export findings.sarif \
+  --export-format sarif \
+  --fail-on high
+
+# Resume and monitor
+blackthorn scan https://target.example --resume --monitor
+```
+
+Run `blackthorn scan --help` for every flag.
+
+## Configuration files
+
+Blackthorn accepts JSON or TOML configuration. Explicit CLI flags take precedence over file values.
 
 ```toml
-threads = 20
+threads = 10
+delay = 0.2
 impersonate = "chrome"
 safe_mode = true
 
@@ -161,489 +451,66 @@ target = "https://staging.example.com"
 oob = "interactsh"
 ```
 
-**CI / reporting / safety:**
-- `--export-format` now also supports `junit`, `csv`, `prometheus` (monitor-mode
-  textfile collector), and `har` (Burp/ZAP-importable) — alongside `sarif`,
-  `nuclei`, `html`, `json`, `pdf`.
-- `--fail-on <critical|high|medium|low|info>` — exit code `10` when a finding
-  reaches that severity (build gating).
-- `--diff-against prev.json [--diff-out diff.html]` — standalone HTML diff vs a
-  previous scan, highlighting new vs resolved findings.
-- The HTML report includes an executive summary, live search + severity/category
-  filters, CVSS hover tooltips, and copy-curl buttons.
-- `--slack-webhook`, `--discord-webhook`, `--teams-webhook` — push a findings
-  summary to chat.
-- `--authorize <file>` — allowlist of authorized hosts/URL patterns (globs ok);
-  the target must match before any test runs (fail-closed). Every scan is
-  recorded to `audit.log` in the config dir.
-- Reports **redact** cookies/tokens/auth by default; pass `--no-redact` to keep
-  raw values.
-
----
-
-## 🤝 Contributing
-
-Contributions, bug reports, and feature requests are welcome! Please open an issue or pull request on GitHub.
-
----
-
-## Changelog
-
-### Version 1.6 (June 2026)
-
-#### Accuracy & evidence
-- **Out-of-band (OOB) confirmation engine** — blind SSRF / Log4Shell-JNDI / blind XXE now *prove* themselves. A pluggable OOB layer (`--oob interactsh|selfhosted`) sprays uniquely-correlated callbacks early in the scan and collects interactions at the end; any received callback becomes a **CONFIRMED CRITICAL** finding carrying the inbound request as proof. Two backends: an **Interactsh** client (public `oast.*` or self-hosted, pure `cryptography`) and a **built-in self-hosted listener** (HTTP + best-effort DNS). Opt-in.
-- **Bypass re-confirmation pass** — every flagged bypass is replayed (cache off) and demoted to low confidence if it doesn't reproduce. Findings now carry `confidence` (high/medium/low) and `confirmations` (n/m). Toggle with `--no-reconfirm`.
-- **Reproduction `curl` per finding** — each result carries the exact copy-paste `curl` built from the request as it went on the wire; surfaced in the HTML report.
-
-#### Evasion
-- **TLS (JA3/JA4) + HTTP/2 fingerprint impersonation** — `--impersonate [chrome|chrome124|safari17_0|…]` routes probes through `curl_cffi` to mimic a real browser and slip past JS/bot WAFs (DataDome, PerimeterX, Kasada). Degrades gracefully to the `requests` stack if unavailable.
-
-#### New attack modules
-- **CSP analyzer** (unsafe-inline / wildcard / JSONP-able allowlist), **JWT embedded-`jwk` self-signing**, **GraphQL CSRF** (GET / form-urlencoded), **CL.0 / 0.CL request smuggling**, **SAML/XSW** surface detection, **password-reset host-poisoning**, **LLM prompt-injection** (new *AI / LLM Attacks* category), and **gRPC** + **HTTP/3 (QUIC)** detection.
-
-#### Engine controls
-- **CVSS v3.1** base score + vector + CWE on every finding; **scope rules** (`--scope-include`/`--scope-exclude`); **`--safe-mode`** (skips noisy/DoS/state-changing tests); **`--jitter`** random per-request delay; **proxy rotation** (`--proxy-pool`) and **`--tor`**.
-- **WAF feedback loop** — learns which techniques bypass which WAF vendor and runs the effective ones first next time.
-- **Resumable scans** (`--resume`) via per-target checkpoints; **auto re-login** when an authenticated session expires mid-scan.
-
-#### Input, integrations & reporting
-- **Traffic import** — seed the scan from **HAR / Postman / Burp** captures (`--import-har`/`--import-postman`/`--import-burp`).
-- **Integrations** — Slack push (`--slack-webhook`), generic webhook, DefectDojo finding mapping.
-- **PDF report export** (`--export-format pdf`, via reportlab; falls back to HTML).
-
-#### GUI
-- Scan dialog exposes **Re-confirm / Safe-mode / Impersonate / OOB** toggles (persisted), and the new **AI / LLM Attacks** category.
-
-#### Project health
-- **First automated test suite** — `pytest` against an in-process mock-WAF server (88 tests) covering repro, bypass detection, re-confirmation, exporters/PDF, OOB crypto/listener, impersonation, new attack modules, engine controls, importers, integrations, feedback/checkpoint, and the sample plugin. Added a `tests` + advisory `ruff` CI workflow (`requirements-dev.txt`, `[dev]` extra), a **sample plugin + `PLUGIN_SDK.md`**.
-
-> Deliberately **not** done: a full async-engine rewrite — the bounded adaptive thread pool already controls concurrency, and replacing the request path under 150 tested techniques is high-risk for low gain.
-
-### Version 1.5 (June 2026)
-
-#### Engine: faster, more accurate, bounded
-- **Single bounded thread pool** — Replaced the nested `ThreadPoolExecutor`-per-technique design (which could spawn ~`threads²` concurrent sockets and trigger WAF throttling) with one shared, bounded pool. The configured thread count is now a real ceiling on in-flight requests. Techniques run sequentially and fan their requests across the shared pool.
-- **Adaptive concurrency** — A token-style limiter shrinks parallelism on `429/503` pushback and recovers after sustained clean responses.
-- **Response cache actually works** — The cache key no longer includes the per-technique `X-Technique` marker, so identical probes are now deduplicated.
-- **`X-Technique` no longer leaks** — The technique label is tracked out-of-band and is never sent to the target (previously it fingerprinted the scanner and could trip custom-header WAF rules).
-- **Multi-sample baseline + similarity scoring** — The baseline is sampled multiple times to learn the page's natural jitter band; dynamic tokens (CSRF/nonce/timestamps/UUIDs) are normalized out and content is compared with a similarity ratio instead of a raw MD5. Dramatically reduces false-positive "different content" findings on dynamic pages.
-
-#### New discovery
-- **Crawler / spider** — Same-host BFS plus `robots.txt` and `sitemap.xml` parsing discovers real endpoints, forms, and parameters. Injection tests (SQLi, XSS, command injection, path traversal, SSRF) now fuzz **live discovered parameters**, not just `/`.
-- **Schema ingestion** — Pulls OpenAPI/Swagger (`/swagger.json`, `/openapi.json`, `/v3/api-docs`, …) and runs GraphQL introspection to drive schema-aware fuzzing.
-
-#### New test modules
-- **JSON-based SQLi WAF bypass** (PortSwigger 2022 technique)
-- **Charset / overlong-UTF-8 confusion** bypasses
-- **Deep cache poisoning** — fat GET, parameter cloaking, additional unkeyed headers
-- **OAuth/OIDC** — `redirect_uri` bypass variants + OIDC config exposure
-- **Secrets in JS bundles** — downloads referenced `.js` files and scans them for keys/tokens
-- **CVE fingerprinting** — maps detected server/tech versions to known CVEs (Heartbleed, CVE-2021-41773/42013, Log4Shell, Ghostcat, …)
-- **HTTP/2 single-packet race** (optional, via `httpx[http2]`) — far more reliable than concurrent-thread race testing
-- **Extended cloud metadata SSRF** — AWS/GCP/Azure/DigitalOcean/Oracle/Alibaba/OpenStack IMDS + ready-to-use **gopher** payload generation for Redis/MySQL
-- **DOM XSS + Client-Side Path Traversal** (optional, via Playwright headless browser)
-
-#### Integrations & extensibility (now actually wired into the engine)
-- **Custom payloads** from the database are merged into injection tests
-- **User plugins** are executed as a scan phase
-- **Evasion profiles** apply header/UA tweaks and can contribute curated techniques
-- A `create_scanner()` factory pre-wires all of the above from the DB/plugin manager (used by the CLI, GUI subprocess, and frozen `--scan-worker`)
-
-#### AI (opt-in)
-- **AI triage** (`--ai-triage`) flags likely false positives and adjusts severity
-- **AI report** (`--ai-report`) drafts a professional markdown assessment
-- **Payload mutation** helper generates novel evasion variants
-- Off by default; requires `pip install anthropic` and an Anthropic API key (`--ai-key` or `ANTHROPIC_API_KEY`)
-
-#### Reporting & automation
-- **Exports** — SARIF (CI/CD code scanning), Nuclei templates, and a standalone HTML report (`--export`, `--export-format`)
-- **Pipeline mode** — `--json` emits clean machine-readable results to stdout
-- **Continuous monitoring** — `--monitor` diffs against the previous scan of a target and reports only *new* findings, with optional `--webhook` alerts
-- New CLI toggles: `--no-crawl`, `--no-schema`, `--no-db-extras`
-
-#### Dependencies
-- Added `httpx[http2]` (core, for HTTP/2 tests). Optional extras: `playwright` (browser tests) and `anthropic` (AI) — install via `pip install -e .[browser,ai]` or `.[full]`.
-
----
-
-### Version 1.4 (March 2026)
-
-#### Bug Fixes & Stability
-- **Fixed fatal GUI crash on launch** — Corrected a corrupted `Signal(object)` declaration in `QtWorker` that prevented the app from starting
-- **Fixed frozen-mode scan crash** — Resolved `ModuleNotFoundError: No module named 'charset_normalizer.md'` when running in-process scans from the PyInstaller executable; added a runtime compatibility shim and updated `.spec` hidden imports
-- **Fixed Plugin Manager crash** — `cannot access free variable 'os'` error when clicking "Open Plugins Folder" caused by a scoping issue in the nested closure; `os` and `sys` are now correctly imported at the method level
-- **Fixed URL data lookups** — Progress bar resets, target detail panels, and queue removal were incorrectly using censored display text instead of the actual URL stored in Qt `UserRole` data; all corrected to use `item.data(0, 256)`
-- **Fixed `self.output` stale reference** — `_restore_scan_queue` was calling `self.output.append(...)` on a non-existent widget; corrected to use `self.append_log(...)`
-
-#### Feature Improvements
-- **Plugin template editor is now editable** — The plugin template in the Plugin Manager "Create" tab was previously read-only; it can now be freely edited before saving
-- **Plugin filename input added** — A filename field has been added to the Create tab so users can name the plugin file; saved directly to the plugins folder (`%APPDATA%/wafpierce/plugins/`)
-- **Plugin list auto-refreshes on save** — After creating a plugin from the template, the plugin list reloads automatically without needing to reopen the dialog
-- **Custom Payloads dialog hardened** — Add and Import buttons now validate input, show proper error dialogs on failure, and guard against missing database connection
-- **Scheduled Scans dialog hardened** — Added database availability guard, fixed `datetime` parsing to use `fromisoformat` correctly, and added explicit error messages for all failure paths
-- **Hardened entry point** — `run_gui.py` now falls back to `importlib.util` module loading if the standard `from wafpierce.gui import main` import fails in unusual path contexts
-
-#### Removed
-- **Scan Templates** — The Templates feature (📋 button, `Ctrl+T` shortcut, and save/load/delete dialog) has been removed as it was not providing enough value
-
-#### Dependency Updates
-- Added `cryptography>=42.0.0` to `requirements.txt` and `setup.py` for SSL certificate analysis support
-- Added `urllib3`, `certifi`, `charset-normalizer`, and `idna` as explicit install requirements
-
----
-
-### Version 1.3 (February 2025) 
-
-#### New Dangerous Attack Vectors (30+ New Tests)
-
-**Advanced Protocol Attacks:**
-- **GraphQL Deep Testing** - Introspection attacks, batching DoS, depth limit bypass, alias-based DoS, circular fragments
-- **JWT Attack Suite** - Algorithm confusion (none/None/NONE), KID injection (SQLi, traversal, RCE), JKU/X5U SSRF, weak secret detection
-- **Web Cache Deception** - Static extension tricks (.css, .js), cache key poisoning via unkeyed headers
-- **Log4Shell Detection** - ${jndi:ldap://} patterns with 12+ obfuscation bypasses (nested lookups, env variables)
-- **SSRF Protocol Smuggling** - gopher://, dict://, file://, ldap://, php://, jar://, netdoc:// handlers
-
-**Extended Security Tests:**
-- **Host Header Attacks** - Password reset poisoning, routing bypass, X-Forwarded-Host injection
-- **SSI Injection** - Server-Side Includes (exec cmd, include file, printenv)
-- **API Key/Secret Exposure** - 35+ patterns (AWS, GitHub, Stripe, Slack, Google, Firebase, etc.)
-- **DNS Zone Transfer** - AXFR enumeration attempts
-- **Extended Verb Tampering** - TRACE/TRACK (XST), DEBUG, WebDAV methods, custom methods
-- **Range Header Attacks** - Overlapping ranges, many ranges DoS, invalid ranges
-- **Multipart Boundary Bypass** - Long boundaries, special chars, quoted, CRLF variations
-
-**Advanced Discovery:**
-- **DNS Rebinding** - Bypass IP-based SSRF protections via rebinding domains
-- **Timing-Based Discovery** - Blind resource discovery via response timing anomalies
-- **Error-Based Disclosure** - Force verbose errors (type confusion, format strings, encoding)
-- **Path Normalization Extended** - 30+ variations (dots, slashes, encoding, null bytes, semicolons, unicode)
-- **Content Sniffing** - Polyglot file uploads (GIFAR, PDF+HTML, SVG+XSS)
-- **Buffer/Size Limits** - Large URL, headers, POST body testing
-
-**Dangerous Attack Vectors:**
-- **HTTP Desync** - Advanced request smuggling (CL.CL, space in header, tab, vertical tab, obs-fold)
-- **Dangling Markup** - Data exfiltration via unclosed HTML tags
-- **CSS Injection** - Attribute selector exfiltration, @import, @font-face
-- **XSLT Injection** - Code execution via document(), system-property(), php:function()
-- **PDF Injection** - SSRF/LFI via PDF generators (wkhtmltopdf, PhantomJS)
-- **PostMessage Vulnerabilities** - Insecure origin validation detection
-- **RPO (Relative Path Overwrite)** - XSS via CSS injection with relative paths
-- **Integer Overflow** - 32/64-bit boundary testing, signed/unsigned issues
-
-#### New Security Tests (35+ New Tests)
-- **CORS Misconfiguration** - Tests for overly permissive CORS policies, origin reflection, null origin
-- **Open Redirect Detection** - 25+ redirect parameter tests with encoding bypasses
-- **CRLF Injection** - HTTP response splitting via headers and parameters
-- **Prototype Pollution** - Query string and JSON body pollution tests
-- **SSTI (Server-Side Template Injection)** - Detection for Jinja2, Freemarker, Velocity, ERB, Twig, and more
-- **XXE (XML External Entity)** - File read, SSRF, and SOAP endpoint testing
-- **Insecure Deserialization** - Java, PHP, Python pickle, ASP.NET ViewState
-- **HTTP/2 Specific Attacks** - H2C smuggling, CONTINUATION frame detection
-- **WebSocket Security** - CSWSH (Cross-Site WebSocket Hijacking) testing
-- **Subdomain Takeover** - Detection for 25+ vulnerable services (GitHub, Heroku, AWS, Azure, etc.)
-- **Security Headers Audit** - CSP, HSTS, X-Frame-Options, Permissions-Policy analysis
-- **Cookie Security** - HttpOnly, Secure, SameSite flag verification
-- **Information Disclosure** - 50+ paths for sensitive files (.git, .env, backups, configs)
-- **NoSQL Injection** - MongoDB operator injection ($ne, $gt, $regex, $where)
-- **LDAP Injection** - Filter injection and authentication bypass tests
-- **Unicode Normalization** - WAF bypass via homoglyphs and encoding tricks
-- **JSON Injection** - Parser differential attacks, duplicate keys, type confusion
-- **Extended IP Spoofing** - 17+ header variations for IP-based access controls
-- **Azure Blob Enumeration** - Public container discovery
-- **GCP Bucket Discovery** - Google Cloud Storage misconfiguration
-- **Serverless Function Detection** - AWS Lambda, Vercel, Netlify endpoints
-- **Kubernetes API Exposure** - K8s API, dashboard, and secret enumeration
-- **Cloud Provider Detection** - Enhanced fingerprinting for 10+ cloud providers
-- **API Versioning Bypass** - Unprotected legacy API version endpoints
-- **Mass Assignment** - Dangerous parameter acceptance testing
-- **IDOR Detection** - Insecure Direct Object Reference pattern detection
-- **Business Logic Flaws** - Negative values, boundary testing, type confusion
-- **Email Header Injection** - Contact form SMTP injection
-- **File Upload Bypass** - Extension, MIME type, and magic byte bypasses
-- **HTTP Response Splitting** - Header injection via parameters
-- **Clickjacking** - Frame-busting bypass verification
-
-## GUI IMPROVEMENTS 
-
-### Version 1.2 (February 2026)
-
-#### GUI Enhancements
-- **Results Explorer** - New comprehensive results viewer with:
-  - Left panel showing all scanned sites with finding counts and severity indicators (🔴🟠🟡)
-  - "All Sites" option to view combined results across all targets
-  - Results grouped by category (API_DISCOVERY, DNS_HISTORY, etc.)
-  - Detailed view panel showing full result information when clicked
-  - **Sorting options**: Severity (High→Low, Low→High), Technique (A-Z, Z-A), Category, Bypass Status
-  - **Filtering options**: All Results, CRITICAL/HIGH/MEDIUM/LOW/INFO only, Bypasses only, Non-bypasses only
-  - Expand All / Collapse All buttons for quick navigation
-  - Export View button to save filtered results to JSON
-
-- **Pulsating Results Button** - The Results button now:
-  - Located at the bottom of the output area for better visibility
-  - Larger size (40px height) with 📊 icon
-  - Turns **green** and gently **pulsates** when scan completes with results
-  - Changes color on hover (darkens) for better interactivity
-  - Resets to default gray when results are cleared
-
-- **INFO-Level Results** - All scan results now appear in output, not just bypasses:
-  - LOW and INFO severity findings are now displayed
-  - Shows reason for blocked requests (e.g., "Blocked: 404")
-  - Complete visibility into all scan activity
-
-- **Target Tracking** - Results Explorer now shows actual target site names instead of "Unknown Target"
-
-#### Technical Improvements
-- Fixed result filtering to include all findings (CRITICAL, HIGH, MEDIUM, LOW, INFO)
-- Added target URL injection into result objects for proper grouping
-- Improved URL parsing to extract clean domain names for display
-- Added QPropertyAnimation for smooth pulsating effects
-- Better stylesheet management with hover states
-
-## Installation
-
 ```bash
-# Clone repository
-git clone https://github.com/K0NGR3SS/WAFPierce.git
-cd WAFPierce
-
-# Install dependencies
-pip3 install -r requirements.txt
-
-# Install in development mode
-pip3 install -e .
+blackthorn scan --config blackthorn.toml --config-profile staging
 ```
 
-## Usage
+## Optional components
 
-### Run UI
 ```bash
-python3 run_gui.py  
+# Headless browser checks
+pip install -e ".[browser]"
+python -m playwright install chromium
+
+# Anthropic AI provider
+pip install -e ".[ai]"
+
+# Browser, AI, and development dependencies
+pip install -e ".[full,dev]"
 ```
 
-## Bypass Techniques
+Other optional integrations include Metasploit RPC through `pymetasploit3`, a running Caido instance, a local Ollama server, or an OpenAI-compatible API endpoint.
 
-WAFPierce tests **100+ bypass methods** across multiple categories:
+## Build the desktop executable
 
-### Header Manipulation
-1. **Host Header Injection** - Manipulates Host header values
-2. **X-Forwarded-For** - IP spoofing via proxy headers (127.0.0.1, 10.x, 192.168.x, AWS metadata IP)
-3. **X-Forwarded-Host** - Alternative host header injection
-4. **X-Original-URL / X-Rewrite-URL** - Path override attempts
-5. **Origin/Referer Manipulation** - CORS and origin header bypass
-6. **Custom Header Fuzzing** - X-Debug, X-Internal, X-Skip-WAF headers
-7. **True-Client-IP / CF-Connecting-IP** - CDN-specific header spoofing
-8. **Extended IP Spoofing** - 17+ header variations (X-Real-IP, X-Client-IP, X-Cluster-Client-IP, etc.)
-9. **Host Header Attacks** - Password reset poisoning, routing bypass, cache poisoning
+```bash
+pip install -r requirements.txt
+python3 build_exe.py
+```
 
-### Encoding & Obfuscation
-10. **Path Encoding** - URL encoding bypasses (%2e, %252e, etc.)
-11. **Double/Triple Encoding** - Advanced encoding evasion
-12. **Case Manipulation** - Mixed case payloads (/AdMiN, /WP-ADMIN)
-13. **Comment Injection** - SQL/HTML comment insertion
-14. **Whitespace Manipulation** - Tabs, newlines, null bytes to break signatures
-15. **Unicode Normalization** - Homoglyphs, fullwidth characters, RTL override, zero-width spaces
-16. **Path Normalization Extended** - 30+ variations (dots, slashes, encoding, null bytes, semicolons, unicode)
+The PyInstaller configuration bundles the Blackthorn identity assets, Qt runtime, wordlists, scanner modules, and supported native dependencies.
 
-### Protocol-Level Attacks
-17. **Transfer-Encoding Smuggling** - CL.TE/TE.TE request smuggling
-18. **HTTP/2 Downgrade** - Protocol downgrade attacks
-19. **H2C Smuggling** - HTTP/2 Cleartext upgrade smuggling
-20. **WebSocket Upgrade** - Tunnel through WAFs via WebSocket
-21. **WebSocket CSWSH** - Cross-Site WebSocket Hijacking
-22. **HTTP Pipelining** - Connection keep-alive abuse
-23. **Chunked Transfer** - Split payloads across chunks
-24. **HTTP Method Bypass** - Tests non-standard methods (TRACE, OPTIONS, PUT, DELETE)
-25. **HTTP Method Override** - X-HTTP-Method-Override header manipulation
-26. **Advanced Request Smuggling** - H2.CL, H2.TE, TE.TE variations, HTTP/3 downgrade attempts
-27. **HTTP Desync** - CL.CL, space/tab/vertical-tab in headers, obs-fold line wrapping
-28. **Extended Verb Tampering** - TRACE/TRACK (XST), DEBUG, WebDAV methods, custom methods
-29. **Range Header Attacks** - Overlapping ranges, many ranges DoS, invalid ranges, suffix ranges
-30. **Multipart Boundary Bypass** - Long boundaries, special chars, quoted, CRLF, extra headers
+## Development
 
-### Cache & Control
-31. **Cache-Control** - Cache directive manipulation
-32. **Cache Poisoning** - Unkeyed header injection (X-Forwarded-Host, X-Original-URL)
-33. **Range Header** - Partial content bypasses
-34. **Web Cache Deception** - Static extension tricks (.css, .js), cache key poisoning
+```bash
+pip install -e ".[dev]"
+python3 -m pytest
+ruff check .
+```
 
-### Injection Testing
-35. **SQLi Bypass** - WAF-evading SQL injection payloads
-36. **XSS Bypass** - Cross-site scripting evasion
-37. **Command Injection Bypass** - OS command injection evasion
-38. **Path Traversal Bypass** - Directory traversal evasion
-39. **SSRF Bypass** - Server-side request forgery evasion
-40. **NoSQL Injection** - MongoDB operator injection ($ne, $gt, $regex, $where)
-41. **LDAP Injection** - Filter injection and auth bypass
-42. **SSTI Detection** - Server-Side Template Injection (Jinja2, Freemarker, Velocity, ERB, Twig, Pebble, Mako)
-43. **XXE Detection** - XML External Entity injection (file read, SSRF, SOAP)
-44. **CRLF Injection** - HTTP response splitting
-45. **Prototype Pollution** - JavaScript prototype chain pollution
-46. **JSON Injection** - Parser differentials, duplicate keys, type confusion
-47. **Insecure Deserialization** - Java, PHP, Python pickle, ASP.NET ViewState
-48. **SSI Injection** - Server-Side Includes (exec cmd, include file, printenv)
-49. **Log4Shell Detection** - ${jndi:ldap://} patterns with 12+ obfuscation bypasses
-50. **XSLT Injection** - Code execution via document(), system-property(), php:function()
-51. **CSS Injection** - Attribute selector exfiltration, @import, @font-face
-52. **Dangling Markup** - Data exfiltration via unclosed HTML tags
+The Python package retains its existing internal module path during the rebrand so existing imports, plugins, and stored configuration remain compatible. User-facing commands and product copy use Blackthorn.
 
-### Security Misconfigurations
-53. **CORS Misconfiguration** - Wildcard, null origin, origin reflection, credential exposure
-54. **Open Redirect** - 25+ redirect parameters with encoding bypasses
-55. **Security Headers Audit** - CSP, HSTS, X-Frame-Options, Permissions-Policy, COOP, CORP, COEP
-56. **Cookie Security** - HttpOnly, Secure, SameSite flag verification
-57. **Clickjacking** - X-Frame-Options and CSP frame-ancestors verification
-58. **Content Sniffing** - X-Content-Type-Options, polyglot file uploads
+The UI and enhancement plan lives in [docs/BLACKTHORN_PRODUCT_PLAN.md](docs/BLACKTHORN_PRODUCT_PLAN.md).
 
-### Business Logic & Authorization
-59. **HTTP Parameter Pollution** - Duplicate parameters to confuse parsing
-60. **API Versioning Bypass** - Unprotected legacy API versions (/v1/, /v2/, /api/internal/)
-61. **Mass Assignment** - Dangerous parameter acceptance (admin, role, privilege)
-62. **IDOR Detection** - Insecure Direct Object Reference patterns
-63. **Business Logic Flaws** - Negative values, boundaries, type confusion
-64. **Race Condition Testing** - Concurrent requests to exploit timing windows
-65. **File Upload Bypass** - Extension, MIME type, magic byte bypasses
-66. **Email Header Injection** - Contact form SMTP injection
-67. **HTTP Response Splitting** - Header injection via parameters
-68. **Integer Overflow** - 32/64-bit boundary testing, signed/unsigned issues
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidance and [SECURITY.md](SECURITY.md) for private vulnerability reporting.
 
-### JWT & Authentication Attacks
-69. **JWT Algorithm Confusion** - none/None/NONE algorithm bypass
-70. **JWT KID Injection** - SQL injection, path traversal, RCE via `kid` parameter
-71. **JWT JKU/X5U SSRF** - SSRF via JSON Web Key URL
-72. **JWT Weak Secrets** - Common password brute-force
-73. **JWT Token Discovery** - Find exposed JWTs in responses
+## Responsible use and disclosure
 
-### GraphQL Attacks
-74. **GraphQL Introspection** - Full schema dump via __schema query
-75. **GraphQL Batching DoS** - Multiple operations in single request
-76. **GraphQL Depth Bypass** - Nested query DoS, no depth limit
-77. **GraphQL Alias DoS** - Thousands of aliases in single query
-78. **GraphQL Field Suggestion** - Type enumeration
+If Blackthorn helps identify a vulnerability:
 
-### SSRF Advanced
-79. **SSRF Protocol Smuggling** - gopher://, dict://, file://, ldap:// handlers
-80. **SSRF PHP Wrappers** - php://filter, php://input, data://, expect://
-81. **SSRF IP Bypass** - Hex, octal, decimal, IPv6 mapped, short forms
-82. **DNS Rebinding** - Bypass IP-based SSRF protections
-
-### Advanced Payloads
-83. **Polyglot Payloads** - Multi-context payloads (XSS+SQLi, SSTI+XSS)
-84. **Payload Mutation Engine** - Automated payload variations
-85. **Time-Based Blind Detection** - Response timing analysis
-86. **Timing-Based Discovery** - Blind resource discovery via timing anomalies
-87. **Error-Based Disclosure** - Force verbose errors (type confusion, format strings)
-
-### PDF/Document Attacks
-88. **PDF Injection** - SSRF/LFI via PDF generators (wkhtmltopdf, PhantomJS)
-89. **PostMessage Vulnerabilities** - Insecure origin validation
-90. **RPO (Relative Path Overwrite)** - XSS via CSS injection with relative paths
-
-### Cloud Security
-91. **AWS S3 Bucket Enumeration** - Public bucket discovery
-92. **Azure Blob Enumeration** - Public container discovery
-93. **GCP Bucket Discovery** - Google Cloud Storage misconfiguration
-94. **Kubernetes API Exposure** - K8s API, dashboard, secrets enumeration
-95. **Serverless Function Detection** - AWS Lambda, Vercel, Netlify endpoints
-96. **Cloud Metadata Enumeration** - SSRF to IMDS endpoints (169.254.169.254)
-97. **Cloud Provider Detection** - Fingerprinting for 10+ cloud providers
-
-### Information Disclosure
-98. **Sensitive File Discovery** - 50+ paths (.git, .env, backups, configs, debug endpoints)
-99. **API Key/Secret Exposure** - 35+ patterns (AWS, GitHub, Stripe, Slack, Google, Firebase, etc.)
-100. **Subdomain Takeover** - Detection for 25+ vulnerable services
-101. **Subdomain Enumeration** - DNS resolution for common prefixes
-102. **Certificate Transparency** - Domain extraction from SSL certificates
-103. **Historical DNS Lookup** - Origin IP discovery via DNS history
-104. **Technology Stack Fingerprinting** - Frameworks, CMS, servers, languages
-105. **DNS Zone Transfer** - AXFR enumeration attempts
-106. **Buffer/Size Limits** - Large URL, headers, POST body testing
-
-### Detection & Reconnaissance
-107. **WAF Fingerprinting** - 20+ WAF vendors (Cloudflare, AWS, Akamai, Imperva, F5, etc.)
-108. **WAF Rule Version Detection** - OWASP CRS version and rule IDs
-109. **JavaScript WAF Detection** - PerimeterX, DataDome, HUMAN, Kasada, Shape, Distil
-110. **CDN Detection** - 12+ CDN providers
-111. **Rate Limit Detection** - Request thresholds and rate limiting headers
-112. **Bot Detection Evasion** - User-Agent rotation, browser fingerprint simulation
-
----
-
-## Future Roadmap
-
-Features planned for future releases:
-
-### AI implementation ✅ (shipped in 1.5 — opt-in)
-AI triage, payload mutation, and auto-report are now available via the Anthropic API. Future work: in-scan adaptive payload generation and LLM-guided crawling.
-
-### Shipped in 1.6 ✅
-- Out-of-band (OOB) blind-vuln confirmation (Interactsh + self-hosted listener)
-- Bypass re-confirmation pass (confidence scoring)
-- Reproduction `curl` per finding
-- TLS (JA3/JA4) + HTTP/2 fingerprint impersonation
-- Automated test suite + CI
-
-### Ideas under consideration
-- Full async engine (currently a bounded adaptive thread pool)
-- gRPC/protobuf *fuzzing* (detection shipped) and HTTP/3 bypass testing over QUIC
-- GUI: built-in Repeater, request/response inspector, trend dashboard
-- Deeper SAML XSW exploitation and live JWT-jwk replay confirmation
-
-### Community Suggestions
-Have ideas for new tests? Message either Marwan or Nazariy
-
----
-
-## Requirements
-
-- Python 3.8+
-- PySide6 6.10.1+
-- requests library
-
-## Responsible Disclosure
-
-If you discover vulnerabilities using this tool:
-1. **DO** report to the affected organization immediately
-2. **DO** give reasonable time for fixes (typically 90 days)
-3. **DO** follow coordinated disclosure practices
-4. **DON'T** publicly disclose until patched
-5. **DON'T** exploit findings for personal gain
-
-## Educational Resources
-
-This tool is designed for learning. Recommended resources:
-- [OWASP WAF Testing Guide](https://owasp.org/)
-- [PortSwigger Web Security Academy](https://portswigger.net/web-security)
-- [Bug Bounty Platforms](https://www.hackerone.com/) (for authorized testing)
+1. Stay inside the program's documented scope and rules.
+2. Minimize data access and service impact.
+3. Preserve clear, redacted evidence.
+4. Report through the organization's approved channel.
+5. Allow reasonable remediation time before coordinated disclosure.
 
 ## Authors
 
 - [Nazariy Buryak](https://github.com/K0NGR3SS)
 - [Marwan Fayad](https://github.com/Marwan-verse)
 
-## Legal Disclaimer
+## License and legal notice
 
-**FOR AUTHORIZED SECURITY TESTING ONLY**
+Blackthorn is released under the [MIT License](LICENSE).
 
-This tool is intended exclusively for authorized penetration testing and security research. You must obtain explicit written permission before testing any system you do not own.
-
-**Unauthorized access to computer systems is illegal.** Violators may face prosecution under the Computer Fraud and Abuse Act (CFAA), Computer Misuse Act, or equivalent laws in your jurisdiction.
-
-By using this tool, you agree to:
-- Only test systems you own or have written authorization to test
-- Comply with all applicable laws and regulations
-- Accept full responsibility for your actions
-
-The authors assume **NO LIABILITY** for misuse. This software is provided "AS IS" without warranty of any kind.
-
-**If you don't have permission, don't use it.**
-
-
-
-
-
-
-
-
-
-#### There are hidden things in this program, can you find them all?
+This software is intended exclusively for authorized security testing and research. You must obtain explicit permission before testing systems you do not own. The authors and contributors accept no liability for misuse, damage, service disruption, data loss, or legal consequences. The software is provided “as is,” without warranty.

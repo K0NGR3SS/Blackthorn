@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-PyInstaller spec file for WAFPierce GUI application.
+PyInstaller spec file for the Blackthorn desktop application.
 This bundles the entire application with all dependencies into a single executable.
 """
 
@@ -16,8 +16,10 @@ project_root = os.path.dirname(os.path.abspath(SPEC))
 datas = [
     # Include wordlists folder
     (os.path.join(project_root, 'wordlists'), 'wordlists'),
-    # Include logo
-    (os.path.join(project_root, 'wafpierce', 'logo_Temp'), os.path.join('wafpierce', 'logo_Temp')),
+    # Include the three supplied Blackthorn identity assets.
+    (os.path.join(project_root, 'blackthorn-logo-transparent.png'), os.path.join('wafpierce', 'assets')),
+    (os.path.join(project_root, 'blackthornlogo-background.jpg'), os.path.join('wafpierce', 'assets')),
+    (os.path.join(project_root, 'blackthornlogo-nottransparent.jpg'), os.path.join('wafpierce', 'assets')),
     # Include categories file
     (os.path.join(project_root, 'categories.txt'), '.'),
 ]
@@ -63,7 +65,7 @@ hidden_imports = [
     'charset_normalizer.md',
     'charset_normalizer.md__mypyc',
     'idna',
-    # WAFPierce modules
+    # Blackthorn internal modules
     'wafpierce',
     'wafpierce.gui',
     'wafpierce.theme',
@@ -203,7 +205,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='WAFPierce',
+    name='Blackthorn',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -216,5 +218,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=os.path.join(project_root, 'wafpierce', 'logo_Temp', 'logo_wafpierce.png') if os.path.exists(os.path.join(project_root, 'wafpierce', 'logo_Temp', 'logo_wafpierce.png')) else None,
+    icon=os.path.join(project_root, 'blackthorn-logo-transparent.png') if os.path.exists(os.path.join(project_root, 'blackthorn-logo-transparent.png')) else None,
 )

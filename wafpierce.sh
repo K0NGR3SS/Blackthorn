@@ -1,8 +1,5 @@
 #!/bin/bash
-# Thin wrapper around the unified WAFPierce CLI.
-#   ./wafpierce.sh scan https://target -t 20 --impersonate chrome
-#   ./wafpierce.sh chain https://target
-#   ./wafpierce.sh doctor
-#   ./wafpierce.sh https://target            # defaults to `scan`
+# Legacy wrapper around the unified Blackthorn CLI.
+# New scripts should use the installed `blackthorn` command or blackthorn.sh.
 cd "$(dirname "$0")"
 python3 -m wafpierce "$@"

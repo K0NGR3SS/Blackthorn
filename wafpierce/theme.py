@@ -1,4 +1,4 @@
-"""Centralized visual theme for the WAFPierce GUI.
+"""Centralized visual theme for the Blackthorn GUI.
 
 A single source of truth for the application's look: a modern, neutral
 dark palette (slate surfaces with an indigo accent) plus one comprehensive

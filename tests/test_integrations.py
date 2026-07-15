@@ -16,7 +16,7 @@ def test_format_slack_has_summary_and_top():
     payload = format_slack('https://t.example', RESULTS)
     assert 'text' in payload
     text = payload['text']
-    assert 'WAFPierce' in text and 't.example' in text
+    assert 'Blackthorn' in text and 't.example' in text
     assert 'CRITICAL: 1' in text
     assert 'OOB-CONFIRMED SSRF' in text          # top finding listed
 
