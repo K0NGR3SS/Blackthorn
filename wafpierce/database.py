@@ -1,5 +1,5 @@
 """
-SQLite Database for WAFPierce - Historical scan data storage
+SQLite database for Blackthorn historical scan data storage.
 Stores scan results, payloads, and statistics
 """
 import sqlite3
@@ -13,7 +13,7 @@ from .config import get_database_path
 
 
 class WAFPierceDB:
-    """Database handler for WAFPierce."""
+    """Database handler for Blackthorn."""
     
     def __init__(self, db_path: str = None):
         self.db_path = db_path or get_database_path()
@@ -69,6 +69,13 @@ class WAFPierceDB:
         self._add_column_if_missing(c, 'results', 'engagement_id', 'INTEGER')
         self._add_column_if_missing(c, 'results', 'workflow_state', "TEXT DEFAULT 'candidate'")
         self._add_column_if_missing(c, 'results', 'evidence_notes', 'TEXT')
+        for column, definition in (
+            ('finding_id', 'TEXT'), ('fingerprint', 'TEXT'), ('kind', 'TEXT'),
+            ('verification_status', 'TEXT'), ('confidence', 'TEXT'),
+            ('remediation', 'TEXT'), ('evidence_json', 'TEXT'),
+            ('baseline_json', 'TEXT'), ('comparison_json', 'TEXT'),
+        ):
+            self._add_column_if_missing(c, 'results', column, definition)
         
         # Create index for faster queries
         c.execute('CREATE INDEX IF NOT EXISTS idx_results_scan ON results(scan_id)')
@@ -918,14 +925,29 @@ class WAFPierceDB:
         """Add a finding to the database."""
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
+
+        def encoded(value):
+            if value in (None, ''):
+                return ''
+            if isinstance(value, str):
+                return value
+            return json.dumps(value, default=str, ensure_ascii=False)
+
+        response = result.get('response') if isinstance(result.get('response'), dict) else {}
+        response_code = result.get(
+            'response_code', response.get('status', result.get('status', 0))
+        )
         
         c.execute('''
             INSERT INTO results (
                 scan_id, target, technique, category, severity, cvss_score,
                 bypass, reason, url, payload, response_code, response_time,
-                cve_id, cwe_id, reference_url, engagement_id, workflow_state,
-                evidence_notes
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                cve_id, cwe_id, reference_url, raw_request, raw_response,
+                engagement_id, workflow_state, evidence_notes, finding_id,
+                fingerprint, kind, verification_status, confidence, remediation,
+                evidence_json, baseline_json, comparison_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             scan_id,
             result.get('target', ''),
@@ -937,14 +959,25 @@ class WAFPierceDB:
             result.get('reason', ''),
             result.get('url', ''),
             result.get('payload', ''),
-            result.get('response_code', 0),
+            response_code,
             result.get('response_time', 0.0),
             result.get('cve_id', ''),
             result.get('cwe_id', ''),
             result.get('reference_url', ''),
+            encoded(result.get('request', result.get('raw_request', ''))),
+            encoded(result.get('response', result.get('raw_response', ''))),
             result.get('engagement_id'),
             result.get('workflow_state', 'candidate'),
-            result.get('evidence_notes', '')
+            result.get('evidence_notes', ''),
+            result.get('finding_id', ''),
+            result.get('fingerprint', ''),
+            result.get('kind', ''),
+            result.get('verification_status', ''),
+            result.get('confidence', ''),
+            result.get('remediation', ''),
+            encoded(result.get('evidence', [])),
+            encoded(result.get('baseline', {})),
+            encoded(result.get('comparison', {})),
         ))
         
         conn.commit()
@@ -1017,24 +1050,51 @@ class WAFPierceDB:
         rows = c.fetchall()
         conn.close()
         
-        return [dict(row) for row in rows]
+        decoded = []
+        for db_row in rows:
+            item = dict(db_row)
+            for column, key, fallback in (
+                ('raw_request', 'request', {}),
+                ('raw_response', 'response', {}),
+                ('evidence_json', 'evidence', []),
+                ('baseline_json', 'baseline', {}),
+                ('comparison_json', 'comparison', {}),
+            ):
+                try:
+                    raw = item.get(column)
+                    item[key] = json.loads(raw) if raw else fallback
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    item.setdefault(key, fallback)
+            decoded.append(item)
+        return decoded
     
     def compare_scans(self, scan_id_1: str, scan_id_2: str) -> dict:
         """Compare two scans and return differences."""
         results_1 = self.get_scan_results(scan_id_1)
         results_2 = self.get_scan_results(scan_id_2)
         
-        # Create sets of (target, technique, category) tuples for comparison
-        set_1 = {(r['target'], r['technique'], r['category']) for r in results_1}
-        set_2 = {(r['target'], r['technique'], r['category']) for r in results_2}
+        def result_key(result):
+            identity = (
+                result.get('finding_id') or result.get('fingerprint')
+                or '|'.join(str(result.get(key) or '') for key in (
+                    'target', 'technique', 'category', 'url', 'payload'
+                ))
+            )
+            proof_state = str(result.get('verification_status') or '')
+            return identity, proof_state
+
+        # Proof-state changes are meaningful: a candidate becoming confirmed is
+        # a new actionable event, not an unchanged heuristic.
+        set_1 = {result_key(r) for r in results_1}
+        set_2 = {result_key(r) for r in results_2}
         
         new_findings = set_2 - set_1
         fixed_findings = set_1 - set_2
         unchanged = set_1 & set_2
         
         return {
-            'new': [r for r in results_2 if (r['target'], r['technique'], r['category']) in new_findings],
-            'fixed': [r for r in results_1 if (r['target'], r['technique'], r['category']) in fixed_findings],
+            'new': [r for r in results_2 if result_key(r) in new_findings],
+            'fixed': [r for r in results_1 if result_key(r) in fixed_findings],
             'unchanged_count': len(unchanged),
             'scan_1_total': len(results_1),
             'scan_2_total': len(results_2)

@@ -112,7 +112,7 @@ def ingest_openapi(base_url: str, session, timeout: int = 5) -> List[Dict[str, A
     for loc in OPENAPI_PATHS:
         url = urljoin(base_url + '/', loc.lstrip('/'))
         resp = _get(session, url, timeout)
-        if not resp or resp.status_code >= 400:
+        if resp is None or resp.status_code >= 400:
             continue
         ctype = resp.headers.get('Content-Type', '').lower()
         body = resp.text
@@ -143,7 +143,7 @@ def ingest_graphql(base_url: str, session, timeout: int = 5) -> List[Dict[str, A
         except Exception as e:
             logger.debug(f"GraphQL introspection failed {url}: {e}")
             continue
-        if not resp or resp.status_code >= 400:
+        if resp is None or resp.status_code >= 400:
             continue
         try:
             data = resp.json()

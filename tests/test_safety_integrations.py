@@ -85,6 +85,26 @@ def test_redact_text_handles_headers_and_params():
     assert 'a=1; b=2' not in out
 
 
+def test_redaction_scrubs_structured_oauth_proxy_and_json_secrets():
+    finding = {
+        'access_token': 'oauth-access-secret',
+        'refresh_token': 'oauth-refresh-secret',
+        'client_secret': 'client-secret-value',
+        'request': {'headers': {
+            'Proxy-Authorization': 'Basic proxy-secret',
+            'Set-Cookie': 'sid=cookie-secret; HttpOnly',
+        }},
+        'data': '{"token":"json-token-secret","safe":"keep-me"}',
+    }
+    blob = json.dumps(redaction.redact_finding(finding))
+    for secret in (
+        'oauth-access-secret', 'oauth-refresh-secret', 'client-secret-value',
+        'proxy-secret', 'cookie-secret', 'json-token-secret',
+    ):
+        assert secret not in blob
+    assert 'keep-me' in blob
+
+
 # ---------------------------------------------------------------- authorization
 def test_authorize_allows_matching_host(tmp_path):
     f = tmp_path / "scope.txt"

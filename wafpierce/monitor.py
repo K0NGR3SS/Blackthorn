@@ -1,5 +1,5 @@
 """
-WAFPierce Continuous Monitoring
+Blackthorn continuous monitoring.
 
 Closes the loop on the existing scan history + ``compare_scans`` machinery: after a
 scan, diff the target against its previous scan and surface only the NEW findings,
@@ -49,10 +49,21 @@ def diff_latest(db, target: str, only_bypasses: bool = True) -> Dict[str, Any]:
     def _belongs(r):
         return (r.get('target') or '').rstrip('/') == target.rstrip('/')
 
+    def _confirmed(r):
+        verification = str(r.get('verification_status') or '').lower()
+        kind = str(r.get('kind') or '').lower()
+        if verification or kind:
+            return bool(r.get('bypass')) and (
+                verification == 'confirmed' or kind == 'finding'
+            ) and verification != 'candidate'
+        # Historical rows predate proof-state fields.
+        return bool(r.get('bypass'))
+
     new = [r for r in cmp.get('new', []) if _belongs(r)]
     fixed = [r for r in cmp.get('fixed', []) if _belongs(r)]
     if only_bypasses:
-        new = [r for r in new if r.get('bypass')]
+        new = [r for r in new if _confirmed(r)]
+        fixed = [r for r in fixed if _confirmed(r)]
     return {
         'new': new, 'fixed': fixed, 'baseline_available': True,
         'current_scan': current, 'previous_scan': previous,

@@ -226,3 +226,13 @@ def test_fail_on_gating():
     assert _fail_on_exit(low, 'low') == 10           # exactly at threshold
     assert _fail_on_exit(high, None) is None         # gating disabled
     assert _fail_on_exit([], 'info') is None         # nothing found
+
+
+def test_fail_on_does_not_gate_unverified_candidates():
+    from wafpierce.pierce import _fail_on_exit
+
+    candidate = [{
+        'severity': 'CRITICAL', 'bypass': True, 'kind': 'suspected',
+        'verification_status': 'candidate',
+    }]
+    assert _fail_on_exit(candidate, 'low') is None

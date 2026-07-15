@@ -278,7 +278,7 @@ class FullPentestChain:
                         headers=headers,
                         timeout=5
                     )
-                    if resp and resp.status_code == 200:
+                    if resp is not None and resp.status_code == 200:
                         return {
                             'path': path,
                             'headers': headers,
@@ -359,7 +359,7 @@ class FullPentestChain:
                     test_url = f"{self.target}{path}?test={payload}"
                     try:
                         resp = safe_request(test_url, headers=headers, timeout=5)
-                        if resp and payload in resp.text:
+                        if resp is not None and payload in resp.text:
                             vuln_findings.append({
                                 'type': 'XSS',
                                 'url': test_url,
@@ -443,7 +443,7 @@ class FullPentestChain:
                         method='HEAD',
                         timeout=5
                     )
-                    if resp and resp.status_code in [403, 200]:
+                    if resp is not None and resp.status_code in [403, 200]:
                         s3_buckets.append({
                             'name': bucket,
                             'status': resp.status_code,
@@ -461,7 +461,7 @@ class FullPentestChain:
         with GracefulErrorHandler("header_analysis", continue_on_error=True):
             try:
                 resp = safe_request(self.target, method='GET', timeout=10)
-                if resp:
+                if resp is not None:
                     headers = {k.lower(): v for k, v in resp.headers.items()}
                     backend_indicators = self._analyze_backend_headers(headers, resp.text)
             except Exception as e:
@@ -495,7 +495,7 @@ class FullPentestChain:
                         timeout=5,
                         verify=False
                     )
-                    if resp and resp.status_code < 500:
+                    if resp is not None and resp.status_code < 500:
                         load_balancers.append({
                             'hostname': elb_host,
                             'status': resp.status_code,
@@ -534,7 +534,7 @@ class FullPentestChain:
                         timeout=3,
                         verify=False
                     )
-                    if resp and resp.status_code < 500:
+                    if resp is not None and resp.status_code < 500:
                         ec2_instances.append({
                             'hostname': ec2_host,
                             'status': resp.status_code,
@@ -569,7 +569,7 @@ class FullPentestChain:
                         method='HEAD',
                         timeout=5
                     )
-                    if resp and resp.status_code in [200, 403, 401]:
+                    if resp is not None and resp.status_code in [200, 403, 401]:
                         service_type = 'MediaPackage' if 'mediapackage' in media_host else 'MediaStore'
                         media_services.append({
                             'hostname': media_host,

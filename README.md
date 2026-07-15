@@ -5,7 +5,7 @@
   <p>Discover attack surface, test web applications, validate findings, reproduce evidence, and build reports from a desktop workspace or CLI.</p>
   <p>
     <img src="https://img.shields.io/badge/version-1.7-1f2937" alt="Version 1.7" />
-    <img src="https://img.shields.io/badge/technique_groups-128-1f2937" alt="128 technique groups" />
+    <img src="https://img.shields.io/badge/catalogued_techniques-128-1f2937" alt="128 catalogued technique groups" />
     <img src="https://img.shields.io/badge/categories-16-1f2937" alt="16 categories" />
     <img src="https://img.shields.io/badge/python-3.8%2B-1f2937" alt="Python 3.8+" />
     <img src="https://img.shields.io/badge/license-MIT-1f2937" alt="MIT license" />
@@ -73,7 +73,12 @@ The counts below come from the version 1.7 registered scanner and tool catalogs.
 
 | Capability | Current coverage |
 | --- | ---: |
-| Active web-security technique groups | **128** |
+| Catalogued web-security technique groups | **128** |
+| Runnable in a normal non-intrusive scan | **101** |
+| Additional runnable groups requiring `--intrusive` | **19** |
+| Raw-transport groups disabled until a faithful engine exists | **7** |
+| DNS-rebinding group disabled until a proof-capable engine exists | **1** |
+| Runnable with safe mode and non-intrusive defaults | **87** |
 | Scan categories | **16** |
 | External tool drivers | **23** |
 | Export formats | **9** |
@@ -105,7 +110,7 @@ blackthorn scan --list-techniques
 
 - Test authentication, authorization, IDOR, mass assignment, API-version exposure, and role-related logic.
 - Test SQL injection, XSS, command injection, NoSQL, LDAP, SSTI, XXE, CRLF, SSI, XSLT, CSS injection, deserialization, prototype pollution, and traversal behavior.
-- Test JWT, OAuth/OIDC, SAML, GraphQL, WebSocket, SSRF, cloud metadata, file upload, cache, race, and request-smuggling behavior.
+- Test JWT, OAuth/OIDC, SAML, GraphQL, WebSocket, SSRF, cloud metadata, file upload, cache, and race behavior with proof-specific checks and impact gates.
 - Exercise parser differences using alternate methods, encodings, content types, duplicate parameters, multipart boundaries, transfer encodings, and HTTP protocol variations.
 - Run optional browser-backed DOM XSS and client-side path traversal checks.
 - Probe AI/LLM-backed endpoints for prompt-injection behavior.
@@ -139,6 +144,7 @@ blackthorn scan --list-techniques
 - Run multiple targets from the GUI queue with per-target and total progress.
 - Use dry-run mode to inspect the plan without sending requests.
 - Use safe mode to skip noisy, denial-of-service, and state-changing probes.
+- Use `--intrusive` only when the engagement explicitly permits guessed state-changing workflows such as uploads, email, cache, race, and metadata tests.
 
 ### Reporting and automation
 
@@ -160,7 +166,14 @@ blackthorn scan --list-techniques
 - Run opt-in false-positive triage, report drafting, and payload-mutation assistance.
 - Continue scanning when an optional AI provider is unavailable; AI is never required for the core engine.
 
-## Detailed scanner coverage: 128 technique groups
+## Detailed scanner coverage: 128 catalogued technique groups
+
+Blackthorn currently runs 101 groups in a normal non-intrusive scan. Nineteen
+additional stateful, billable, or internal-network groups require the separate
+`--intrusive` impact opt-in. Seven ambiguous HTTP framing/race groups remain
+visible but disabled until Blackthorn has a raw HTTP/1.1 and HTTP/2 transport.
+DNS rebinding is also disabled until a user-owned authoritative DNS workflow can
+change answers and capture proof; a Host-header size difference is insufficient.
 
 ### Header Manipulation — 9
 
@@ -192,19 +205,19 @@ blackthorn scan --list-techniques
 - HTTP method override
 - Content-type bypass
 - HTTP parameter pollution
-- Transfer-Encoding request smuggling
+- Transfer-Encoding request smuggling *(disabled: raw transport required)*
 - HTTP/2 downgrade behavior
-- HTTP/2-specific attacks
+- HTTP/2-specific attacks *(disabled: raw HTTP/2 transport required)*
 - WebSocket upgrade behavior
 - WebSocket security checks
-- Chunked transfer variations
+- Chunked transfer variations *(disabled: raw transport required)*
 - HTTP pipelining
-- Extended request smuggling
-- HTTP desynchronization
-- Extended verb tampering
+- Extended request smuggling *(disabled: raw transport required)*
+- HTTP desynchronization *(disabled: raw transport required)*
+- Extended verb tampering *(`--intrusive`; read-only methods only)*
 - Multipart boundary bypass
 - WebSocket fuzzing
-- CL.0 / 0.CL smuggling
+- CL.0 / 0.CL smuggling *(disabled: raw transport required)*
 - gRPC detection
 - HTTP/3 detection
 
@@ -249,7 +262,7 @@ blackthorn scan --list-techniques
 - Security-header audit
 - Cookie-security audit
 - Clickjacking
-- Content sniffing
+- Content sniffing *(`--intrusive`; inert upload canaries)*
 - HTTP response splitting
 - Content Security Policy analysis
 
@@ -281,17 +294,17 @@ blackthorn scan --list-techniques
 
 ### AI / LLM Attacks — 1
 
-- LLM prompt-injection and system-prompt leakage behavior
+- LLM endpoint and direct instruction-following behavior *(`--intrusive`)*
 
 ### SSRF Advanced — 3
 
 - SSRF bypass variants
 - SSRF protocol smuggling
-- DNS rebinding
+- DNS rebinding *(disabled: authoritative DNS proof engine required)*
 
 ### PDF / Document Attacks — 3
 
-- PDF generator injection
+- PDF generation surface discovery *(`--intrusive`; inert markup only)*
 - `postMessage` security checks
 - Relative Path Overwrite
 
@@ -314,7 +327,7 @@ blackthorn scan --list-techniques
 - Bot-detection evasion
 - IPv6 representation bypass
 - Charset and overlong-UTF-8 confusion
-- HTTP/2 single-packet race testing
+- HTTP/2 single-packet race testing *(disabled: synchronized raw HTTP/2 required)*
 
 ### Information Disclosure — 6
 

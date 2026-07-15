@@ -6,7 +6,8 @@ tested without a display or Qt installed.
 import os
 
 from wafpierce.gui import (
-    _finding_url, _finding_to_curl, _finding_to_python,
+    _finding_url, _finding_to_curl, _finding_to_python, _finding_proof_html,
+    _advanced_cli_flags, _finding_status_label, _is_candidate_result,
     profile_from_prefs, merge_profile, PROFILE_KEYS,
     _load_prefs, _normalize_language, _save_prefs,
     BANNER_PATH, LOGO_PATH, SIDEBAR_LOGO_PATH,
@@ -52,6 +53,81 @@ def test_python_snippet_is_runnable_shape():
     assert "data='q=1'" in out
     assert 'verify=False' in out
     compile(out, '<snippet>', 'exec')  # must be valid Python
+
+
+def test_copy_helpers_support_structured_request():
+    finding = {'request': {
+        'method': 'POST', 'url': 'https://t/api?q=1',
+        'headers': {'Content-Type': 'application/json'},
+        'body': {'probe': 'blackthorn'},
+    }}
+    curl = _finding_to_curl(finding)
+    python = _finding_to_python(finding)
+    assert "https://t/api?q=1" in curl
+    assert '--data-raw' in curl and 'blackthorn' in curl
+    assert "'POST', 'https://t/api?q=1'" in python
+    assert "{'probe': 'blackthorn'}" in python
+
+
+def test_copy_helpers_do_not_invent_an_unavailable_request():
+    finding = {
+        'target': 'https://t.example', 'url': 'https://t.example/',
+        'request': {'available': False, 'note': 'legacy detector omitted request'},
+    }
+    assert _finding_url(finding) == ''
+    assert 'unavailable' in _finding_to_curl(finding).lower()
+    assert 'unavailable' in _finding_to_python(finding).lower()
+    proof = _finding_proof_html(finding)
+    assert 'legacy detector omitted request' in proof
+    assert 'https://t.example/' not in proof
+
+
+def test_gui_status_distinguishes_candidate_from_confirmed():
+    candidate = {'bypass': True, 'verification_status': 'candidate', 'kind': 'suspected'}
+    confirmed = {'bypass': True, 'verification_status': 'confirmed', 'kind': 'finding'}
+    observation = {'bypass': False, 'verification_status': 'informational',
+                   'kind': 'observation'}
+    assert _is_candidate_result(candidate)
+    assert 'CANDIDATE' in _finding_status_label(candidate)
+    assert 'CONFIRMED' in _finding_status_label(confirmed)
+    assert 'Observation' in _finding_status_label(observation)
+
+
+def test_gui_advanced_flags_forward_intrusive_opt_in():
+    flags = _advanced_cli_flags({
+        'safe_mode': True, 'intrusive': True,
+        'scope_include': ['/api'], 'oob': 'off',
+    })
+    assert '--safe-mode' in flags
+    assert '--intrusive' in flags
+    assert flags[flags.index('--scope-include') + 1] == '/api'
+    assert '--oob' not in flags
+
+
+def test_finding_proof_html_renders_structured_evidence_and_escapes_values():
+    finding = {
+        'verification_status': 'confirmed', 'confidence': 'high',
+        'request': {'method': 'POST', 'url': 'https://t/search',
+                    'headers': {'X-Probe': '<header>'}, 'body': 'q=<body>'},
+        'payload': '<script>alert(1)</script>',
+        'insertion_point': {'type': 'query', 'name': 'q'},
+        'evidence': [{'type': 'execution_marker', 'description': '<proof>',
+                      'matched': 'BT-49', 'excerpt': '<script>BT-49</script>'}],
+        'response': {'status': 200, 'size': 88, 'content_type': 'text/html',
+                     'headers': {'content-type': 'text/html'},
+                     'excerpt': '<script>BT-49</script>'},
+        'baseline': {'status': 200, 'size': 50, 'scope': 'matched',
+                     'excerpt': '<clean>'},
+        'comparison': {'similarity': 0.42, 'size_delta': 38},
+        'remediation': 'Encode < and > in output.',
+    }
+    out = _finding_proof_html(finding)
+    for label in ('Verification', 'Confidence', 'Payload', 'Evidence',
+                  'Response', 'Matched baseline', 'Comparison', 'Remediation'):
+        assert label in out
+    assert '<script>' not in out
+    assert '&lt;script&gt;' in out
+    assert '<proof>' not in out and '&lt;proof&gt;' in out
 
 
 # -- scan profile export/import ------------------------------------------- #
