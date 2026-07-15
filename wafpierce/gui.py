@@ -542,7 +542,7 @@ TRANSLATIONS = {
         'removed_files': 'Removed {count} file(s)',
         'no_results_for': 'No results for {target}',
         'results_for': 'Results — {target}',
-        'done_exploits': 'Done (Exploits)',
+        'done_exploits': 'Results loaded',
         'errors_label': 'Errors',
         'errors_details': 'Errors details',
         'export_results_view': 'Export Results View',
@@ -825,7 +825,7 @@ The developers, contributors, distributors, and owners of Blackthorn assume no l
         'removed_files': 'تمت إزالة {count} ملف(ات)',
         'no_results_for': 'لا توجد نتائج لـ {target}',
         'results_for': 'النتائج — {target}',
-        'done_exploits': 'مكتمل (الثغرات)',
+        'done_exploits': 'النتائج المحمّلة',
         'errors_label': 'الأخطاء',
         'errors_details': 'تفاصيل الأخطاء',
         'export_results_view': 'تصدير عرض النتائج',
@@ -1108,7 +1108,7 @@ The developers, contributors, distributors, and owners of Blackthorn assume no l
         'removed_files': 'Видалено {count} файл(ів)',
         'no_results_for': 'Немає результатів для {target}',
         'results_for': 'Результати — {target}',
-        'done_exploits': 'Завершено (Експлойти)',
+        'done_exploits': 'Завантажено результатів',
         'errors_label': 'Помилки',
         'errors_details': 'Деталі помилок',
         'export_results_view': 'Експорт перегляду результатів',
@@ -1762,6 +1762,7 @@ def main() -> None:
                 success = False
                 done_count = 0
                 current_progress = 0
+                final_errors = []
                 
                 # Progress tracking based on phases
                 lines_processed = [0]  # Use list to allow modification in nested function
@@ -1881,6 +1882,7 @@ def main() -> None:
                         )
                     except Exception as e:
                         self.log_line.emit(f"[!] Failed to start scanner for {target}: {e}\n")
+                        final_errors.append(f"Scanner process failed to start: {e}")
                         last_status = 'Error'
                         continue
 
@@ -1904,6 +1906,7 @@ def main() -> None:
                                     break
                     except Exception as e:
                         self.log_line.emit(f"[!] Error reading output for {target}: {e}\n")
+                        final_errors.append(f"Scanner output read failed: {e}")
 
                     proc.wait()
                     self._running_procs.pop(target, None)
@@ -1950,6 +1953,7 @@ def main() -> None:
                                     break
                                 else:
                                     self.log_line.emit(f"[!] Results file for {target} did not contain a list\n")
+                                    final_errors.append('Results file did not contain a JSON list')
                                     last_status = 'NoResults'
                         except Exception as e:
                             # Only log if this is a real error, not just empty/no results
@@ -1959,15 +1963,19 @@ def main() -> None:
                                         content = f.read().strip()
                                         if content:
                                             self.log_line.emit(f"[!] Failed to parse results for {target}: {e}\n")
+                                            final_errors.append(f"Results JSON could not be parsed: {e}")
                                             last_status = 'Error'
                                         else:
                                             self.log_line.emit(f"[!] No results found for {target}\n")
+                                            final_errors.append('Scanner produced no results file content')
                                             last_status = 'NoResults'
                                 except Exception:
                                     self.log_line.emit(f"[!] No results for {target}\n")
+                                    final_errors.append('Scanner results could not be read')
                                     last_status = 'NoResults'
                             else:
                                 self.log_line.emit(f"[!] No results file generated for {target}\n")
+                                final_errors.append('Scanner did not generate a results file')
                                 last_status = 'NoResults'
 
                 if self._abort:
@@ -1977,6 +1985,12 @@ def main() -> None:
                     self.target_update.emit(target, 'Done', done_count)
                     self.progress_update.emit(target, 100)
                 else:
+                    try:
+                        self.target_summary.emit(
+                            target, [], final_errors or [last_status or 'Scan failed']
+                        )
+                    except Exception:
+                        pass
                     self.target_update.emit(target, last_status or 'Error', 0)
 
             # run with a small thread pool inside this QThread
@@ -3492,6 +3506,10 @@ def main() -> None:
                     progress_bar = self._progress_bars[target]
                     new_value = min(100, max(0, progress))
                     progress_bar.setValue(new_value)
+                    if 98 <= new_value < 100:
+                        progress_bar.setFormat('Finalizing results…')
+                    else:
+                        progress_bar.setFormat('%p%')
                     # Change color based on progress
                     if progress >= 100:
                         progress_bar.setStyleSheet('''
@@ -3724,7 +3742,12 @@ def main() -> None:
                         self._create_progress_bar_for_item(item, target)
                     else:
                         # Reset existing progress bar
-                        self._progress_bars[target].setValue(0)
+                        progress_bar = self._progress_bars[target]
+                        progress_bar.setValue(0)
+                        progress_bar.setFormat('%p%')
+                        progress_bar.setStyleSheet(
+                            self._target_progress_default_style()
+                        )
             except Exception:
                 pass
             if advanced_opts.get('dry_run'):
@@ -4165,6 +4188,34 @@ def main() -> None:
                             pass
                     else:
                         it.setText(1, status)
+                        if str(status).lower() in {
+                            'error', 'parseerror', 'noresults', 'aborted'
+                        }:
+                            # A failed finalization is still a terminal worker
+                            # state. Do not leave the lifecycle bar looking hung
+                            # at the CLI's pre-save 98% marker.
+                            progress_bar = self._progress_bars.get(target)
+                            if progress_bar is not None:
+                                progress_bar.setValue(100)
+                                progress_bar.setFormat(
+                                    'Aborted' if str(status).lower() == 'aborted'
+                                    else 'Failed'
+                                )
+                                progress_bar.setStyleSheet('''
+                                    QProgressBar {
+                                        border: 1px solid #a33a3a;
+                                        border-radius: 5px;
+                                        background-color: #21262d;
+                                        text-align: center;
+                                        color: #f4cccc;
+                                        font-size: 11px;
+                                    }
+                                    QProgressBar::chunk {
+                                        background-color: #7f2f2f;
+                                        border-radius: 4px;
+                                    }
+                                ''')
+                                self._update_total_progress()
                     break
             try:
                 self._update_legend_counts()
@@ -10446,6 +10497,16 @@ def main() -> None:
 
         def show_target_details(self, item, col=None):
             target = item.data(0, 256) or item.text(0)
+            status = str(item.text(1) or '').lower()
+            if 'running' in status or 'retrying' in status:
+                QMessageBox.information(
+                    self,
+                    'Scan still running',
+                    'Blackthorn is still scanning or finalizing this target. '
+                    'The complete result set will be available when the target '
+                    'changes to Done.',
+                )
+                return
             tmp = self._target_tmp_map.get(target)
             per = self._per_target_results.get(target, {})
             if not tmp or not os.path.exists(tmp):
@@ -11696,7 +11757,8 @@ class DoubleEncodingBypassPlugin(BypassPlugin):
             return {
                 'success': True,
                 'bypass': bypassed,
-                'response': resp,
+                'response': self.response_record(resp),
+                'status': resp.status_code,
                 'technique': self.name,
                 'reason': (
                     'Custom bypass worked!'

@@ -20,6 +20,7 @@ import random
 import socket
 import ssl
 import json
+import os
 import re
 import builtins
 import sys
@@ -77,11 +78,88 @@ def _emit_json_stdout(results) -> None:
     except Exception:
         pass
     try:
-        out.write(json.dumps(results, indent=2, default=str))
+        out.write(json.dumps(_json_safe_value(results), indent=2))
         out.write('\n')
         out.flush()
     except Exception:
-        builtins.print(json.dumps(results, default=str))
+        builtins.print('[]')
+
+
+def _json_safe_value(value, *, _seen=None, _depth=0):
+    """Return a bounded JSON-safe copy of scanner/plugin output.
+
+    User plugins historically returned live ``requests.Response`` objects. A
+    streaming ``json.dump`` would write everything before that object and then
+    fail, leaving the GUI with a truncated results file at 98% progress. Keep
+    response evidence, but never serialize arbitrary live Python objects.
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, bytes):
+        return value[:50000].decode('utf-8', errors='replace')
+    if _depth >= 20:
+        return '[maximum nesting omitted]'
+
+    if _seen is None:
+        _seen = set()
+    identity = id(value)
+    if identity in _seen:
+        return '[recursive value omitted]'
+
+    if isinstance(value, dict):
+        _seen.add(identity)
+        try:
+            return {
+                str(key): _json_safe_value(item, _seen=_seen, _depth=_depth + 1)
+                for key, item in value.items()
+            }
+        finally:
+            _seen.discard(identity)
+    if isinstance(value, (list, tuple, set, frozenset)):
+        _seen.add(identity)
+        try:
+            return [
+                _json_safe_value(item, _seen=_seen, _depth=_depth + 1)
+                for item in value
+            ]
+        finally:
+            _seen.discard(identity)
+
+    # Preserve useful HTTP evidence from requests/curl_cffi response objects.
+    if hasattr(value, 'status_code') and hasattr(value, 'headers'):
+        try:
+            return public_response(snapshot_response(value, _normalize_body))
+        except Exception:
+            return {
+                'status': int(getattr(value, 'status_code', 0) or 0),
+                'size': 0, 'content_type': '', 'headers': {}, 'excerpt': '',
+            }
+
+    isoformat = getattr(value, 'isoformat', None)
+    if callable(isoformat):
+        try:
+            return isoformat()
+        except Exception:
+            pass
+    return f'[unsupported {type(value).__name__} omitted]'
+
+
+def _write_json_atomic(path: str, results) -> None:
+    """Serialize completely, then replace the destination in one operation."""
+    safe_results = _json_safe_value(results)
+    tmp_path = f'{path}.writing-{os.getpid()}-{threading.get_ident()}'
+    try:
+        with open(tmp_path, 'w', encoding='utf-8') as handle:
+            json.dump(safe_results, handle, indent=2, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 def _configure_console_output() -> None:
@@ -1979,7 +2057,7 @@ class CloudFrontBypasser(ExtraTechniques):
 
             # Run user plugins + AI triage as post-processing phases.
             try:
-                self._run_plugins()
+                self._run_plugins(selected_categories)
             except Exception as e:
                 logger.debug(f"Plugin phase error: {e}")
         except KeyboardInterrupt:
@@ -2028,6 +2106,12 @@ class CloudFrontBypasser(ExtraTechniques):
             _cvss_annotate(self.results)
         except Exception as e:
             logger.debug(f"CVSS annotation error: {e}")
+
+        # The public scan API promises serializable records. Enforce that once
+        # at the engine boundary so GUI, redaction, database, exporters, and
+        # direct Python callers cannot be broken by a legacy/custom plugin that
+        # retained a live response, callback, datetime, or byte buffer.
+        self.results[:] = _json_safe_value(self.results)
 
         # Clean completion: drop the resume checkpoint.
         if self.resume:
@@ -2453,17 +2537,47 @@ class CloudFrontBypasser(ExtraTechniques):
             )
         ]
 
-    def _run_plugins(self) -> None:
+    def _run_plugins(self, selected_categories=None) -> None:
         """Execute user-supplied bypass plugins as a scan phase.
 
         Plugins are loaded from the plugins directory and given the live session
         and target. Whatever findings they return are normalized and appended to
-        results. Safe no-op if the plugin system is unavailable or no plugins are
-        installed. Fully wired by the plugin-integration phase.
+        results. A category-limited scan only runs plugins that declare a matching
+        category; selecting injection must not silently run an encoding/header
+        plugin. Safe no-op if no matching plugins are installed.
         """
         plugins = getattr(self, '_loaded_plugins', None)
         if not plugins:
             return
+        if selected_categories:
+            category_map = {
+                'injection': 'injection_testing',
+                'encoding': 'encoding_obfuscation',
+                'obfuscation': 'encoding_obfuscation',
+                'header': 'header_manipulation',
+                'protocol': 'protocol_level',
+                'cache': 'cache_control',
+                'auth': 'jwt_auth',
+                'jwt': 'jwt_auth',
+                'graphql': 'graphql_attacks',
+                'ai': 'ai_attacks',
+                'ssrf': 'ssrf_advanced',
+                'cloud': 'cloud_security',
+                'business_logic': 'business_logic',
+                'info': 'info_disclosure',
+                'recon': 'detection_recon',
+                'bypass': 'advanced_payloads',
+            }
+            selected = {str(category).lower() for category in selected_categories}
+            plugins = [
+                plugin for plugin in plugins
+                if category_map.get(
+                    str(getattr(plugin, 'category', '')).lower(),
+                    str(getattr(plugin, 'category', '')).lower(),
+                ) in selected
+            ]
+            if not plugins:
+                return
         print(f"\n[*] Running {len(plugins)} user plugin(s)...")
         for plugin in plugins:
             try:
@@ -2492,6 +2606,29 @@ class CloudFrontBypasser(ExtraTechniques):
             if not isinstance(item, dict):
                 continue
             norm = dict(item)
+            raw_response = norm.get('response')
+            if raw_response is not None and not isinstance(raw_response, dict):
+                try:
+                    response_snapshot = snapshot_response(raw_response, _normalize_body)
+                    norm['response'] = public_response(response_snapshot)
+                    norm.setdefault('status', response_snapshot.get('status', 0))
+                    norm.setdefault('size', response_snapshot.get('size', 0))
+                    norm.setdefault('url', str(getattr(raw_response, 'url', '') or ''))
+                    parsed = urlsplit(norm.get('url') or '')
+                    if parsed.scheme and parsed.netloc:
+                        norm.setdefault('path', urlunsplit(('', '', parsed.path or '/',
+                                                          parsed.query, '')))
+                except Exception as exc:
+                    logger.debug(f"Plugin response snapshot failed: {exc}")
+                    norm['response'] = {
+                        'status': int(getattr(raw_response, 'status_code', 0) or 0),
+                        'size': 0, 'content_type': '', 'headers': {}, 'excerpt': '',
+                    }
+            elif raw_response is None:
+                norm['response'] = {
+                    'status': int(norm.get('status', 0) or 0), 'size': 0,
+                    'content_type': '', 'headers': {}, 'excerpt': '',
+                }
             norm['bypass'] = bool(item.get('bypass', item.get('success', False)))
             norm.setdefault('status', 0)
             norm.setdefault('headers', {})
@@ -12104,8 +12241,7 @@ def main(argv=None):
         if args.json:
             _emit_json_stdout(out_results)
             if args.output:
-                with open(args.output, 'w', encoding='utf-8') as f:
-                    json.dump(out_results, f, indent=2)
+                _write_json_atomic(args.output, out_results)
             sys.exit(fail_exit if fail_exit is not None else (
                 0 if not any(_is_actionable_result(r) for r in results) else 1
             ))
@@ -12194,8 +12330,7 @@ def main(argv=None):
 
         # Save results
         if args.output:
-            with open(args.output, 'w') as f:
-                json.dump(out_results, f, indent=2)
+            _write_json_atomic(args.output, out_results)
             if not quiet:
                 print(f"\n[+] Results saved to {args.output}")
 
