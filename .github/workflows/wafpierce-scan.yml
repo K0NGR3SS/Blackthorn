@@ -55,6 +55,7 @@ jobs:
           ARGS=""
           [ -n "${{ inputs.categories }}" ] && ARGS="$ARGS -c ${{ inputs.categories }}"
           [ "${{ inputs.safe_mode }}" = "true" ] && ARGS="$ARGS --safe-mode"
+          [ "${{ inputs.safe_mode }}" = "false" ] && ARGS="$ARGS --full-impact"
           wafpierce scan "${{ inputs.target }}" $ARGS \
             --export wafpierce.sarif --export-format sarif \
             --fail-on "${{ inputs.fail_on }}"

@@ -9,14 +9,39 @@ import time
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
-from .config import get_database_path
+from .config import get_database_path, prepare_private_file
+from .secret_store import (
+    get_proxy_password,
+    get_tool_api_key,
+    set_proxy_password,
+    set_tool_api_key,
+)
+
+
+def _sanitize_pipeline_definition(definition: dict) -> dict:
+    """Copy a pipeline definition while migrating embedded tool credentials."""
+    try:
+        clean = json.loads(json.dumps(definition or {}))
+    except Exception:
+        clean = dict(definition or {})
+    for stage in clean.get('stages', []) if isinstance(clean, dict) else []:
+        if not isinstance(stage, dict) or stage.get('type') != 'external_tool':
+            continue
+        config = stage.get('config')
+        if not isinstance(config, dict):
+            continue
+        api_key = config.pop('api_key', None)
+        tool_key = config.get('tool')
+        if api_key and tool_key:
+            set_tool_api_key(str(tool_key), str(api_key))
+    return clean
 
 
 class WAFPierceDB:
     """Database handler for Blackthorn."""
     
     def __init__(self, db_path: str = None):
-        self.db_path = db_path or get_database_path()
+        self.db_path = prepare_private_file(db_path or get_database_path())
         self._init_db()
     
     def _init_db(self):
@@ -169,7 +194,8 @@ class WAFPierceDB:
         except Exception:
             pass
 
-        # Proxy configurations table
+        # Proxy configurations table. ``password`` is retained only to migrate
+        # older databases; new credentials use secret_store.
         c.execute('''
             CREATE TABLE IF NOT EXISTS proxy_configs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -268,8 +294,9 @@ class WAFPierceDB:
             )
         ''')
 
-        # External-tool per-tool overrides (P2 tool registry): custom binary path,
-        # extra args, API key, enabled flag, and last-detected status cache.
+        # External-tool per-tool overrides (P2 tool registry). ``api_key`` is a
+        # legacy migration column and remains NULL for new writes; secrets live
+        # behind secret_store (environment or optional OS keychain).
         c.execute('''
             CREATE TABLE IF NOT EXISTS tool_configs (
                 tool_key TEXT PRIMARY KEY,
@@ -383,8 +410,16 @@ class WAFPierceDB:
             conn.row_factory = sqlite3.Row
             row = conn.execute('SELECT * FROM tool_configs WHERE tool_key = ?',
                                (tool_key,)).fetchone()
+            data = dict(row) if row else None
+            if data and data.get('api_key'):
+                set_tool_api_key(tool_key, data['api_key'])
+                conn.execute('UPDATE tool_configs SET api_key=NULL WHERE tool_key=?',
+                             (tool_key,))
+                conn.commit()
             conn.close()
-            return dict(row) if row else None
+            if data is not None:
+                data['api_key'] = get_tool_api_key(tool_key) or None
+            return data
         except Exception:
             return None
 
@@ -394,8 +429,22 @@ class WAFPierceDB:
             conn = sqlite3.connect(self.db_path)
             conn.row_factory = sqlite3.Row
             rows = conn.execute('SELECT * FROM tool_configs').fetchall()
+            configs = {}
+            migrated = False
+            for row in rows:
+                data = dict(row)
+                key = data['tool_key']
+                if data.get('api_key'):
+                    set_tool_api_key(key, data['api_key'])
+                    conn.execute('UPDATE tool_configs SET api_key=NULL WHERE tool_key=?',
+                                 (key,))
+                    migrated = True
+                data['api_key'] = get_tool_api_key(key) or None
+                configs[key] = data
+            if migrated:
+                conn.commit()
             conn.close()
-            return {r['tool_key']: dict(r) for r in rows}
+            return configs
         except Exception:
             return {}
 
@@ -405,6 +454,8 @@ class WAFPierceDB:
                          last_status: str = None) -> bool:
         """Upsert a tool override row."""
         try:
+            if api_key is not None:
+                set_tool_api_key(tool_key, api_key)
             conn = sqlite3.connect(self.db_path)
             conn.execute('''
                 INSERT INTO tool_configs
@@ -419,7 +470,7 @@ class WAFPierceDB:
                     last_detected_version=excluded.last_detected_version,
                     last_status=excluded.last_status,
                     updated_at=CURRENT_TIMESTAMP
-            ''', (tool_key, custom_path, extra_args, api_key, 1 if enabled else 0,
+            ''', (tool_key, custom_path, extra_args, None, 1 if enabled else 0,
                   last_detected_version, last_status))
             conn.commit()
             conn.close()
@@ -431,6 +482,7 @@ class WAFPierceDB:
     def save_pipeline(self, name: str, definition: dict, description: str = '') -> bool:
         """Upsert a pipeline by name. ``definition`` is stored as JSON."""
         try:
+            clean_definition = _sanitize_pipeline_definition(definition)
             conn = sqlite3.connect(self.db_path)
             conn.execute('''
                 INSERT INTO pipelines (name, description, definition, schema_version, updated_at)
@@ -440,8 +492,8 @@ class WAFPierceDB:
                     definition=excluded.definition,
                     schema_version=excluded.schema_version,
                     updated_at=CURRENT_TIMESTAMP
-            ''', (name, description, json.dumps(definition),
-                  int(definition.get('schema_version', 1))))
+            ''', (name, description, json.dumps(clean_definition),
+                  int(clean_definition.get('schema_version', 1))))
             conn.commit()
             conn.close()
             return True
@@ -458,7 +510,16 @@ class WAFPierceDB:
                 return None
             d = dict(row)
             try:
-                d['definition'] = json.loads(d['definition'])
+                original_definition = json.loads(d['definition'])
+                d['definition'] = _sanitize_pipeline_definition(original_definition)
+                if d['definition'] != original_definition:
+                    conn = sqlite3.connect(self.db_path)
+                    conn.execute(
+                        'UPDATE pipelines SET definition=? WHERE name=?',
+                        (json.dumps(d['definition']), name),
+                    )
+                    conn.commit()
+                    conn.close()
             except Exception:
                 d['definition'] = {}
             return d
@@ -1289,20 +1350,35 @@ class WAFPierceDB:
         
         c.execute('SELECT * FROM proxy_configs ORDER BY name')
         rows = c.fetchall()
+        configs = []
+        migrated = False
+        for row in rows:
+            data = dict(row)
+            if data.get('password'):
+                set_proxy_password(data['name'], data['password'])
+                c.execute('UPDATE proxy_configs SET password=NULL WHERE id=?',
+                          (data['id'],))
+                migrated = True
+            data['password'] = get_proxy_password(data['name']) or None
+            configs.append(data)
+        if migrated:
+            conn.commit()
         conn.close()
         
-        return [dict(row) for row in rows]
+        return configs
     
     def add_proxy_config(self, name: str, proxy_type: str, host: str, port: int,
                         username: str = None, password: str = None):
         """Add a new proxy configuration."""
+        if password is not None:
+            set_proxy_password(name, password)
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
         
         c.execute('''
             INSERT OR REPLACE INTO proxy_configs (name, proxy_type, host, port, username, password)
             VALUES (?, ?, ?, ?, ?, ?)
-        ''', (name, proxy_type, host, port, username, password))
+        ''', (name, proxy_type, host, port, username, None))
         
         conn.commit()
         conn.close()
@@ -1328,9 +1404,17 @@ class WAFPierceDB:
         
         c.execute('SELECT * FROM proxy_configs WHERE is_default = 1 AND enabled = 1')
         row = c.fetchone()
+        data = dict(row) if row else None
+        if data and data.get('password'):
+            set_proxy_password(data['name'], data['password'])
+            c.execute('UPDATE proxy_configs SET password=NULL WHERE id=?',
+                      (data['id'],))
+            conn.commit()
         conn.close()
         
-        return dict(row) if row else None
+        if data is not None:
+            data['password'] = get_proxy_password(data['name']) or None
+        return data
     
     # ==================== SCHEDULED SCANS ====================
     

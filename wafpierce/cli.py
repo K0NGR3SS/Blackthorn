@@ -41,7 +41,8 @@ usage: {CLI_NAME} <command> [options]
 
 commands:
   scan <url> [flags]   Run the full technique scanner (all documented flags:
-                       --oob, --impersonate, --resume, --safe-mode, --import-*,
+                       --oob, --impersonate, --resume, --safe-mode/--full-impact,
+                       --import-*,
                        --export, --ai-*, scope/auth, --dry-run, ...).
                        This is the default if you pass a URL with no command.
   recon <domain>       External-tool recon (subfinder/amass/dnsx/httpx/nmap).
@@ -60,7 +61,7 @@ global:
 
 examples:
   {CLI_NAME} scan https://target --impersonate chrome --oob interactsh
-  {CLI_NAME} scan https://target --dry-run --safe-mode
+  {CLI_NAME} scan https://target --dry-run       # safe mode is the default
   {CLI_NAME} https://target            # == {CLI_NAME} scan https://target
   {CLI_NAME} doctor
 """)

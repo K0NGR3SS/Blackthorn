@@ -22,3 +22,5 @@ reportlab>=4.0.0
 #   pip install playwright && python -m playwright install chromium
 # AI triage / auto-report (opt-in, needs an Anthropic API key):
 #   pip install anthropic
+# OS credential-store persistence for GUI-entered secrets:
+#   pip install keyring

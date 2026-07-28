@@ -28,6 +28,16 @@ def get_config_dir() -> str:
     return os.path.join(base, CONFIG_DIR_NAME)
 
 
+def _restrict_permissions(path: str, mode: int) -> None:
+    """Best-effort private permissions on Unix; Windows uses its ACL model."""
+    if os.name == 'nt':
+        return
+    try:
+        os.chmod(path, mode)
+    except OSError:
+        pass
+
+
 def ensure_config_dir() -> str:
     """
     Get the config directory, creating it if it doesn't exist.
@@ -38,9 +48,28 @@ def ensure_config_dir() -> str:
     d = get_config_dir()
     try:
         os.makedirs(d, exist_ok=True)
+        _restrict_permissions(d, 0o700)
     except OSError:
         pass
     return d
+
+
+def prepare_private_file(path: str) -> str:
+    """Create a file with owner-only permissions before a writer opens it."""
+    if path == ':memory:':
+        return path
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+        _restrict_permissions(parent, 0o700)
+    if not os.path.exists(path):
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+            os.close(fd)
+        except OSError:
+            pass
+    _restrict_permissions(path, 0o600)
+    return path
 
 
 def get_database_path() -> str:
@@ -83,6 +112,7 @@ def ensure_plugins_dir() -> str:
     d = get_plugins_dir()
     try:
         os.makedirs(d, exist_ok=True)
+        _restrict_permissions(d, 0o700)
     except OSError:
         pass
     return d
@@ -98,6 +128,7 @@ def get_log_dir() -> str:
     d = os.path.join(get_config_dir(), 'logs')
     try:
         os.makedirs(d, exist_ok=True)
+        _restrict_permissions(d, 0o700)
     except OSError:
         pass
     return d
@@ -108,6 +139,7 @@ def get_proxy_ca_dir() -> str:
     d = os.path.join(get_config_dir(), 'ca')
     try:
         os.makedirs(d, exist_ok=True)
+        _restrict_permissions(d, 0o700)
     except OSError:
         pass
     return d
