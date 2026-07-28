@@ -35,10 +35,37 @@ from .branding import (
     asset_path,
 )
 from .exporters import is_confirmed_result as _is_confirmed_result, result_state as _result_state
+from .ui_components import style_button
 
 LOGO_PATH = asset_path(TRANSPARENT_LOGO)
 SIDEBAR_LOGO_PATH = asset_path(DARK_LOGO)
 BANNER_PATH = asset_path(BRAND_BANNER)
+
+PRIMARY_NAV_ITEMS = (
+    ('scan', 'Scope & scan'),
+    ('recon', 'Discover'),
+    ('pipeline', 'Test plan'),
+    ('results', 'Analyze'),
+    ('dashboard', 'Report'),
+)
+
+WORKBENCH_ITEMS = (
+    ('External tools', 'tools'),
+    ('Browser', 'browser'),
+    ('Proxy', 'proxy'),
+    ('Repeater', 'repeater'),
+    ('Fuzzer', 'fuzzer'),
+    ('SQL injection', 'sqli'),
+    ('Secrets', 'secrets'),
+    ('Payload library', 'payloads'),
+    ('ZAP / Burp', 'zapburp'),
+    ('AD / Internal', 'adint'),
+    ('AI assistance', 'ai'),
+    ('Live logs', 'live'),
+    ('Timeline', 'timeline'),
+    ('Schedule', 'schedule'),
+    ('Plugins', 'plugins'),
+)
 
 # Use shared config module
 from .config import get_gui_prefs_path
@@ -437,7 +464,7 @@ def _load_prefs() -> dict:
     path = get_gui_prefs_path()
     defaults = {
         'font_size': 12,
-        'watermark': True,
+        'watermark': False,
         'threads': 5,
         'concurrent': 2,
         'use_concurrent': True,
@@ -1684,9 +1711,9 @@ def main() -> None:
         from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                                        QLineEdit, QPushButton, QTreeWidget, QTreeWidgetItem,
                                        QTextEdit, QLabel, QFileDialog, QMessageBox, QCheckBox,
-                                       QSpinBox, QDoubleSpinBox, QHeaderView, QGraphicsOpacityEffect,
+                                       QSpinBox, QDoubleSpinBox, QHeaderView,
                                        QProgressBar)
-        from PySide6.QtCore import QObject, Signal, QPropertyAnimation, QTimer, QEasingCurve
+        from PySide6.QtCore import QObject, Signal, QTimer
         from PySide6.QtGui import QBrush, QColor, QFont, QFontDatabase
     except ImportError:
         _show_missing_packages_error()
@@ -2468,7 +2495,7 @@ def main() -> None:
         def _nav_button(self, glyph, label, slot, active=False):
             from PySide6.QtWidgets import QPushButton
             from PySide6.QtCore import Qt
-            btn = QPushButton(f"  {glyph}   {label}")
+            btn = QPushButton(f"{glyph}  {label}" if glyph else label)
             btn.setObjectName('NavButton')
             try:
                 btn.setCursor(Qt.PointingHandCursor)
@@ -2521,8 +2548,8 @@ def main() -> None:
             lay.addLayout(brand)
             lay.addSpacing(12)
 
-            # Nav items map to existing actions/pages. Grouping keeps the
-            # bug-bounty workspace scannable without removing any current tool.
+            # Keep the primary workflow visible and move specialist surfaces
+            # into one workbench chooser. Every existing page remains reachable.
             self._nav_buttons = {}
             nav_scroll = QScrollArea()
             nav_scroll.setObjectName('SidebarScroll')
@@ -2536,35 +2563,9 @@ def main() -> None:
             nav_lay.setContentsMargins(0, 0, 0, 0)
             nav_lay.setSpacing(4)
             nav_groups = [
-                ('OPERATE', [
-                    ('scan', '◉', 'Scan', True),
-                    ('pipeline', '⛓', 'Pipeline', False),
-                    ('ai', '✦', 'AI / Automation', False),
-                    ('recon', '◈', 'Recon', False),
-                    ('browser', '◍', 'Browser', False),
-                    ('proxy', '◌', 'Proxy', False),
-                ]),
-                ('ANALYZE', [
-                    ('results', '◆', 'Results', False),
-                    ('dashboard', '▦', 'Dashboard', False),
-                    ('timeline', '☰', 'Timeline', False),
-                    ('live', '◰', 'Live Logs', False),
-                ]),
-                ('TOOLS', [
-                    ('tools', '⚒', 'External Tools', False),
-                    ('repeater', '↻', 'Repeater', False),
-                    ('fuzzer', '⌗', 'Fuzzer', False),
-                    ('sqli', '⛁', 'SQLi', False),
-                    ('secrets', '⚷', 'Secrets', False),
-                    ('payloads', '⚑', 'Payloads', False),
-                    ('zapburp', '◧', 'ZAP/Burp', False),
-                    ('adint', '◇', 'AD / Internal', False),
-                ]),
-                ('MANAGE', [
-                    ('engagements', '◎', 'Engagements', False),
-                    ('schedule', '◷', 'Schedule', False),
-                    ('plugins', '❖', 'Plugins', False),
-                    ('settings', '⚙', 'Settings', False),
+                ('WORKFLOW', [
+                    (key, '', label, key == 'scan')
+                    for key, label in PRIMARY_NAV_ITEMS
                 ]),
             ]
             for group, items in nav_groups:
@@ -2580,6 +2581,41 @@ def main() -> None:
                     self._nav_buttons[key] = btn
                     nav_lay.addWidget(btn)
                 nav_lay.addSpacing(6)
+
+            section = QLabel('WORKBENCH')
+            section.setObjectName('NavSection')
+            nav_lay.addWidget(section)
+            workbench = QtWidgets.QComboBox()
+            workbench.setAccessibleName('Open a specialist workbench')
+            workbench.addItem('Open a tool…', None)
+            for label, key in WORKBENCH_ITEMS:
+                workbench.addItem(label, key)
+
+            def open_workbench(index):
+                key = workbench.itemData(index)
+                if not key:
+                    return
+                self._navigate(key)
+                workbench.blockSignals(True)
+                workbench.setCurrentIndex(0)
+                workbench.blockSignals(False)
+
+            workbench.currentIndexChanged.connect(open_workbench)
+            self._workbench_combo = workbench
+            nav_lay.addWidget(workbench)
+            nav_lay.addSpacing(8)
+
+            for key, label in (
+                ('engagements', 'Engagements'),
+                ('settings', 'Settings'),
+            ):
+                btn = self._nav_button(
+                    '',
+                    label,
+                    lambda checked=False, k=key: self._navigate(k),
+                )
+                self._nav_buttons[key] = btn
+                nav_lay.addWidget(btn)
 
             nav_lay.addStretch()
             nav_scroll.setWidget(nav_body)
@@ -2626,6 +2662,17 @@ def main() -> None:
             self._stack.addWidget(scan_holder)
             self._pages['scan'] = scan_holder
 
+            page_title = QLabel('Scope & scan')
+            page_title.setObjectName('PageTitle')
+            page_subtitle = QLabel(
+                'Queue authorized targets, choose a scan profile, and review '
+                'the evidence as it arrives.'
+            )
+            page_subtitle.setWordWrap(True)
+            page_subtitle.setObjectName('FieldLabel')
+            v.addWidget(page_title)
+            v.addWidget(page_subtitle)
+
             # top controls
             top = QHBoxLayout()
             self._layout_top = top
@@ -2636,9 +2683,16 @@ def main() -> None:
                 self.target_edit.textChanged.connect(self._check_easter_egg_input)
             except Exception:
                 pass
-            add_btn = QPushButton(_t('add', self._lang))
+            add_btn = style_button(
+                QPushButton(),
+                'secondary',
+                text='Add target',
+                tooltip='Add this authorized target to the scan queue',
+            )
             add_btn.clicked.connect(self.add_target)
-            remove_btn = QPushButton(_t('remove', self._lang))
+            remove_btn = style_button(
+                QPushButton(), 'quiet', text='Remove selected'
+            )
             remove_btn.clicked.connect(self.remove_selected)
             target_lbl = QLabel(_t('target_url', self._lang))
             target_lbl.setObjectName('FieldLabel')
@@ -2650,12 +2704,16 @@ def main() -> None:
             
             # Import button
             try:
-                import_btn = QPushButton('📥 ' + _t('import_targets', self._lang) if 'import_targets' in TRANSLATIONS.get(self._lang, {}) else '📥 Import')
+                import_btn = style_button(
+                    QPushButton(), 'quiet', text='Import targets'
+                )
                 import_btn.setFixedHeight(28)
                 import_btn.clicked.connect(self._import_targets_dialog)
                 top.addWidget(import_btn)
 
-                import_scan_btn = QPushButton('📂 Import JSON')
+                import_scan_btn = style_button(
+                    QPushButton(), 'quiet', text='Import results'
+                )
                 import_scan_btn.setFixedHeight(28)
                 import_scan_btn.setToolTip('Import saved scan results JSON')
                 import_scan_btn.clicked.connect(self._import_scan_json_dialog)
@@ -2789,27 +2847,6 @@ def main() -> None:
                         self.log.setFont(QFont(ui, 10))
             except Exception:
                 pass
-            # attempt to set a faint watermark background using the bundled logo
-            try:
-                if os.path.exists(LOGO_PATH):
-                    # Always use dark mode opacity
-                    opacity = 0.08
-                    tmp = self._create_qt_watermark(opacity)
-                    if tmp and os.path.exists(tmp):
-                        try:
-                            from pathlib import Path
-                            css_path = Path(tmp).as_posix()
-                        except Exception:
-                            css_path = tmp.replace('\\', '/')
-                        self.log.setStyleSheet(
-                            "QTextEdit {"
-                            f" background-image: url('{css_path}');"
-                            " background-repeat: no-repeat; background-position: center; background-attachment: fixed;"
-                            " background-color: #12161d; color: #e6eaf0;"
-                            " border: 1px solid #262f3b; border-radius: 10px; padding: 8px; }"
-                        )
-            except Exception:
-                pass
             # Total progress bar above output
             total_progress_layout = QHBoxLayout()
             total_progress_label = QLabel(_t('total_progress', self._lang) if 'total_progress' in TRANSLATIONS.get(self._lang, {}) else 'Total Progress:')
@@ -2821,22 +2858,6 @@ def main() -> None:
             self._total_progress_bar.setTextVisible(True)
             self._total_progress_bar.setFormat('%p%')
             self._total_progress_bar.setFixedHeight(22)
-            self._total_progress_bar.setStyleSheet('''
-                QProgressBar {
-                    border: 1px solid #262f3b;
-                    border-radius: 7px;
-                    background-color: #1a212b;
-                    text-align: center;
-                    color: #e6eaf0;
-                    font-size: 12px;
-                    font-weight: bold;
-                }
-                QProgressBar::chunk {
-                    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                        stop:0 #4f52d6, stop:1 #6366f1);
-                    border-radius: 6px;
-                }
-            ''')
             total_progress_layout.addWidget(total_progress_label)
             total_progress_layout.addWidget(self._total_progress_bar, 1)
             right_v.addLayout(total_progress_layout)
@@ -2844,62 +2865,20 @@ def main() -> None:
             right_v.addWidget(QLabel(_t('output', self._lang)))
             right_v.addWidget(self.log, 1)
             # Results button at bottom of output area
-            self.results_btn = QPushButton(_t('results', self._lang))
+            self.results_btn = style_button(
+                QPushButton(),
+                'results',
+                text='Review findings',
+                tooltip='Open the evidence-led results workspace',
+            )
             self.results_btn.setEnabled(False)
             self.results_btn.setFixedHeight(40)
-            self._results_btn_base_style = '''
-                QPushButton {
-                    background-color: #1a212b;
-                    color: #e6eaf0;
-                    border: 1px solid #262f3b;
-                    padding: 8px 20px;
-                    border-radius: 8px;
-                    font-size: 14px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #1f2731;
-                    border-color: #6366f1;
-                }
-                QPushButton:disabled {
-                    background-color: #12161d;
-                    color: #6b7585;
-                    border-color: #1c232d;
-                }
-            '''
-            self._results_btn_green_style = '''
-                QPushButton {
-                    background-color: #22c55e;
-                    color: #000000;
-                    border: none;
-                    padding: 8px 20px;
-                    border-radius: 5px;
-                    font-size: 14px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #16a34a;
-                }
-            '''
-            self.results_btn.setStyleSheet(self._results_btn_base_style)
+            self.results_btn.setProperty('hasResults', 'false')
+            # Kept as empty compatibility values for older reset paths.
+            self._results_btn_base_style = ''
+            self._results_btn_green_style = ''
             self.results_btn.clicked.connect(lambda: self._navigate('results'))
             right_v.addWidget(self.results_btn)
-            
-            # Setup pulsating animation for Results button
-            self._results_pulse_effect = QGraphicsOpacityEffect(self.results_btn)
-            self.results_btn.setGraphicsEffect(self._results_pulse_effect)
-            self._results_pulse_effect.setOpacity(1.0)
-            self._results_pulse_anim = QPropertyAnimation(self._results_pulse_effect, b'opacity')
-            self._results_pulse_anim.setDuration(1000)
-            self._results_pulse_anim.setStartValue(1.0)
-            self._results_pulse_anim.setEndValue(0.6)
-            self._results_pulse_anim.setEasingCurve(QEasingCurve.InOutSine)
-            self._results_pulse_anim.setLoopCount(-1)  # Infinite loop
-            # Make it pulse back and forth
-            self._results_pulse_anim.finished.connect(lambda: None)  # placeholder
-            self._results_pulse_timer = QTimer()
-            self._results_pulse_timer.timeout.connect(self._toggle_pulse_direction)
-            self._results_pulse_forward = True
             
             middle.addLayout(right_v, 3)
             v.addLayout(middle, 1)
@@ -2907,20 +2886,29 @@ def main() -> None:
             # bottom controls
             bottom = QHBoxLayout()
             self._layout_bottom = bottom
-            self.start_btn = QPushButton(_t('start', self._lang))
-            self.start_btn.setObjectName('PrimaryButton')
+            self.start_btn = style_button(
+                QPushButton(),
+                'primary',
+                text='Start scan',
+                tooltip='Run the selected profile against queued targets',
+            )
             self.start_btn.setMinimumHeight(38)
             self.start_btn.clicked.connect(self.start_scan)
-            self.stop_btn = QPushButton(_t('stop', self._lang))
-            self.stop_btn.setObjectName('DangerButton')
+            self.stop_btn = style_button(
+                QPushButton(), 'danger', text='Stop scan'
+            )
             self.stop_btn.setMinimumHeight(38)
             self.stop_btn.setEnabled(False)
             self.stop_btn.clicked.connect(self.stop_scan)
-            self.save_btn = QPushButton(_t('save', self._lang))
+            self.save_btn = style_button(
+                QPushButton(), 'secondary', text='Export results'
+            )
             self.save_btn.setEnabled(False)
             self.save_btn.clicked.connect(self.save_results)
             # cleanup button: clear temp files and also clear the UI
-            self.clean_btn = QPushButton(_t('clear', self._lang))
+            self.clean_btn = style_button(
+                QPushButton(), 'quiet', text='Clear workspace'
+            )
             # when clicked by user from the UI, also clear the site list and outputs
             try:
                 self.clean_btn.clicked.connect(lambda: self.clean_tmp_files(False, True))
@@ -3272,36 +3260,23 @@ def main() -> None:
                 pass
 
         def _toggle_pulse_direction(self):
-            """Toggle pulsating animation direction for Results button."""
-            try:
-                if self._results_pulse_forward:
-                    self._results_pulse_anim.setStartValue(1.0)
-                    self._results_pulse_anim.setEndValue(0.6)
-                else:
-                    self._results_pulse_anim.setStartValue(0.6)
-                    self._results_pulse_anim.setEndValue(1.0)
-                self._results_pulse_forward = not self._results_pulse_forward
-                self._results_pulse_anim.start()
-            except Exception:
-                pass
+            """Compatibility no-op: attention is conveyed without animation."""
 
         def _start_results_pulse(self):
-            """Start the pulsating animation on the Results button."""
+            """Mark results available using a stable border/text state."""
             try:
-                self._results_pulse_forward = True
-                self._results_pulse_anim.setStartValue(1.0)
-                self._results_pulse_anim.setEndValue(0.6)
-                self._results_pulse_anim.setLoopCount(1)
-                self._results_pulse_anim.finished.connect(self._toggle_pulse_direction)
-                self._results_pulse_anim.start()
+                self.results_btn.setProperty('hasResults', 'true')
+                self.results_btn.style().unpolish(self.results_btn)
+                self.results_btn.style().polish(self.results_btn)
             except Exception:
                 pass
 
         def _stop_results_pulse(self):
-            """Stop the pulsating animation and reset opacity."""
+            """Reset the stable results-available state."""
             try:
-                self._results_pulse_anim.stop()
-                self._results_pulse_effect.setOpacity(1.0)
+                self.results_btn.setProperty('hasResults', 'false')
+                self.results_btn.style().unpolish(self.results_btn)
+                self.results_btn.style().polish(self.results_btn)
             except Exception:
                 pass
 
@@ -3490,39 +3465,10 @@ def main() -> None:
                 pass
 
         def _target_progress_default_style(self):
-            return '''
-                QProgressBar {
-                    border: 1px solid #30363d;
-                    border-radius: 5px;
-                    background-color: #21262d;
-                    text-align: center;
-                    color: #d7e1ea;
-                    font-size: 11px;
-                }
-                QProgressBar::chunk {
-                    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                        stop:0 #238636, stop:1 #2ea043);
-                    border-radius: 4px;
-                }
-            '''
+            return ''
 
         def _total_progress_default_style(self):
-            return '''
-                QProgressBar {
-                    border: 1px solid #30363d;
-                    border-radius: 5px;
-                    background-color: #21262d;
-                    text-align: center;
-                    color: #d7e1ea;
-                    font-size: 12px;
-                    font-weight: bold;
-                }
-                QProgressBar::chunk {
-                    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                        stop:0 #2563eb, stop:1 #3b82f6);
-                    border-radius: 4px;
-                }
-            '''
+            return ''
 
         def _reset_progress_after_stop(self):
             """Normalize progress UI after a user-initiated stop."""
@@ -3991,10 +3937,13 @@ def main() -> None:
                 header_row.addWidget(header)
                 header_row.addStretch()
                 
-                select_all_btn = QPushButton(_t('select_all', self._lang))
+                select_all_btn = style_button(
+                    QPushButton(), 'quiet', text=_t('select_all', self._lang)
+                )
                 select_all_btn.setCursor(QCursor(Qt.PointingHandCursor))
-                select_all_btn.setStyleSheet('QPushButton { background-color: #238636; border-color: #238636; color: white; } QPushButton:hover { background-color: #2ea043; }')
-                deselect_all_btn = QPushButton(_t('deselect_all', self._lang))
+                deselect_all_btn = style_button(
+                    QPushButton(), 'quiet', text=_t('deselect_all', self._lang)
+                )
                 deselect_all_btn.setCursor(QCursor(Qt.PointingHandCursor))
                 header_row.addWidget(select_all_btn)
                 header_row.addWidget(deselect_all_btn)
@@ -4150,13 +4099,18 @@ def main() -> None:
                 bottom_layout.addWidget(count_label)
                 bottom_layout.addStretch()
                 
-                cancel_btn = QPushButton(_t('cancel', self._lang))
+                cancel_btn = style_button(
+                    QPushButton(), 'quiet', text=_t('cancel', self._lang)
+                )
                 cancel_btn.setCursor(QCursor(Qt.PointingHandCursor))
                 cancel_btn.clicked.connect(dialog.reject)
                 
-                start_btn = QPushButton(f"▶  {_t('start_scan', self._lang)}")
+                start_btn = style_button(
+                    QPushButton(),
+                    'primary',
+                    text=_t('start_scan', self._lang),
+                )
                 start_btn.setCursor(QCursor(Qt.PointingHandCursor))
-                start_btn.setStyleSheet('QPushButton { background-color: #238636; border-color: #238636; color: white; padding: 8px 20px; } QPushButton:hover { background-color: #2ea043; }')
                 start_btn.clicked.connect(dialog.accept)
                 
                 bottom_layout.addWidget(cancel_btn)
@@ -4397,23 +4351,13 @@ def main() -> None:
             dlg = QtWidgets.QWidget()
             dlg.setWindowTitle('External Tools')
             dlg.resize(940, 660)
-            dlg.setStyleSheet('''
-                QDialog { background-color: #0f1112; }
-                QLabel { color: #d7e1ea; }
-                QLineEdit { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; border-radius: 4px; padding: 5px; }
-                QTreeWidget { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; }
-                QTreeWidget::item { padding: 4px; }
-                QTreeWidget::item:selected { background-color: #3b82f6; }
-                QPushButton { background-color: #2b2f33; color: #d7e1ea; border: none; padding: 7px 14px; border-radius: 4px; }
-                QPushButton:hover { background-color: #3b3f43; }
-                QPushButton:disabled { color: #6b737b; }
-                QTextEdit { background-color: #0b0d0e; color: #9ee6a0; border: 1px solid #2b2f33; }
-            ''')
             outer = QVBoxLayout(dlg)
 
+            title = QLabel('External tools')
+            title.setObjectName('PageTitle')
+            outer.addWidget(title)
             banner = QLabel('Detect-and-drive: Blackthorn runs tools already installed on this machine. '
                             'Nothing is installed for you. Authorized targets only.')
-            banner.setStyleSheet('color:#8b949e; padding:2px;')
             banner.setWordWrap(True)
             outer.addWidget(banner)
 
@@ -4449,10 +4393,19 @@ def main() -> None:
             outer.addWidget(tree, 1)
 
             act = QHBoxLayout()
-            run_btn = QPushButton('▶ Run selected')
-            stop_btn = QPushButton('■ Stop'); stop_btn.setEnabled(False)
-            cfg_btn = QPushButton('⚙ Configure')
-            results_btn = QPushButton('◆ Open Results')
+            run_btn = style_button(
+                QPushButton(), 'primary', text='Run selected tool'
+            )
+            stop_btn = style_button(
+                QPushButton(), 'danger', text='Stop tool'
+            )
+            stop_btn.setEnabled(False)
+            cfg_btn = style_button(
+                QPushButton(), 'quiet', text='Configure'
+            )
+            results_btn = style_button(
+                QPushButton(), 'secondary', text='Review findings'
+            )
             act.addWidget(run_btn); act.addWidget(stop_btn); act.addWidget(cfg_btn)
             act.addStretch(); act.addWidget(results_btn)
             outer.addLayout(act)
@@ -4718,8 +4671,16 @@ def main() -> None:
             outer.addLayout(mid, 1)
 
             runrow = QHBoxLayout()
-            run_btn = QPushButton('▶ Run pipeline'); stop_btn = QPushButton('■ Stop'); stop_btn.setEnabled(False)
-            results_btn = QPushButton('◆ Open Results')
+            run_btn = style_button(
+                QPushButton(), 'primary', text='Run pipeline'
+            )
+            stop_btn = style_button(
+                QPushButton(), 'danger', text='Stop pipeline'
+            )
+            stop_btn.setEnabled(False)
+            results_btn = style_button(
+                QPushButton(), 'secondary', text='Review findings'
+            )
             runrow.addWidget(run_btn); runrow.addWidget(stop_btn); runrow.addStretch(); runrow.addWidget(results_btn)
             outer.addLayout(runrow)
             log = QTextEdit(); log.setReadOnly(True); log.setMaximumHeight(200)
@@ -5847,8 +5808,8 @@ def main() -> None:
             dlg.setObjectName('ReconPage')
             lay = QVBoxLayout(dlg)
             lay.setContentsMargins(22, 20, 22, 20)
-            _hdr = QLabel('Recon  —  recon & light pentest')
-            _hdr.setStyleSheet('font-size:18px; font-weight:bold; color:#58a6ff;')
+            _hdr = QLabel('Discovery')
+            _hdr.setObjectName('PageTitle')
             _hdr.setToolTip('subfinder · amass · dnsx · httpx · nmap  +  tlsx · gau · katana · nuclei · naabu · dalfox')
             lay.addWidget(_hdr)
 
@@ -5947,9 +5908,16 @@ def main() -> None:
             # Actions — two compact rows so the buttons never overflow a narrow
             # window (run controls on top, output actions below).
             run_row = QHBoxLayout()
-            run_btn = QPushButton('▶  Run Recon')
-            stop_btn = QPushButton('■  Stop'); stop_btn.setEnabled(False)
-            tools_btn = QPushButton('⬇  Tools')
+            run_btn = style_button(
+                QPushButton(), 'primary', text='Run discovery'
+            )
+            stop_btn = style_button(
+                QPushButton(), 'danger', text='Stop discovery'
+            )
+            stop_btn.setEnabled(False)
+            tools_btn = style_button(
+                QPushButton(), 'quiet', text='Tool setup'
+            )
             tools_btn.setToolTip('Install optional recon tools: tlsx, gau, katana, nuclei, naabu, dalfox')
             run_row.addWidget(run_btn)
             run_row.addWidget(stop_btn)
@@ -5958,10 +5926,22 @@ def main() -> None:
             lay.addLayout(run_row)
 
             out_row = QHBoxLayout()
-            merge_btn = QPushButton('＋ Merge to Results'); merge_btn.setEnabled(False)
-            msf_btn = QPushButton('→ Metasploit'); msf_btn.setEnabled(False)
-            caido_btn = QPushButton('→ Caido'); caido_btn.setEnabled(False)
-            save_btn = QPushButton('Save JSON…'); save_btn.setEnabled(False)
+            merge_btn = style_button(
+                QPushButton(), 'secondary', text='Add to findings'
+            )
+            merge_btn.setEnabled(False)
+            msf_btn = style_button(
+                QPushButton(), 'quiet', text='Send to Metasploit'
+            )
+            msf_btn.setEnabled(False)
+            caido_btn = style_button(
+                QPushButton(), 'quiet', text='Send to Caido'
+            )
+            caido_btn.setEnabled(False)
+            save_btn = style_button(
+                QPushButton(), 'quiet', text='Export JSON'
+            )
+            save_btn.setEnabled(False)
             for b in (merge_btn, msf_btn, caido_btn, save_btn):
                 out_row.addWidget(b)
             out_row.addStretch()
@@ -7322,8 +7302,8 @@ def main() -> None:
 
             page = QtWidgets.QWidget(); page.setObjectName('PipelinePage')
             v = QVBoxLayout(page); v.setContentsMargins(22, 20, 22, 20)
-            hdr = QLabel('⛓  Pipeline — one-click chained pentest')
-            hdr.setStyleSheet('font-size:18px; font-weight:bold; color:#58a6ff;')
+            hdr = QLabel('Test pipeline')
+            hdr.setObjectName('PageTitle')
             v.addWidget(hdr)
 
             row = QHBoxLayout(); row.addWidget(QLabel('Target:'))
@@ -7355,10 +7335,20 @@ def main() -> None:
             v.addWidget(warn)
 
             brow = QHBoxLayout()
-            run_btn = QPushButton('▶  Run Pipeline'); run_btn.setObjectName('PrimaryButton')
-            stop_btn = QPushButton('■ Stop'); stop_btn.setEnabled(False)
-            merge_btn = QPushButton('＋ Merge to Results'); merge_btn.setEnabled(False)
-            tools_btn = QPushButton('⬇ Install tools')
+            run_btn = style_button(
+                QPushButton(), 'primary', text='Run pipeline'
+            )
+            stop_btn = style_button(
+                QPushButton(), 'danger', text='Stop pipeline'
+            )
+            stop_btn.setEnabled(False)
+            merge_btn = style_button(
+                QPushButton(), 'secondary', text='Add to findings'
+            )
+            merge_btn.setEnabled(False)
+            tools_btn = style_button(
+                QPushButton(), 'quiet', text='Tool setup'
+            )
             brow.addWidget(run_btn); brow.addWidget(stop_btn); brow.addWidget(merge_btn)
             brow.addStretch(); brow.addWidget(tools_btn)
             v.addLayout(brow)
@@ -8441,14 +8431,6 @@ def main() -> None:
                 h2.addStretch()
                 layout.addLayout(h2)
 
-                # watermark
-                wm_chk = QCheckBox(_t('show_watermark', self._lang))
-                try:
-                    wm_chk.setChecked(bool(prefs.get('watermark', True)))
-                except Exception:
-                    wm_chk.setChecked(True)
-                layout.addWidget(wm_chk)
-
                 # remember targets
                 remember_chk = QCheckBox(_t('remember_targets', self._lang))
                 try:
@@ -8790,7 +8772,7 @@ def main() -> None:
                         new_lang = _normalize_language(lang_combo.currentData())
                         
                         prefs['font_size'] = int(font_spin.value())
-                        prefs['watermark'] = bool(wm_chk.isChecked())
+                        prefs['watermark'] = False
                         prefs['remember_targets'] = bool(remember_chk.isChecked())
                         prefs['retry_failed'] = int(retry_spin.value())
                         # Map density index back to key
@@ -8935,7 +8917,6 @@ def main() -> None:
                     pass
             except Exception:
                 pass
-            show_watermark = prefs.get('watermark', True)
             try:
                 self.setStyleSheet('')
             except Exception:
@@ -8970,24 +8951,10 @@ def main() -> None:
                     pass
             except Exception:
                 pass
+            # Keep logs visually quiet and readable; brand artwork belongs in
+            # the shell, not behind operational output.
             try:
-                if show_watermark:
-                    tmp = self._create_qt_watermark(0.08)
-                    if tmp and os.path.exists(tmp):
-                        try:
-                            from pathlib import Path
-                            css_path = Path(tmp).as_posix()
-                        except Exception:
-                            css_path = tmp.replace('\\', '/')
-                        self.log.setStyleSheet(
-                            "QTextEdit {"
-                            f" background-image: url('{css_path}');"
-                            " background-repeat: no-repeat; background-position: center; background-attachment: fixed;"
-                            " background-color: #12161d; color: #e6eaf0;"
-                            " border: 1px solid #262f3b; border-radius: 10px; padding: 8px; }"
-                        )
-                else:
-                    self.log.setStyleSheet('')
+                self.log.setStyleSheet('')
             except Exception:
                 pass
 
@@ -9054,32 +9021,6 @@ def main() -> None:
                     self.results_btn.setEnabled(True)
                 except Exception:
                     pass
-
-        def _create_qt_watermark(self, opacity: float = 0.08):
-            try:
-                if not os.path.exists(LOGO_PATH):
-                    return None
-                from PySide6.QtGui import QPixmap, QPainter
-                from PySide6.QtCore import Qt
-                pix = QPixmap(LOGO_PATH)
-                if pix.isNull():
-                    return None
-                scaled = pix.scaled(400, 400, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                tmpf = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
-                tmpf.close()
-                trans = QPixmap(scaled.size())
-                trans.fill(Qt.transparent)
-                p = QPainter(trans)
-                try:
-                    p.setOpacity(opacity)
-                    p.drawPixmap(0, 0, scaled)
-                finally:
-                    p.end()
-                trans.save(tmpf.name)
-                self._qt_watermark_tmp = tmpf.name
-                return tmpf.name
-            except Exception:
-                return None
 
         def save_results(self):
             """Save results with option to save as JSON or HTML."""
@@ -12720,24 +12661,24 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
             from PySide6.QtGui import QPalette, QColor
             app.setStyle('Fusion')
             dark_palette = QPalette()
-            dark_palette.setColor(QPalette.Window, QColor(22, 24, 26))
-            dark_palette.setColor(QPalette.WindowText, QColor(215, 225, 234))
-            dark_palette.setColor(QPalette.Base, QColor(15, 17, 18))
-            dark_palette.setColor(QPalette.AlternateBase, QColor(22, 24, 26))
-            dark_palette.setColor(QPalette.ToolTipBase, QColor(215, 225, 234))
-            dark_palette.setColor(QPalette.ToolTipText, QColor(215, 225, 234))
-            dark_palette.setColor(QPalette.Text, QColor(215, 225, 234))
-            dark_palette.setColor(QPalette.Button, QColor(43, 47, 51))
-            dark_palette.setColor(QPalette.ButtonText, QColor(215, 225, 234))
+            dark_palette.setColor(QPalette.Window, QColor(12, 15, 18))
+            dark_palette.setColor(QPalette.WindowText, QColor(232, 226, 216))
+            dark_palette.setColor(QPalette.Base, QColor(17, 21, 25))
+            dark_palette.setColor(QPalette.AlternateBase, QColor(22, 27, 32))
+            dark_palette.setColor(QPalette.ToolTipBase, QColor(22, 27, 32))
+            dark_palette.setColor(QPalette.ToolTipText, QColor(232, 226, 216))
+            dark_palette.setColor(QPalette.Text, QColor(232, 226, 216))
+            dark_palette.setColor(QPalette.Button, QColor(26, 32, 38))
+            dark_palette.setColor(QPalette.ButtonText, QColor(232, 226, 216))
             dark_palette.setColor(QPalette.BrightText, QColor(255, 77, 77))
-            dark_palette.setColor(QPalette.Link, QColor(88, 166, 255))
-            dark_palette.setColor(QPalette.Highlight, QColor(99, 102, 241))
-            dark_palette.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
+            dark_palette.setColor(QPalette.Link, QColor(201, 154, 69))
+            dark_palette.setColor(QPalette.Highlight, QColor(201, 154, 69))
+            dark_palette.setColor(QPalette.HighlightedText, QColor(17, 16, 13))
             app.setPalette(dark_palette)
         except Exception:
             pass
 
-        # Apply the centralized modern neutral-dark theme (global QSS).
+        # Apply the centralized midnight-and-brass theme (global QSS).
         try:
             try:
                 from .theme import apply_theme
@@ -12766,18 +12707,7 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
         
         w = PierceQtApp()
         w.show()
-        # run the Qt event loop and capture exit code so we can cleanup the tmp watermark
-        rc = app.exec()
-        try:
-            tmp = getattr(w, '_qt_watermark_tmp', None)
-            if tmp and os.path.exists(tmp):
-                try:
-                    os.remove(tmp)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        return rc
+        return app.exec()
 
     # run Qt GUI
     return_code = run_qt()
