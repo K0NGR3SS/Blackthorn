@@ -44,7 +44,11 @@ def make_finding(spec: ToolSpec, target: str, *, technique: str,
                  cvss_score: float = 0.0, cve_id: str = '', cwe_id: str = '',
                  reference_url: str = '', payload: str = '',
                  confidence: str = 'medium', **extra) -> Dict:
-    """Build a canonical WAFPierce finding dict tagged with tool provenance."""
+    """Build a canonical result tagged with tool provenance and proof state."""
+    verification = str(extra.get('verification_status') or 'informational')
+    kind = str(extra.get('kind') or (
+        'suspected' if verification == 'candidate' else 'observation'
+    ))
     f = {
         'target': target,
         'technique': f'[{spec.name}] {technique}',
@@ -62,6 +66,12 @@ def make_finding(spec: ToolSpec, target: str, *, technique: str,
         'cwe_id': cwe_id or '',
         'reference_url': reference_url or '',
         'confidence': confidence,
+        'kind': kind,
+        'verification_status': verification,
+        'result_type': extra.get('result_type') or (
+            'tool_candidate' if verification == 'candidate' else 'tool_observation'
+        ),
+        'evidence': list(extra.get('evidence') or []),
         'source': f'tool:{spec.key}',
         '_external_source': spec.name,
     }
@@ -97,8 +107,7 @@ def _iter_jsonl(text: str):
 def generic_lines(spec: ToolSpec, target: str, text: str, ctx: Dict) -> List[Dict]:
     lines = [ln for ln in (text or '').splitlines() if ln.strip()]
     if not lines:
-        return [make_finding(spec, target, technique='completed',
-                             reason=f'{spec.name} produced no output.')]
+        return []
     sample = '\n'.join(lines[:40])
     return [make_finding(spec, target, technique='output',
                          severity=spec.default_severity,
@@ -146,7 +155,18 @@ def parse_nuclei_jsonl(spec: ToolSpec, target: str, text: str, ctx: Dict) -> Lis
             cve_id=(cves[0] if isinstance(cves, list) and cves else (cves or '')),
             cwe_id=(cwes[0] if isinstance(cwes, list) and cwes else (cwes or '')),
             reference_url=(ref[0] if isinstance(ref, list) and ref else (ref or '')),
-            confidence='high'))
+            confidence='high',
+            kind='suspected',
+            verification_status='candidate',
+            result_type='tool_candidate',
+            evidence=[{
+                'type': 'external_tool_match',
+                'description': (
+                    f"Nuclei template {obj.get('template-id') or 'unknown'} matched"
+                ),
+                'matched': obj.get('matched-at') or obj.get('host') or '',
+            }],
+        ))
     return out or generic_lines(spec, target, text, ctx)
 
 
@@ -298,7 +318,10 @@ def parse_nikto_json(spec: ToolSpec, target: str, text: str, ctx: Dict) -> List[
         if isinstance(v, dict):
             out.append(make_finding(spec, target, technique=v.get('id', 'finding'),
                                     severity='MEDIUM', url=v.get('url', ''),
-                                    reason=v.get('msg', ''), confidence='medium'))
+                                    reason=v.get('msg', ''), confidence='medium',
+                                    kind='suspected',
+                                    verification_status='candidate',
+                                    result_type='tool_candidate'))
     return out or generic_lines(spec, target, text, ctx)
 
 
@@ -324,7 +347,10 @@ def parse_wpscan_json(spec: ToolSpec, target: str, text: str, ctx: Dict) -> List
                     out.append(make_finding(spec, target, technique=vuln.get('title', 'vuln'),
                                             severity='HIGH', reason=section,
                                             reference_url=(vuln.get('references', {}) or {}).get('url', [''])[0]
-                                            if isinstance(vuln.get('references', {}), dict) else ''))
+                                            if isinstance(vuln.get('references', {}), dict) else '',
+                                            kind='suspected',
+                                            verification_status='candidate',
+                                            result_type='tool_candidate'))
     return out or generic_lines(spec, target, text, ctx)
 
 
@@ -341,7 +367,9 @@ def parse_dalfox_json(spec: ToolSpec, target: str, text: str, ctx: Dict) -> List
                                     url=poc.get('data', poc.get('url', '')),
                                     payload=poc.get('payload', ''),
                                     cwe_id=poc.get('cwe', ''), reason=poc.get('message_str', 'reflected/verified XSS'),
-                                    confidence='high'))
+                                    confidence='high', kind='suspected',
+                                    verification_status='candidate',
+                                    result_type='tool_candidate'))
     return out or generic_lines(spec, target, text, ctx)
 
 
@@ -368,7 +396,10 @@ def parse_sqlmap_lines(spec: ToolSpec, target: str, text: str, ctx: Dict) -> Lis
         if ('is vulnerable' in low or "parameter '" in low and 'vulnerable' in low
                 or 'sqlmap identified' in low or 'injectable' in low):
             out.append(make_finding(spec, target, technique='SQL injection', severity='HIGH',
-                                    reason=ln.strip(), cwe_id='CWE-89', confidence='high'))
+                                    reason=ln.strip(), cwe_id='CWE-89', confidence='high',
+                                    kind='suspected',
+                                    verification_status='candidate',
+                                    result_type='tool_candidate'))
     return out or generic_lines(spec, target, text, ctx)
 
 
@@ -383,7 +414,10 @@ def parse_trufflehog_jsonl(spec: ToolSpec, target: str, text: str, ctx: Dict) ->
                                     technique=obj.get('DetectorName', 'secret'),
                                     severity='HIGH', cwe_id='CWE-798',
                                     reason=f"verified={obj.get('Verified')} "
-                                           f"file={(obj.get('SourceMetadata') or {})}", confidence='high'))
+                                           f"file={(obj.get('SourceMetadata') or {})}", confidence='high',
+                                    kind='suspected',
+                                    verification_status='candidate',
+                                    result_type='tool_candidate'))
     return out or generic_lines(spec, target, text, ctx)
 
 
@@ -400,5 +434,7 @@ def parse_gitleaks_json(spec: ToolSpec, target: str, text: str, ctx: Dict) -> Li
                                     severity='HIGH', cwe_id='CWE-798',
                                     reason=f"{leak.get('Description', '')} in "
                                            f"{leak.get('File', '')}:{leak.get('StartLine', '')}",
-                                    confidence='high'))
+                                    confidence='high', kind='suspected',
+                                    verification_status='candidate',
+                                    result_type='tool_candidate'))
     return out or generic_lines(spec, target, text, ctx)

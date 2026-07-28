@@ -58,7 +58,7 @@ class _LinkFormParser(HTMLParser):
                 'method': (a.get('method') or 'GET').upper(),
                 'fields': {},
             }
-        elif tag in ('input', 'textarea', 'select') and self._cur_form is not None:
+        elif tag in ('input', 'textarea', 'select', 'button') and self._cur_form is not None:
             name = a.get('name')
             if name:
                 # Seed a benign default value for the field.
@@ -104,8 +104,27 @@ class Crawler:
         if self.limiter is not None:
             self.limiter.acquire()
         try:
-            return self.session.get(url, timeout=self.timeout,
-                                    allow_redirects=True, verify=False)
+            current = url
+            for _ in range(6):
+                response = self.session.get(
+                    current, timeout=self.timeout,
+                    allow_redirects=False, verify=False,
+                )
+                if response.status_code not in (301, 302, 303, 307, 308):
+                    return response
+                location = response.headers.get('Location')
+                if not location:
+                    return response
+                following = urljoin(current, location)
+                # The crawler shares the authenticated scanner session. Never
+                # follow it across the target-origin boundary.
+                if not self._same_host(following):
+                    logger.debug(
+                        "Crawler stopped credentialed redirect at %s", following
+                    )
+                    return response
+                current = following
+            return response
         except Exception as e:
             logger.debug(f"Crawl GET failed {url}: {e}")
             return None
@@ -113,12 +132,28 @@ class Crawler:
             if self.limiter is not None:
                 self.limiter.release()
 
-    def _record(self, path: str, params: Dict[str, str], method: str = 'GET'):
+    def _record(self, path: str, params: Dict[str, str], method: str = 'GET',
+                *, headers=None, body=None, parameter_location=None):
         if not path:
             path = '/'
-        key = f"{method}:{path}:{','.join(sorted(params.keys()))}"
+        body_names = []
+        if isinstance(body, dict):
+            body_names = sorted(map(str, body))
+        elif isinstance(body, str):
+            body_names = sorted(k for k, _ in parse_qs(body).items())
+        key = (
+            f"{method}:{path}:{','.join(sorted(params.keys()))}:"
+            f"{','.join(body_names)}"
+        )
         if key not in self._endpoints:
-            self._endpoints[key] = {'path': path, 'params': dict(params), 'method': method}
+            self._endpoints[key] = {
+                'path': path,
+                'params': dict(params),
+                'method': method,
+                'headers': dict(headers or {}),
+                'body': body,
+                'parameter_location': parameter_location,
+            }
 
     def _path_with_params(self, url: str) -> Tuple[str, Dict[str, str]]:
         p = urlparse(url)
@@ -226,10 +261,29 @@ class Crawler:
                 if not self._same_host(action):
                     continue
                 fpath, fbase = self._path_with_params(action)
-                fields = dict(fbase)
-                fields.update(form['fields'])
-                if fields:
-                    self._record(fpath, fields, form['method'])
+                fields = dict(form['fields'])
+                if form['method'] == 'GET':
+                    query_fields = dict(fbase)
+                    query_fields.update(fields)
+                    if query_fields:
+                        self._record(
+                            fpath, query_fields, 'GET',
+                            parameter_location='query',
+                        )
+                elif fields or fbase:
+                    # Keep action-query parameters separate from form fields so
+                    # mutation replays the same request shape.
+                    self._record(
+                        fpath, fbase, form['method'],
+                        headers={
+                            # The HTML supplies field names but not selected
+                            # local files or a multipart boundary. Replay the
+                            # discovered text fields as a deterministic form.
+                            'Content-Type': 'application/x-www-form-urlencoded'
+                        },
+                        body=urlencode(fields),
+                        parameter_location='body',
+                    )
 
         logger.info(f"Crawl done: {pages_fetched} pages, {len(self._endpoints)} parameterized endpoints")
         return list(self._endpoints.values())

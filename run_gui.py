@@ -129,7 +129,70 @@ def _run_scan_worker() -> int:
         print(f"[!] Scan error: {exc}")
         return 1
 
+
+def _run_recon_worker() -> int:
+    """Run recon inside the frozen executable without launching another GUI."""
+    import argparse
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('--recon-worker', action='store_true')
+    parser.add_argument('--target', required=True)
+    parser.add_argument('--output', required=True)
+    parser.add_argument('--timeout', type=float, default=300.0)
+    parser.add_argument('--top-ports', type=int, default=100)
+    parser.add_argument('--max-hosts', type=int, default=1000)
+    parser.add_argument('--crawl-depth', type=int, default=2)
+    parser.add_argument('--no-tls', action='store_true')
+    parser.add_argument('--no-historical', action='store_true')
+    parser.add_argument('--ports', action='store_true')
+    parser.add_argument('--naabu', action='store_true')
+    parser.add_argument('--crawl', action='store_true')
+    parser.add_argument('--nuclei', action='store_true')
+    parser.add_argument('--xss', action='store_true')
+    parser.add_argument(
+        '--nuclei-severity',
+        default='low,medium,high,critical',
+    )
+    parser.add_argument('--nuclei-tags', default='')
+    args, _ = parser.parse_known_args()
+
+    try:
+        from wafpierce.recon import run_recon
+
+        report = run_recon(
+            args.target,
+            timeout=args.timeout,
+            top_ports=args.top_ports,
+            max_hosts=args.max_hosts,
+            crawl_depth=args.crawl_depth,
+            nuclei_severity=args.nuclei_severity,
+            nuclei_tags=args.nuclei_tags,
+            do_tls=not args.no_tls,
+            do_historical=not args.no_historical,
+            do_naabu=args.naabu,
+            do_crawl=args.crawl,
+            do_nuclei=args.nuclei,
+            do_xss=args.xss,
+            do_ports=args.ports,
+        )
+        with open(args.output, 'w', encoding='utf-8') as f:
+            json.dump(report, f, indent=2, default=str)
+        print(
+            f"[+] Discovery complete: "
+            f"{len(report.get('findings') or [])} finding(s)"
+        )
+        return 0
+    except KeyboardInterrupt:
+        print("[!] Discovery interrupted by user")
+        return 130
+    except Exception as exc:
+        print(f"[!] Discovery error: {exc}")
+        return 1
+
+
 if __name__ == '__main__':
     if '--scan-worker' in sys.argv:
         raise SystemExit(_run_scan_worker())
+    if '--recon-worker' in sys.argv:
+        raise SystemExit(_run_recon_worker())
     main()

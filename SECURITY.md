@@ -16,8 +16,8 @@ been fixed.
 
 | Version | Supported |
 | ------- | --------- |
-| 1.7.x   | Yes       |
-| 1.6.x and earlier | No |
+| 1.8.x   | Yes       |
+| 1.7.x and earlier | No |
 
 ## Scope
 

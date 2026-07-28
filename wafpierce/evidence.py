@@ -117,8 +117,27 @@ def analyze_response(
     """
     oracle = dict(oracle or {})
     observed_text = str(observed.get("text") or "")
-    control_text = str(control.get("text") or "")
     observed_norm = str(observed.get("normalized") or "")
+
+    # A dynamic endpoint can legitimately return several stable variants. Pick
+    # the closest sampled control before evaluating status/body differences,
+    # while retaining the canonical request metadata from the parent snapshot.
+    parent_control = control
+    sampled = [
+        sample for sample in (control.get("samples") or [])
+        if isinstance(sample, dict)
+    ]
+    candidates = sampled or [control]
+    if len(candidates) > 1:
+        control = max(
+            candidates,
+            key=lambda sample: difflib.SequenceMatcher(
+                None,
+                str(sample.get("normalized") or ""),
+                observed_norm,
+            ).quick_ratio(),
+        )
+    control_text = str(control.get("text") or "")
     control_norm = str(control.get("normalized") or "")
 
     similarity = difflib.SequenceMatcher(
@@ -129,11 +148,14 @@ def analyze_response(
     size_delta_percent = (abs(size_delta) / control_size) * 100.0
     metrics = {
         "control_scope": control_scope,
+        "control_samples": len(candidates),
         "status_changed": observed.get("status") != control.get("status"),
         "size_delta": size_delta,
         "size_delta_percent": round(size_delta_percent, 1),
         "similarity": round(similarity, 4),
     }
+    if parent_control is not control and parent_control.get("request"):
+        control = {**control, "request": parent_control.get("request")}
 
     def verdict(*, bypass: bool, reason: str, severity: str, confidence: str,
                 verification: str, kind: str, signal: str, matched: str = ""):

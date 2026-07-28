@@ -27,8 +27,11 @@ import tarfile
 import tempfile
 import platform
 import zipfile
+import urllib.error
 import urllib.request
 from typing import Callable, Dict, List, Optional, Tuple
+
+import certifi
 
 from .config import ensure_config_dir
 
@@ -77,6 +80,13 @@ _ARCH_TOKENS = {
 
 _Logger = Callable[[str], None]
 
+_CA_BUNDLE_ENV_VARS = (
+    'BLACKTHORN_CA_BUNDLE',
+    'SSL_CERT_FILE',
+    'REQUESTS_CA_BUNDLE',
+    'CURL_CA_BUNDLE',
+)
+
 
 def _noop(_m: str) -> None:
     pass
@@ -119,10 +129,58 @@ def ensure_tools_on_path() -> str:
 # Download helpers
 # --------------------------------------------------------------------------- #
 def _ctx() -> ssl.SSLContext:
+    """Build a verified TLS context with system, certifi, and user CAs.
+
+    Python.org macOS builds do not always inherit roots from the macOS
+    Keychain.  Loading certifi into the default context keeps platform trust
+    while adding the Mozilla root set shipped with Blackthorn.  Private proxy
+    or enterprise roots can be added through a standard CA-bundle environment
+    variable without weakening certificate verification.
+    """
+    ctx = ssl.create_default_context()
+    bundles = [('certifi', certifi.where())]
+    bundles.extend(
+        (env_name, os.environ[env_name])
+        for env_name in _CA_BUNDLE_ENV_VARS
+        if os.environ.get(env_name)
+    )
+
+    loaded = set()
+    for source, raw_path in bundles:
+        path = os.path.abspath(os.path.expanduser(raw_path))
+        if path in loaded:
+            continue
+        if not os.path.isfile(path):
+            if source != 'certifi':
+                raise RuntimeError(
+                    f'CA bundle configured by {source} does not exist: {path}'
+                )
+            continue
+        try:
+            ctx.load_verify_locations(cafile=path)
+        except (OSError, ssl.SSLError) as exc:
+            raise RuntimeError(
+                f'could not load CA bundle from {source}: {path}: {exc}'
+            ) from exc
+        loaded.add(path)
+    return ctx
+
+
+def _urlopen(req: urllib.request.Request, timeout: float):
+    """Open a verified HTTPS request and make trust failures actionable."""
     try:
-        return ssl.create_default_context()
-    except Exception:
-        return ssl.create_default_context()
+        return urllib.request.urlopen(req, timeout=timeout, context=_ctx())
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, 'reason', None)
+        if (isinstance(reason, ssl.SSLCertVerificationError)
+                or 'CERTIFICATE_VERIFY_FAILED' in str(exc)):
+            raise RuntimeError(
+                'TLS certificate verification failed. Blackthorn keeps HTTPS '
+                'verification enabled and loads its bundled certifi roots. If '
+                'this network uses a private/corporate CA, set '
+                'BLACKTHORN_CA_BUNDLE to its PEM bundle and retry.'
+            ) from exc
+        raise
 
 
 def _platform() -> Tuple[str, str]:
@@ -146,7 +204,7 @@ def _platform() -> Tuple[str, str]:
 def _fetch_bytes(url: str, timeout: float = 60.0,
                  progress: Optional[Callable[[int, int], None]] = None) -> bytes:
     req = urllib.request.Request(url, headers={'User-Agent': 'Blackthorn-installer'})
-    with urllib.request.urlopen(req, timeout=timeout, context=_ctx()) as r:
+    with _urlopen(req, timeout=timeout) as r:
         total = int(r.headers.get('Content-Length') or 0)
         chunks = []
         got = 0
@@ -165,7 +223,7 @@ def _fetch_text(url: str, timeout: float = 30.0) -> str:
     req = urllib.request.Request(
         url, headers={'User-Agent': 'Blackthorn-installer',
                       'Accept': 'application/vnd.github+json'})
-    with urllib.request.urlopen(req, timeout=timeout, context=_ctx()) as r:
+    with _urlopen(req, timeout=timeout) as r:
         return r.read().decode('utf-8', 'replace')
 
 

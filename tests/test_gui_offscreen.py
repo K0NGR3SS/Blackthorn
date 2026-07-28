@@ -1,0 +1,202 @@
+"""Small offscreen smoke test for the real Qt results workspace."""
+
+import os
+
+import pytest
+
+os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+
+
+def test_results_workspace_builds_with_evidence_actions(monkeypatch):
+    from PySide6.QtWidgets import (
+        QApplication, QCheckBox, QComboBox, QLabel, QLineEdit, QListWidget,
+        QPushButton, QSplitter, QTextBrowser, QTreeWidget, QTreeWidgetItem,
+    )
+    from PySide6.QtCore import Qt
+
+    import wafpierce.database as database
+    import wafpierce.gui as gui
+
+    class _DB:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def list_engagements(self):
+            return []
+
+        def get_persistent_targets(self):
+            return []
+
+        def get_scan_queue(self):
+            return []
+
+        def get_dashboard_stats(self):
+            return {
+                'total_scans': 2,
+                'total_findings': 5,
+                'total_bypasses': 1,
+                'severity_distribution': {'HIGH': 1, 'INFO': 4},
+                'top_techniques': [
+                    {'technique': 'Discovered Host', 'count': 4},
+                ],
+                'recent_activity': [
+                    {
+                        'date': '2026-07-28',
+                        'scans': 1,
+                        'findings': 5,
+                        'bypasses': 1,
+                    },
+                ],
+                'top_targets': ['example.test'],
+            }
+
+    monkeypatch.setattr(database, 'WAFPierceDB', _DB)
+    monkeypatch.setattr(gui, '_show_disclaimer_qt', lambda _app: True)
+    monkeypatch.setattr(gui, '_load_prefs', lambda: {
+        'language': 'en',
+        'qt_geometry': '1200x760',
+        'advanced': {},
+        'scan_profile': 'standard',
+    })
+    monkeypatch.setattr(gui, '_save_prefs', lambda _prefs: None)
+
+    inspected = {'ok': False}
+
+    def inspect_then_exit(_app):
+        window = next(
+            widget for widget in QApplication.topLevelWidgets()
+            if hasattr(widget, '_build_results_page')
+        )
+        window.resize(760, 560)
+        QApplication.processEvents()
+        assert window.width() == 760
+        assert window.height() == 560
+        window.resize(1400, 900)
+        QApplication.processEvents()
+        assert window.width() == 1400
+        assert window.height() == 900
+        target_input = next(
+            field for field in window.findChildren(QLineEdit)
+            if field.accessibleName() == 'Target URL'
+        )
+        assert target_input.accessibleDescription()
+        window._results = [{
+            'target': 'https://app.example.test',
+            'technique': 'Paired SSTI canary',
+            'category': 'SSTI',
+            'severity': 'HIGH',
+            'kind': 'finding',
+            'verification_status': 'confirmed',
+            'request': {
+                'method': 'GET',
+                'url': 'https://app.example.test/?q=probe',
+                'headers': {},
+            },
+            'evidence': [{'type': 'execution_marker', 'matched': '49'}],
+        }]
+        page = window._build_results_page()
+        page.resize(880, 620)
+        page.show()
+        QApplication.processEvents()
+
+        assert page.objectName() == 'ResultsPage'
+        buttons = {button.text(): button for button in page.findChildren(QPushButton)}
+        assert {'Copy cURL', 'Copy Python', 'Send to Repeater',
+                'Re-test request', 'Save state'} <= set(buttons)
+        assert all(
+            buttons[label].accessibleName()
+            for label in (
+                'Copy cURL', 'Copy Python', 'Send to Repeater',
+                'Re-test request', 'Save state',
+            )
+        )
+        assert page.findChild(QListWidget).accessibleName() == 'Result targets'
+        assert page.findChild(QTextBrowser).accessibleName() == 'Finding evidence'
+        results_splitter = page.findChild(
+            QSplitter, 'ResultsWorkspaceSplitter'
+        )
+        assert results_splitter is not None
+        assert results_splitter.count() == 3
+        tree = next(
+            tree for tree in page.findChildren(QTreeWidget)
+            if tree.columnCount() == 4
+        )
+        tree.setCurrentItem(tree.topLevelItem(0).child(0))
+        QApplication.processEvents()
+        assert buttons['Re-test request'].isEnabled()
+
+        recon_page = window._build_recon_page()
+        recon_page.resize(880, 720)
+        recon_page.show()
+        scope = next(
+            field for field in recon_page.findChildren(QLineEdit)
+            if field.accessibleName() == 'Discovery scope'
+        )
+        scope.setText('*.nubank.com.br')
+        QApplication.processEvents()
+        assert any(
+            'Enumeration root: nubank.com.br' in label.text()
+            for label in recon_page.findChildren(QLabel)
+        )
+        assert next(
+            checkbox for checkbox in recon_page.findChildren(QCheckBox)
+            if checkbox.text().startswith('Active ports')
+        ).isChecked() is False
+        host_inventory = next(
+            tree for tree in recon_page.findChildren(QTreeWidget)
+            if tree.accessibleName() == 'Discovered host inventory'
+        )
+        assert host_inventory.columnCount() == 6
+        assert host_inventory.contextMenuPolicy() == Qt.CustomContextMenu
+        status_filter = next(
+            combo for combo in recon_page.findChildren(QComboBox)
+            if combo.accessibleName() == 'Discovery status filter'
+        )
+        filter_labels = {
+            status_filter.itemText(index)
+            for index in range(status_filter.count())
+        }
+        assert {
+            'Resolved only', 'HTTP 2xx', 'HTTP 3xx', 'HTTP 4xx', 'HTTP 5xx'
+        } <= filter_labels
+        live_item = QTreeWidgetItem([
+            'api.example.test', 'Resolved', 'Live · 200',
+            'https://api.example.test', '192.0.2.1', 'subfinder',
+        ])
+        live_item.setData(0, 257, {
+            'hostname': 'api.example.test',
+            'http_url': 'https://api.example.test',
+            'ip_addresses': ['192.0.2.1'],
+        })
+        host_inventory.addTopLevelItem(live_item)
+        host_inventory.itemDoubleClicked.emit(live_item, 3)
+        QApplication.processEvents()
+        assert QApplication.clipboard().text() == 'https://api.example.test'
+        assert recon_page.findChild(
+            QSplitter, 'DiscoveryVerticalSplitter'
+        ) is not None
+
+        report_page = window._build_dashboard_page()
+        report_page.resize(780, 620)
+        report_page.show()
+        QApplication.processEvents()
+        assert report_page.findChild(
+            QSplitter, 'ReportTablesSplitter'
+        ) is not None
+        assert report_page.findChild(
+            QSplitter, 'ReportSummarySplitter'
+        ) is not None
+
+        inspected['ok'] = True
+        report_page.close()
+        recon_page.close()
+        page.close()
+        return 0
+
+    monkeypatch.setattr(QApplication, 'exec', inspect_then_exit)
+
+    with pytest.raises(SystemExit) as stopped:
+        gui.main()
+
+    assert stopped.value.code == 0
+    assert inspected['ok']

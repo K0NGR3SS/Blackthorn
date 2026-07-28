@@ -1,7 +1,7 @@
 """Centralized visual theme for the Blackthorn GUI.
 
-A single source of truth for the application's look: a modern, neutral
-dark palette (slate surfaces with an indigo accent) plus one comprehensive
+A single source of truth for the application's look: a quiet midnight
+palette with a restrained warm-brass accent plus one comprehensive
 Qt stylesheet that restyles every common widget consistently.
 
 Usage::
@@ -18,33 +18,33 @@ from __future__ import annotations
 
 
 # --- Palette -------------------------------------------------------------
-# Modern neutral dark: graphite/slate surfaces, restrained indigo accent.
+# Midnight surfaces with warm brass reserved for focus and primary actions.
 PALETTE = {
     # Backgrounds / surfaces (darkest -> lightest)
-    "window": "#0e1116",     # app background
-    "sidebar": "#0a0d12",    # left navigation rail
-    "surface": "#12161d",    # main content area
-    "card": "#161b23",       # raised cards / panels
-    "input": "#1a212b",      # input fields, list rows
-    "input_alt": "#1f2731",  # hover / alternate rows
-    "elevated": "#222b37",   # pressed / elevated controls
+    "window": "#0c0f12",     # app background
+    "sidebar": "#090b0e",    # left navigation rail
+    "surface": "#111519",    # main content area
+    "card": "#161b20",       # raised cards / panels
+    "input": "#1a2026",      # input fields, list rows
+    "input_alt": "#20272e",  # hover / alternate rows
+    "elevated": "#262e36",   # pressed / elevated controls
 
     # Borders / dividers
-    "border": "#262f3b",
-    "border_subtle": "#1c232d",
+    "border": "#30363d",
+    "border_subtle": "#20262c",
 
     # Text
-    "text": "#e6eaf0",
-    "text_muted": "#9aa5b5",
-    "text_faint": "#6b7585",
-    "text_inverse": "#0b0e12",
+    "text": "#e8e2d8",
+    "text_muted": "#aaa398",
+    "text_faint": "#77736c",
+    "text_inverse": "#11100d",
 
-    # Accent (indigo)
-    "accent": "#6366f1",
-    "accent_hover": "#777bf2",
-    "accent_active": "#4f52d6",
-    "accent_soft": "rgba(99, 102, 241, 0.14)",
-    "accent_softer": "rgba(99, 102, 241, 0.08)",
+    # Accent (warm brass)
+    "accent": "#c99a45",
+    "accent_hover": "#d8aa5a",
+    "accent_active": "#a8792f",
+    "accent_soft": "rgba(201, 154, 69, 0.16)",
+    "accent_softer": "rgba(201, 154, 69, 0.08)",
 
     # Semantic
     "success": "#22c55e",
@@ -56,7 +56,7 @@ PALETTE = {
 
     # Status (target queue)
     "status_queued": "#2a3340",
-    "status_running": "#6366f1",
+    "status_running": "#c99a45",
     "status_done": "#15331f",
     "status_error": "#7f1d1d",
 }
@@ -64,6 +64,31 @@ PALETTE = {
 # Preferred UI / monospace font stacks (Qt resolves the first available).
 UI_FONT = '"Segoe UI", "Inter", -apple-system, "Helvetica Neue", Arial, sans-serif'
 MONO_FONT = '"JetBrains Mono", "Cascadia Code", "Fira Code", Consolas, "DejaVu Sans Mono", monospace'
+
+
+def _relative_luminance(hex_color: str) -> float:
+    value = str(hex_color).lstrip('#')
+    if len(value) != 6:
+        raise ValueError('Expected a six-digit hex color')
+    channels = [int(value[index:index + 2], 16) / 255 for index in (0, 2, 4)]
+
+    def linear(channel):
+        return (
+            channel / 12.92
+            if channel <= 0.04045
+            else ((channel + 0.055) / 1.055) ** 2.4
+        )
+
+    red, green, blue = (linear(channel) for channel in channels)
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+
+
+def contrast_ratio(foreground: str, background: str) -> float:
+    """Return the WCAG contrast ratio for two six-digit hex colors."""
+    first = _relative_luminance(foreground)
+    second = _relative_luminance(background)
+    lighter, darker = max(first, second), min(first, second)
+    return (lighter + 0.05) / (darker + 0.05)
 
 
 def stylesheet() -> str:
@@ -83,7 +108,7 @@ QToolTip {{
     background-color: {p['card']};
     color: {p['text']};
     border: 1px solid {p['border']};
-    border-radius: 6px;
+    border-radius: 4px;
     padding: 5px 8px;
 }}
 
@@ -97,10 +122,10 @@ QSpinBox, QDoubleSpinBox, QComboBox {{
     background-color: {p['input']};
     color: {p['text']};
     border: 1px solid {p['border']};
-    border-radius: 6px;
+    border-radius: 4px;
     padding: 7px 10px;
     selection-background-color: {p['accent']};
-    selection-color: #ffffff;
+    selection-color: {p['text_inverse']};
 }}
 QPlainTextEdit, QTextEdit {{ font-family: {MONO_FONT}; }}
 QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus,
@@ -132,23 +157,49 @@ QPushButton {{
     background-color: {p['input']};
     color: {p['text']};
     border: 1px solid {p['border']};
-    border-radius: 6px;
-    padding: 8px 16px;
+    border-radius: 4px;
+    padding: 8px 14px;
     font-weight: 600;
 }}
 QPushButton:hover {{ background-color: {p['input_alt']}; border-color: {p['accent']}; }}
 QPushButton:pressed {{ background-color: {p['elevated']}; }}
 QPushButton:disabled {{ background-color: {p['surface']}; color: {p['text_faint']}; border-color: {p['border_subtle']}; }}
+QPushButton:focus {{
+    border: 2px solid {p['accent']};
+    padding: 7px 13px;
+}}
 
 /* Primary (accent) button: set objectName('PrimaryButton') */
 QPushButton#PrimaryButton {{
     background-color: {p['accent']};
-    color: #ffffff;
+    color: {p['text_inverse']};
     border: 1px solid {p['accent']};
 }}
 QPushButton#PrimaryButton:hover {{ background-color: {p['accent_hover']}; border-color: {p['accent_hover']}; }}
 QPushButton#PrimaryButton:pressed {{ background-color: {p['accent_active']}; }}
 QPushButton#PrimaryButton:disabled {{ background-color: {p['surface']}; color: {p['text_faint']}; border-color: {p['border_subtle']}; }}
+
+/* Secondary and quiet roles keep visual hierarchy explicit. */
+QPushButton#SecondaryButton {{
+    background-color: {p['input']};
+    color: {p['text']};
+    border-color: {p['border']};
+}}
+QPushButton#SecondaryButton:hover {{ border-color: {p['accent']}; }}
+QPushButton#QuietButton {{
+    background: transparent;
+    color: {p['text_muted']};
+    border-color: transparent;
+}}
+QPushButton#QuietButton:hover {{
+    background-color: {p['accent_softer']};
+    color: {p['text']};
+    border-color: transparent;
+}}
+QPushButton#ResultsButton[hasResults="true"] {{
+    color: {p['success']};
+    border-color: {p['success']};
+}}
 
 /* Danger button: set objectName('DangerButton') */
 QPushButton#DangerButton {{ color: #ffffff; background-color: {p['danger']}; border-color: {p['danger']}; }}
@@ -160,10 +211,11 @@ QCheckBox {{ spacing: 8px; background: transparent; }}
 QCheckBox::indicator {{
     width: 16px; height: 16px;
     border: 1px solid {p['border']};
-    border-radius: 5px;
+    border-radius: 3px;
     background-color: {p['input']};
 }}
 QCheckBox::indicator:hover {{ border-color: {p['accent']}; }}
+QCheckBox:focus {{ color: {p['text']}; }}
 QCheckBox::indicator:checked {{
     background-color: {p['accent']};
     border-color: {p['accent']};
@@ -174,18 +226,21 @@ QTreeWidget, QTreeView, QListWidget, QListView, QTableWidget, QTableView {{
     background-color: {p['surface']};
     color: {p['text']};
     border: 1px solid {p['border']};
-    border-radius: 10px;
+    border-radius: 6px;
     outline: none;
     alternate-background-color: {p['card']};
 }}
 QTreeWidget::item, QListWidget::item {{
     padding: 6px 4px;
-    border-radius: 6px;
+    border-radius: 3px;
 }}
 QTreeWidget::item:hover, QListWidget::item:hover {{ background-color: {p['accent_softer']}; }}
 QTreeWidget::item:selected, QListWidget::item:selected {{
     background-color: {p['accent_soft']};
     color: {p['text']};
+}}
+QTreeWidget:focus, QListWidget:focus, QTableWidget:focus, QTableView:focus {{
+    border: 2px solid {p['accent']};
 }}
 QHeaderView::section {{
     background-color: {p['card']};
@@ -200,16 +255,15 @@ QTreeWidget::branch {{ background: transparent; }}
 /* ============================ PROGRESS ============================ */
 QProgressBar {{
     border: 1px solid {p['border']};
-    border-radius: 7px;
+    border-radius: 4px;
     background-color: {p['input']};
     text-align: center;
     color: {p['text']};
     font-weight: 600;
 }}
 QProgressBar::chunk {{
-    border-radius: 6px;
-    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-        stop:0 {p['accent_active']}, stop:1 {p['accent']});
+    border-radius: 3px;
+    background-color: {p['accent']};
 }}
 
 /* ============================ SCROLLBARS ============================ */
@@ -228,7 +282,7 @@ QScrollArea#PageScroll {{
 QScrollArea#PageScroll > QWidget > QWidget {{ background-color: {p['surface']}; }}
 
 /* ============================ TABS ============================ */
-QTabWidget::pane {{ border: 1px solid {p['border']}; border-radius: 10px; background: {p['surface']}; top: -1px; }}
+QTabWidget::pane {{ border: 1px solid {p['border']}; border-radius: 6px; background: {p['surface']}; top: -1px; }}
 QTabBar::tab {{
     background: transparent;
     color: {p['text_muted']};
@@ -245,10 +299,10 @@ QMenu {{
     background-color: {p['card']};
     color: {p['text']};
     border: 1px solid {p['border']};
-    border-radius: 8px;
+    border-radius: 4px;
     padding: 4px;
 }}
-QMenu::item {{ padding: 7px 22px; border-radius: 6px; }}
+QMenu::item {{ padding: 7px 22px; border-radius: 3px; }}
 QMenu::item:selected {{ background-color: {p['accent_soft']}; }}
 QMenuBar {{ background: {p['window']}; }}
 QMenuBar::item:selected {{ background: {p['accent_soft']}; }}
@@ -256,7 +310,7 @@ QMenuBar::item:selected {{ background: {p['accent_soft']}; }}
 /* ============================ GROUPBOX ============================ */
 QGroupBox {{
     border: 1px solid {p['border']};
-    border-radius: 8px;
+    border-radius: 5px;
     margin-top: 14px;
     padding-top: 8px;
     font-weight: 600;
@@ -293,10 +347,10 @@ QPushButton#NavButton {{
     background: transparent;
     color: {p['text_muted']};
     border: none;
-    border-radius: 8px;
+    border-radius: 4px;
     padding: 9px 12px;
     text-align: left;
-    font-weight: 600;
+    font-weight: 550;
     font-size: 13px;
 }}
 QPushButton#NavButton:hover {{ background-color: {p['accent_softer']}; color: {p['text']}; }}
@@ -311,14 +365,30 @@ QWidget#Content {{ background-color: {p['surface']}; }}
 QFrame#Card {{
     background-color: {p['card']};
     border: 1px solid {p['border']};
-    border-radius: 8px;
+    border-radius: 5px;
 }}
 QLabel#PageTitle {{ font-size: 20px; font-weight: 800; color: {p['text']}; }}
 QLabel#FieldLabel {{ color: {p['text_muted']}; font-size: 12px; font-weight: 600; }}
+QLabel#PreflightSummary {{
+    color: {p['text_muted']};
+    background-color: {p['input']};
+    border: 1px solid {p['border_subtle']};
+    border-left: 3px solid {p['accent']};
+    border-radius: 4px;
+    padding: 9px 11px;
+}}
+QLabel#FindingState {{
+    color: {p['text']};
+    background-color: {p['input']};
+    border: 1px solid {p['border_subtle']};
+    border-radius: 4px;
+    padding: 8px 10px;
+    font-weight: 600;
+}}
 QFrame#DashboardPill {{
     background-color: {p['input']};
     border: 1px solid {p['border_subtle']};
-    border-radius: 6px;
+    border-radius: 4px;
 }}
 """
 

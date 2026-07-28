@@ -921,8 +921,8 @@ class WAFPierceDB:
         conn.commit()
         conn.close()
     
-    def add_result(self, scan_id: str, result: dict):
-        """Add a finding to the database."""
+    def add_result(self, scan_id: str, result: dict) -> Optional[int]:
+        """Add a finding and return its database id."""
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
 
@@ -937,6 +937,16 @@ class WAFPierceDB:
         response_code = result.get(
             'response_code', response.get('status', result.get('status', 0))
         )
+        workflow_state = result.get('workflow_state')
+        if not workflow_state:
+            workflow_state = (
+                'informative'
+                if (
+                    result.get('kind') == 'observation'
+                    or result.get('verification_status') == 'informational'
+                )
+                else 'candidate'
+            )
         
         c.execute('''
             INSERT INTO results (
@@ -967,7 +977,7 @@ class WAFPierceDB:
             encoded(result.get('request', result.get('raw_request', ''))),
             encoded(result.get('response', result.get('raw_response', ''))),
             result.get('engagement_id'),
-            result.get('workflow_state', 'candidate'),
+            workflow_state,
             result.get('evidence_notes', ''),
             result.get('finding_id', ''),
             result.get('fingerprint', ''),
@@ -979,9 +989,10 @@ class WAFPierceDB:
             encoded(result.get('baseline', {})),
             encoded(result.get('comparison', {})),
         ))
-        
+        result_id = int(c.lastrowid)
         conn.commit()
         conn.close()
+        return result_id
 
     # ------------------------------------------------------------------ #
     # WAF feedback loop

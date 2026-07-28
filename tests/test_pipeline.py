@@ -60,3 +60,21 @@ def test_runner_report_only(tmp_path):
     res = runner.run()
     assert res['ok'] is True
     assert out.exists()
+
+
+def test_runner_blocks_active_pipeline_before_starting_out_of_scope_stage():
+    logs = []
+    pdef = {'name': 't', 'stages': [
+        {'id': 'scan', 'type': 'wafpierce_scan', 'config': {}},
+    ]}
+
+    result = pl.PipelineRunner(
+        pdef,
+        'https://outside.example',
+        pl.PipelineHooks(on_log=logs.append),
+        authorize_target=lambda _target: False,
+    ).run()
+
+    assert result['ok'] is False
+    assert result['state'] == 'scope_blocked'
+    assert any('outside the active engagement scope' in line for line in logs)

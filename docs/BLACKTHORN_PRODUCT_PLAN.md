@@ -2,6 +2,21 @@
 
 This document separates the visual usability pass from feature expansion. The first pass should make the existing product calmer, clearer, and faster to operate before new capabilities add more surface area.
 
+## Implementation status — July 2026
+
+The approved seven-phase trust and usability pass is implemented:
+
+1. Scanner techniques now publish proof, candidate, observation, or unavailable capability metadata.
+2. Imported HAR/Postman/OpenAPI traffic preserves query/body/header context, while authenticated crawling stops at origin boundaries.
+3. External tools share scope checks, timeouts, secret-safe logging, honest empty/failure states, and candidate normalization.
+4. The GUI uses a midnight-and-brass token system, five-step navigation, restrained button roles, and no pulsing/gradient workspace controls.
+5. Scan setup uses task profiles, progressive disclosure, preflight scope summaries, versioned consent, and engine-emitted phase progress.
+6. Results use a target/list/evidence layout with reproduction, authorized re-test, Repeater handoff, and persisted workflow state.
+7. Focus styling, accessible names, reduced-motion preference, contrast checks, offscreen Qt smoke coverage, and release documentation form the quality gate.
+
+The remaining items under “App enhancement backlog” are future product work,
+not claims about the current release.
+
 ## Product direction
 
 Blackthorn should feel like a serious investigator’s workspace: quiet, precise, evidence-led, and comfortable during long sessions. The keyhole and thorn identity can carry the personality; the interface itself should remain plain.
@@ -130,11 +145,11 @@ Each stage should be shippable on its own and include screenshots from the same 
 - Passive detection packs that operate on imported traffic before active probes run.
 - Local model support for private triage and evidence summarization.
 
-## Decisions for the next planning session
+## Decisions for a future planning session
 
 Before implementation, choose:
 
 1. Whether the primary object is an engagement, a target, or a workspace.
 2. Whether Blackthorn optimizes first for solo bug bounty work or small-team consulting.
-3. Which three screens receive the first visual pass: Scan, Results, and Settings are the recommended starting set.
+3. Which specialist screens should follow the completed Scan and Results visual pass.
 4. Which enhancement is the first product bet: engagement workspaces or the finding lifecycle are the strongest foundations.

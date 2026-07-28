@@ -54,6 +54,8 @@ def test_nuclei_parser_maps_classification():
     assert f['cwe_id'] == 'CWE-79'
     assert f['cve_id'] == 'CVE-2020-1234'
     assert f['bypass'] is False
+    assert f['verification_status'] == 'candidate'
+    assert f['kind'] == 'suspected'
     assert f['source'] == 'tool:nuclei'
     assert f['technique'].startswith('[Nuclei]')
 
@@ -79,3 +81,70 @@ def test_kill_proc_tree_terminates():
     rt.kill_proc_tree(p)
     p.wait(timeout=5)
     assert p.returncode is not None
+
+
+def _python_tool(script, *, key='test-tool', needs_api_key=False):
+    return reg.ToolSpec(
+        key=key,
+        name='Test Tool',
+        category='vuln',
+        binaries=('python3',),
+        version_args=('--version',),
+        argv_template=('-c', script),
+        json_mode='lines',
+        parser='generic_lines',
+        needs_api_key=needs_api_key,
+    )
+
+
+def test_run_tool_enforces_timeout_without_blocking_on_stdout():
+    spec = _python_tool('import time; time.sleep(5)')
+
+    result = rt.run_tool(
+        spec, 'https://example.test',
+        custom_path=sys.executable, timeout=1,
+    )
+
+    assert result['ok'] is False
+    assert result['state'] == 'timeout'
+
+
+def test_run_tool_redacts_api_key_and_reports_nonzero_exit():
+    secret = 'secret-token-value'
+    spec = _python_tool(
+        'import sys; print(sys.argv[-1]); sys.exit(3)',
+        key='wpscan', needs_api_key=True,
+    )
+    logged = []
+
+    result = rt.run_tool(
+        spec, 'https://example.test',
+        custom_path=sys.executable,
+        api_key=secret,
+        on_line=logged.append,
+    )
+
+    assert result['ok'] is False
+    assert result['state'] == 'failed'
+    assert result['returncode'] == 3
+    assert secret not in ' '.join(result['argv'])
+    assert secret not in '\n'.join(result['raw_lines'])
+    assert secret not in '\n'.join(logged)
+
+
+def test_run_tool_scope_block_and_empty_output_are_not_findings():
+    spec = _python_tool('')
+    blocked = rt.run_tool(
+        spec, 'https://outside.test',
+        custom_path=sys.executable,
+        authorize_target=lambda _target: False,
+    )
+    completed = rt.run_tool(
+        spec, 'https://inside.test',
+        custom_path=sys.executable,
+        authorize_target=lambda _target: True,
+    )
+
+    assert blocked['state'] == 'scope_blocked'
+    assert completed['ok'] is True
+    assert completed['findings'] == []

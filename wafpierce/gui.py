@@ -35,10 +35,37 @@ from .branding import (
     asset_path,
 )
 from .exporters import is_confirmed_result as _is_confirmed_result, result_state as _result_state
+from .ui_components import style_button
 
 LOGO_PATH = asset_path(TRANSPARENT_LOGO)
 SIDEBAR_LOGO_PATH = asset_path(DARK_LOGO)
 BANNER_PATH = asset_path(BRAND_BANNER)
+
+PRIMARY_NAV_ITEMS = (
+    ('scan', 'Scope & scan'),
+    ('recon', 'Discover'),
+    ('pipeline', 'Test plan'),
+    ('results', 'Analyze'),
+    ('dashboard', 'Report'),
+)
+
+WORKBENCH_ITEMS = (
+    ('External tools', 'tools'),
+    ('Browser', 'browser'),
+    ('Proxy', 'proxy'),
+    ('Repeater', 'repeater'),
+    ('Fuzzer', 'fuzzer'),
+    ('SQL injection', 'sqli'),
+    ('Secrets', 'secrets'),
+    ('Payload library', 'payloads'),
+    ('ZAP / Burp', 'zapburp'),
+    ('AD / Internal', 'adint'),
+    ('AI assistance', 'ai'),
+    ('Live logs', 'live'),
+    ('Timeline', 'timeline'),
+    ('Schedule', 'schedule'),
+    ('Plugins', 'plugins'),
+)
 
 # Use shared config module
 from .config import get_gui_prefs_path
@@ -53,13 +80,191 @@ def _is_candidate_result(finding: dict) -> bool:
     return _result_state(finding if isinstance(finding, dict) else {}) == 'candidate'
 
 
+def _engagement_authorizes(target: str, scope: list, exclusions=None) -> bool:
+    """Apply the same strict URL/host rules to GUI tools and pipelines."""
+    from .authorization import is_authorized
+
+    if not is_authorized(target, list(scope or [])):
+        return False
+    return not is_authorized(target, list(exclusions or []))
+
+
 def _finding_status_label(finding: dict) -> str:
     state = _result_state(finding if isinstance(finding, dict) else {})
     if state == 'confirmed':
-        return '✅ CONFIRMED FINDING'
+        return 'CONFIRMED FINDING'
     if state == 'candidate':
-        return '⚠️ CANDIDATE — verification required'
-    return 'ℹ️ Observation'
+        return 'CANDIDATE — verification required'
+    return 'OBSERVATION'
+
+
+WORKFLOW_STATE_LABELS = {
+    'candidate': 'Needs review',
+    'validated': 'Validated',
+    'reported': 'Reported',
+    'duplicate': 'Duplicate',
+    'accepted': 'Accepted risk',
+    'fixed': 'Fixed',
+    'informative': 'Informative',
+}
+
+
+def result_matches_filter(finding: dict, filter_key: str) -> bool:
+    """Apply the results workspace's state/severity/workflow filters."""
+    key = str(filter_key or 'all')
+    state = _result_state(finding if isinstance(finding, dict) else {})
+    severity = str((finding or {}).get('severity') or 'INFO').upper()
+    workflow = str((finding or {}).get('workflow_state') or 'candidate')
+    if key == 'all':
+        return True
+    if key in {'confirmed', 'candidate', 'observation'}:
+        return state == key
+    if key in {'critical', 'high', 'medium', 'low', 'info'}:
+        return severity == key.upper()
+    if key == 'needs_review':
+        return workflow == 'candidate'
+    if key.startswith('workflow:'):
+        return workflow == key.split(':', 1)[1]
+    return True
+
+
+def recon_report_parts(data):
+    """Normalize current full reports and legacy findings-only recon files."""
+    if isinstance(data, dict):
+        findings = data.get('findings')
+        stages = data.get('stages')
+        return {
+            'target': str(data.get('target') or ''),
+            'findings': list(findings) if isinstance(findings, list) else [],
+            'stages': dict(stages) if isinstance(stages, dict) else {},
+        }
+    if isinstance(data, list):
+        findings = list(data)
+        hosts = []
+        for finding in findings:
+            discovery = (
+                finding.get('discovery')
+                if isinstance(finding, dict) else None
+            )
+            if isinstance(discovery, dict):
+                hosts.append(discovery)
+        return {
+            'target': '',
+            'findings': findings,
+            'stages': {'hosts': hosts, 'summary': {}},
+        }
+    return {'target': '', 'findings': [], 'stages': {}}
+
+
+RECON_HOST_FILTER_OPTIONS = (
+    ('All', 'all'),
+    ('Resolved only', 'resolved'),
+    ('Web live', 'web_live'),
+    ('Resolved · no HTTP', 'dns_no_http'),
+    ('Unresolved', 'unresolved'),
+    ('HTTP 2xx', 'http_2xx'),
+    ('HTTP 3xx', 'http_3xx'),
+    ('HTTP 4xx', 'http_4xx'),
+    ('HTTP 5xx', 'http_5xx'),
+)
+
+
+def recon_host_filter_options(hosts):
+    """Return base inventory filters plus exact HTTP statuses in the report."""
+    statuses = set()
+    for host in hosts or []:
+        if not isinstance(host, dict):
+            continue
+        try:
+            status = int(host.get('http_status'))
+        except (TypeError, ValueError):
+            continue
+        if 100 <= status <= 599:
+            statuses.add(status)
+    return list(RECON_HOST_FILTER_OPTIONS) + [
+        (f'HTTP {status} only', f'http_status:{status}')
+        for status in sorted(statuses)
+    ]
+
+
+def filter_recon_hosts(hosts, filter_key='all', query=''):
+    """Filter the Discover inventory without changing the report data."""
+    key = str(filter_key or 'all')
+    needle = str(query or '').strip().lower()
+    out = []
+    for host in hosts or []:
+        if not isinstance(host, dict):
+            continue
+        dns_live = bool(host.get('dns_live'))
+        http_live = bool(host.get('http_live'))
+        raw_status = host.get('http_status')
+        try:
+            http_status = int(raw_status)
+        except (TypeError, ValueError):
+            http_status = None
+        if key in {'dns_live', 'resolved'} and not dns_live:
+            continue
+        if key == 'web_live' and not http_live:
+            continue
+        if key == 'dns_no_http' and not (dns_live and not http_live):
+            continue
+        if key == 'unresolved' and dns_live:
+            continue
+        if key.startswith('http_status:'):
+            try:
+                wanted_status = int(key.split(':', 1)[1])
+            except (TypeError, ValueError):
+                wanted_status = None
+            if http_status != wanted_status:
+                continue
+        if (
+                key.startswith('http_')
+                and key.endswith('xx')
+                and len(key) == 8):
+            try:
+                wanted_class = int(key[5])
+            except (TypeError, ValueError):
+                wanted_class = None
+            if http_status is None or http_status // 100 != wanted_class:
+                continue
+        if needle:
+            haystack = ' '.join([
+                str(host.get('hostname') or ''),
+                ' '.join(str(x) for x in host.get('ip_addresses') or []),
+                ' '.join(str(x) for x in host.get('sources') or []),
+                str(host.get('http_url') or ''),
+                str(raw_status or ''),
+                str(host.get('title') or ''),
+                str(host.get('server') or ''),
+                ' '.join(
+                    str(x) for x in host.get('technologies') or []
+                ),
+            ]).lower()
+            if needle not in haystack:
+                continue
+        out.append(host)
+    return out
+
+
+def finding_request_spec(finding: dict):
+    """Return the exact replayable request fields, or ``None`` when unavailable."""
+    if not isinstance(finding, dict):
+        return None
+    request = finding.get('request')
+    if not isinstance(request, dict) or request.get('available') is False:
+        return None
+    url = _finding_url(finding)
+    if not url or not str(url).lower().startswith(('http://', 'https://')):
+        return None
+    body = request.get('body')
+    if body is None:
+        body = finding.get('data', finding.get('body'))
+    return {
+        'method': str(request.get('method') or finding.get('method') or 'GET').upper(),
+        'url': str(url),
+        'headers': dict(request.get('headers') or finding.get('headers') or {}),
+        'body': body,
+    }
 
 
 def _advanced_cli_flags(opts: dict) -> list:
@@ -428,7 +633,7 @@ def _load_prefs() -> dict:
     path = get_gui_prefs_path()
     defaults = {
         'font_size': 12,
-        'watermark': True,
+        'watermark': False,
         'threads': 5,
         'concurrent': 2,
         'use_concurrent': True,
@@ -438,6 +643,7 @@ def _load_prefs() -> dict:
         'remember_targets': True,
         'retry_failed': 0,
         'ui_density': 'comfortable',
+        'reduce_motion': True,
         'last_targets': [],
         'language': 'en',
     }
@@ -1581,6 +1787,104 @@ SCAN_CATEGORIES_GUI = {
     },
 }
 
+SCAN_PROFILE_DEFINITIONS = {
+    'safe_recon': {
+        'label': 'Safe recon',
+        'description': 'Low-impact fingerprinting, exposure checks, and configuration review.',
+        'categories': (
+            'detection_recon', 'info_disclosure', 'security_misconfig',
+        ),
+        'safe_mode': True,
+        'intrusive': False,
+        'reconfirm': True,
+    },
+    'standard': {
+        'label': 'Standard evidence scan',
+        'description': 'Broad application coverage with noisy and destructive workflows held back.',
+        'categories': tuple(SCAN_CATEGORIES_GUI),
+        'safe_mode': True,
+        'intrusive': False,
+        'reconfirm': True,
+    },
+    'authenticated_app': {
+        'label': 'Authenticated app',
+        'description': 'Prioritizes request-rich application, API, auth, and business-logic checks.',
+        'categories': (
+            'injection_testing', 'security_misconfig', 'business_logic',
+            'jwt_auth', 'graphql_attacks', 'ssrf_advanced', 'cache_control',
+            'info_disclosure', 'detection_recon',
+        ),
+        'safe_mode': True,
+        'intrusive': False,
+        'reconfirm': True,
+    },
+}
+
+LEGAL_ACCEPTANCE_VERSION = '2026-07-28'
+_PHASE_EVENT_PREFIX = '::blackthorn-phase::'
+
+
+def scan_profile_settings(profile_key: str, custom_categories=None) -> dict:
+    """Return an isolated task profile; ``custom`` uses the supplied categories."""
+    if profile_key == 'custom':
+        return {
+            'label': 'Custom',
+            'description': 'Uses the category and safety controls under Advanced.',
+            'categories': tuple(custom_categories or ()),
+            'safe_mode': True,
+            'intrusive': False,
+            'reconfirm': True,
+        }
+    source = SCAN_PROFILE_DEFINITIONS.get(
+        profile_key, SCAN_PROFILE_DEFINITIONS['standard']
+    )
+    return {
+        **source,
+        'categories': tuple(source['categories']),
+    }
+
+
+def scan_preflight_summary(targets, profile_label: str, categories, opts: dict) -> str:
+    """Build the compact, plain-language preflight shown before execution."""
+    target_count = len(targets or [])
+    category_count = len(categories or [])
+    safety = 'safe mode' if opts.get('safe_mode') else 'full-impact mode'
+    verification = (
+        're-confirmation on' if not opts.get('no_reconfirm')
+        else 're-confirmation off'
+    )
+    if opts.get('dry_run'):
+        authorization = 'dry run'
+    elif opts.get('engagement_id'):
+        authorization = 'engagement scope linked'
+    elif opts.get('authorize'):
+        authorization = 'allowlist linked'
+    else:
+        authorization = 'authorization not linked'
+    noun = 'target' if target_count == 1 else 'targets'
+    return (
+        f'{profile_label} · {target_count} {noun} · {category_count} categories · '
+        f'{safety} · {verification} · {authorization}'
+    )
+
+
+def parse_scan_phase_event(line: str):
+    """Parse one scanner-emitted phase event into ``(label, progress)``."""
+    text = str(line or '').strip()
+    if not text.startswith(_PHASE_EVENT_PREFIX):
+        return None
+    try:
+        event = json.loads(text[len(_PHASE_EVENT_PREFIX):])
+        label = str(event.get('label') or '').strip()
+        progress = max(0, min(100, int(event.get('progress', 0))))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return (label, progress) if label else None
+
+
+def legal_acceptance_is_current(prefs: dict) -> bool:
+    return str((prefs or {}).get('legal_accepted_version') or '') == LEGAL_ACCEPTANCE_VERSION
+
 
 def _show_disclaimer_qt(app) -> bool:
     """Show legal disclaimer using PySide6/Qt. Returns True if user agrees, False otherwise."""
@@ -1589,8 +1893,11 @@ def _show_disclaimer_qt(app) -> bool:
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QFont, QFontDatabase, QPixmap
     
-    # Get current language from prefs
-    lang = _load_prefs().get('language', 'en')
+    # Show once per legal-copy version, not on every launch.
+    prefs = _load_prefs()
+    if legal_acceptance_is_current(prefs):
+        return True
+    lang = prefs.get('language', 'en')
     
     # Find a font that supports Unicode (Arabic, Cyrillic, etc.)
     try:
@@ -1648,12 +1955,14 @@ def _show_disclaimer_qt(app) -> bool:
     btn_layout = QHBoxLayout()
     btn_layout.addStretch()
     
-    agree_btn = QPushButton(_t('i_agree', lang))
-    agree_btn.setStyleSheet('background-color: #28a745; color: white;')
+    agree_btn = style_button(
+        QPushButton(), 'primary', text=_t('i_agree', lang)
+    )
     agree_btn.setCursor(Qt.PointingHandCursor)
     
-    decline_btn = QPushButton(_t('i_decline', lang))
-    decline_btn.setStyleSheet('background-color: #dc3545; color: white;')
+    decline_btn = style_button(
+        QPushButton(), 'danger', text=_t('i_decline', lang)
+    )
     decline_btn.setCursor(Qt.PointingHandCursor)
     
     agree_btn.clicked.connect(dialog.accept)
@@ -1664,8 +1973,14 @@ def _show_disclaimer_qt(app) -> bool:
     btn_layout.addStretch()
     layout.addLayout(btn_layout)
     
-    result = dialog.exec()
-    return result == QDialog.DialogCode.Accepted
+    accepted = dialog.exec() == QDialog.DialogCode.Accepted
+    if accepted:
+        try:
+            prefs['legal_accepted_version'] = LEGAL_ACCEPTANCE_VERSION
+            _save_prefs(prefs)
+        except Exception:
+            pass
+    return accepted
 
 
 def main() -> None:
@@ -1675,9 +1990,9 @@ def main() -> None:
         from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                                        QLineEdit, QPushButton, QTreeWidget, QTreeWidgetItem,
                                        QTextEdit, QLabel, QFileDialog, QMessageBox, QCheckBox,
-                                       QSpinBox, QDoubleSpinBox, QHeaderView, QGraphicsOpacityEffect,
+                                       QSpinBox, QDoubleSpinBox, QHeaderView,
                                        QProgressBar)
-        from PySide6.QtCore import QObject, Signal, QPropertyAnimation, QTimer, QEasingCurve
+        from PySide6.QtCore import QObject, Signal, QTimer
         from PySide6.QtGui import QBrush, QColor, QFont, QFontDatabase
     except ImportError:
         _show_missing_packages_error()
@@ -1696,6 +2011,8 @@ def main() -> None:
         ssl_info_ready = Signal(object)
         # emit progress update: target, progress_percent (0-100)
         progress_update = Signal(str, int)
+        # explicit phase update emitted by the scanner engine
+        phase_update = Signal(str, str)
 
         def __init__(self, targets, threads, delay, concurrent=1, use_concurrent=True, retry_failed=0, selected_categories=None, proxy_config=None, enable_http_logging=False, enable_ssl_analysis=False, advanced_opts=None, parent=None):
             super().__init__(parent)
@@ -1764,57 +2081,19 @@ def main() -> None:
                 current_progress = 0
                 final_errors = []
                 
-                # Progress tracking based on phases
-                lines_processed = [0]  # Use list to allow modification in nested function
-                
                 def update_progress_from_line(line: str):
                     nonlocal current_progress
-                    lines_processed[0] += 1
-                    line_lower = line.lower()
-                    new_progress = current_progress
-                    
-                    # Phase 0: Scanning/Starting (0-5%)
-                    if 'scanning' in line_lower:
-                        new_progress = max(new_progress, 3)
-                    # Phase 1: Establishing baseline (5-10%)
-                    if 'establishing baseline' in line_lower or 'baseline' in line_lower:
-                        new_progress = max(new_progress, 8)
-                    if 'baseline:' in line_lower:
-                        new_progress = max(new_progress, 10)
-                    # Phase 2: WAF Detection (10-20%)
-                    if 'phase 1' in line_lower or 'waf detection' in line_lower or 'detecting waf' in line_lower:
-                        new_progress = max(new_progress, 15)
-                    if 'detected waf' in line_lower or 'no known waf' in line_lower:
-                        new_progress = max(new_progress, 20)
-                    # Phase 3: OS Detection (20-30%)
-                    if 'phase 2' in line_lower or 'os detection' in line_lower:
-                        new_progress = max(new_progress, 25)
-                    # Phase 4: Testing techniques (30-90%)
-                    if 'phase 3' in line_lower or 'testing bypass' in line_lower:
-                        new_progress = max(new_progress, 35)
-                    if 'loading category' in line_lower:
-                        new_progress = max(new_progress, 40)
-                    if 'running' in line_lower and 'techniques' in line_lower:
-                        new_progress = max(new_progress, 45)
-                    
-                    # Increment progress slowly for each output line during testing phase
-                    if new_progress >= 45:
-                        # Slow linear increment - add 0.3% per line, capped at 90%
-                        new_progress = min(90, new_progress + 0.3)
-                    
-                    # Completing
-                    if 'warning:' in line_lower and 'techniques encountered errors' in line_lower:
-                        new_progress = max(new_progress, 95)
-                    if 'scan complete' in line_lower or 'finished' in line_lower:
-                        new_progress = max(new_progress, 98)
-                    
-                    # Only update if progress increased (ensures linear progression)
-                    if new_progress > current_progress:
-                        current_progress = new_progress
-                        try:
-                            self.progress_update.emit(target, int(current_progress))
-                        except Exception as e:
-                            pass
+                    event = parse_scan_phase_event(line)
+                    if event is None:
+                        return False
+                    label, new_progress = event
+                    current_progress = max(current_progress, new_progress)
+                    try:
+                        self.phase_update.emit(target, label)
+                        self.progress_update.emit(target, int(current_progress))
+                    except Exception:
+                        pass
+                    return True
                 
                 for attempt in range(self.retry_failed + 1):
                     if self._abort:
@@ -1892,8 +2171,9 @@ def main() -> None:
                         if proc.stdout is not None:
                             for line in proc.stdout:
                                 log_lines.append(line)
-                                self.log_line.emit(line)
-                                update_progress_from_line(line)
+                                is_phase_event = update_progress_from_line(line)
+                                if not is_phase_event:
+                                    self.log_line.emit(line)
                                 if self._abort:
                                     try:
                                         from .tools_runtime import kill_proc_tree
@@ -2019,8 +2299,19 @@ def main() -> None:
         status = Signal(str)
         finished = Signal(object)   # list[finding dict]
 
-        def __init__(self, tool_key, target, custom_path=None, extra_args=None,
-                     api_key=None, wordlist=None, parent=None):
+        def __init__(
+            self,
+            tool_key,
+            target,
+            custom_path=None,
+            extra_args=None,
+            api_key=None,
+            wordlist=None,
+            authorization_patterns=None,
+            authorization_exclusions=None,
+            timeout=900,
+            parent=None,
+        ):
             super().__init__(parent)
             self.tool_key = tool_key
             self.target = target
@@ -2028,6 +2319,9 @@ def main() -> None:
             self.extra_args = extra_args or None
             self.api_key = api_key or None
             self.wordlist = wordlist or None
+            self.authorization_patterns = list(authorization_patterns or [])
+            self.authorization_exclusions = list(authorization_exclusions or [])
+            self.timeout = timeout
             self._proc = None
             self._abort = False
 
@@ -2051,6 +2345,12 @@ def main() -> None:
                     api_key=self.api_key,
                     on_line=lambda ln: self.log_line.emit(ln),
                     register_proc=lambda p: setattr(self, '_proc', p),
+                    timeout=self.timeout,
+                    authorize_target=lambda target: _engagement_authorizes(
+                        target,
+                        self.authorization_patterns,
+                        self.authorization_exclusions,
+                    ),
                 )
                 if res.get('ok'):
                     findings = res.get('findings', []) or []
@@ -2073,10 +2373,19 @@ def main() -> None:
         findings = Signal(object)
         finished = Signal()
 
-        def __init__(self, pdef, target, parent=None):
+        def __init__(
+            self,
+            pdef,
+            target,
+            authorization_patterns=None,
+            authorization_exclusions=None,
+            parent=None,
+        ):
             super().__init__(parent)
             self.pdef = pdef
             self.target = target
+            self.authorization_patterns = list(authorization_patterns or [])
+            self.authorization_exclusions = list(authorization_exclusions or [])
             self._proc = None
             self._abort = False
 
@@ -2098,7 +2407,17 @@ def main() -> None:
                     register_proc=lambda p: setattr(self, '_proc', p),
                     is_aborted=lambda: self._abort,
                 )
-                PipelineRunner(self.pdef, self.target, hooks=hooks, frozen=IS_FROZEN).run()
+                PipelineRunner(
+                    self.pdef,
+                    self.target,
+                    hooks=hooks,
+                    frozen=IS_FROZEN,
+                    authorize_target=lambda target: _engagement_authorizes(
+                        target,
+                        self.authorization_patterns,
+                        self.authorization_exclusions,
+                    ),
+                ).run()
             except Exception as e:
                 self.log_line.emit(f'[!] Pipeline error: {e}')
             self.finished.emit()
@@ -2420,7 +2739,7 @@ def main() -> None:
         def _nav_button(self, glyph, label, slot, active=False):
             from PySide6.QtWidgets import QPushButton
             from PySide6.QtCore import Qt
-            btn = QPushButton(f"  {glyph}   {label}")
+            btn = QPushButton(f"{glyph}  {label}" if glyph else label)
             btn.setObjectName('NavButton')
             try:
                 btn.setCursor(Qt.PointingHandCursor)
@@ -2452,6 +2771,7 @@ def main() -> None:
             brand = QHBoxLayout()
             brand.setSpacing(10)
             logo = QLabel()
+            logo.setAccessibleName('Blackthorn')
             try:
                 if os.path.exists(SIDEBAR_LOGO_PATH):
                     pm = QPixmap(SIDEBAR_LOGO_PATH)
@@ -2473,8 +2793,8 @@ def main() -> None:
             lay.addLayout(brand)
             lay.addSpacing(12)
 
-            # Nav items map to existing actions/pages. Grouping keeps the
-            # bug-bounty workspace scannable without removing any current tool.
+            # Keep the primary workflow visible and move specialist surfaces
+            # into one workbench chooser. Every existing page remains reachable.
             self._nav_buttons = {}
             nav_scroll = QScrollArea()
             nav_scroll.setObjectName('SidebarScroll')
@@ -2488,35 +2808,9 @@ def main() -> None:
             nav_lay.setContentsMargins(0, 0, 0, 0)
             nav_lay.setSpacing(4)
             nav_groups = [
-                ('OPERATE', [
-                    ('scan', '◉', 'Scan', True),
-                    ('pipeline', '⛓', 'Pipeline', False),
-                    ('ai', '✦', 'AI / Automation', False),
-                    ('recon', '◈', 'Recon', False),
-                    ('browser', '◍', 'Browser', False),
-                    ('proxy', '◌', 'Proxy', False),
-                ]),
-                ('ANALYZE', [
-                    ('results', '◆', 'Results', False),
-                    ('dashboard', '▦', 'Dashboard', False),
-                    ('timeline', '☰', 'Timeline', False),
-                    ('live', '◰', 'Live Logs', False),
-                ]),
-                ('TOOLS', [
-                    ('tools', '⚒', 'External Tools', False),
-                    ('repeater', '↻', 'Repeater', False),
-                    ('fuzzer', '⌗', 'Fuzzer', False),
-                    ('sqli', '⛁', 'SQLi', False),
-                    ('secrets', '⚷', 'Secrets', False),
-                    ('payloads', '⚑', 'Payloads', False),
-                    ('zapburp', '◧', 'ZAP/Burp', False),
-                    ('adint', '◇', 'AD / Internal', False),
-                ]),
-                ('MANAGE', [
-                    ('engagements', '◎', 'Engagements', False),
-                    ('schedule', '◷', 'Schedule', False),
-                    ('plugins', '❖', 'Plugins', False),
-                    ('settings', '⚙', 'Settings', False),
+                ('WORKFLOW', [
+                    (key, '', label, key == 'scan')
+                    for key, label in PRIMARY_NAV_ITEMS
                 ]),
             ]
             for group, items in nav_groups:
@@ -2532,6 +2826,41 @@ def main() -> None:
                     self._nav_buttons[key] = btn
                     nav_lay.addWidget(btn)
                 nav_lay.addSpacing(6)
+
+            section = QLabel('WORKBENCH')
+            section.setObjectName('NavSection')
+            nav_lay.addWidget(section)
+            workbench = QtWidgets.QComboBox()
+            workbench.setAccessibleName('Open a specialist workbench')
+            workbench.addItem('Open a tool…', None)
+            for label, key in WORKBENCH_ITEMS:
+                workbench.addItem(label, key)
+
+            def open_workbench(index):
+                key = workbench.itemData(index)
+                if not key:
+                    return
+                self._navigate(key)
+                workbench.blockSignals(True)
+                workbench.setCurrentIndex(0)
+                workbench.blockSignals(False)
+
+            workbench.currentIndexChanged.connect(open_workbench)
+            self._workbench_combo = workbench
+            nav_lay.addWidget(workbench)
+            nav_lay.addSpacing(8)
+
+            for key, label in (
+                ('engagements', 'Engagements'),
+                ('settings', 'Settings'),
+            ):
+                btn = self._nav_button(
+                    '',
+                    label,
+                    lambda checked=False, k=key: self._navigate(k),
+                )
+                self._nav_buttons[key] = btn
+                nav_lay.addWidget(btn)
 
             nav_lay.addStretch()
             nav_scroll.setWidget(nav_body)
@@ -2578,19 +2907,41 @@ def main() -> None:
             self._stack.addWidget(scan_holder)
             self._pages['scan'] = scan_holder
 
+            page_title = QLabel('Scope & scan')
+            page_title.setObjectName('PageTitle')
+            page_subtitle = QLabel(
+                'Queue authorized targets, choose a scan profile, and review '
+                'the evidence as it arrives.'
+            )
+            page_subtitle.setWordWrap(True)
+            page_subtitle.setObjectName('FieldLabel')
+            v.addWidget(page_title)
+            v.addWidget(page_subtitle)
+
             # top controls
             top = QHBoxLayout()
             self._layout_top = top
             self.target_edit = QLineEdit()
             try:
                 self.target_edit.setPlaceholderText('https://example.com')
+                self.target_edit.setAccessibleName('Target URL')
+                self.target_edit.setAccessibleDescription(
+                    'Authorized HTTP or HTTPS target to add to the scan queue'
+                )
                 # Easter egg: special target commands
                 self.target_edit.textChanged.connect(self._check_easter_egg_input)
             except Exception:
                 pass
-            add_btn = QPushButton(_t('add', self._lang))
+            add_btn = style_button(
+                QPushButton(),
+                'secondary',
+                text='Add target',
+                tooltip='Add this authorized target to the scan queue',
+            )
             add_btn.clicked.connect(self.add_target)
-            remove_btn = QPushButton(_t('remove', self._lang))
+            remove_btn = style_button(
+                QPushButton(), 'quiet', text='Remove selected'
+            )
             remove_btn.clicked.connect(self.remove_selected)
             target_lbl = QLabel(_t('target_url', self._lang))
             target_lbl.setObjectName('FieldLabel')
@@ -2602,12 +2953,16 @@ def main() -> None:
             
             # Import button
             try:
-                import_btn = QPushButton('📥 ' + _t('import_targets', self._lang) if 'import_targets' in TRANSLATIONS.get(self._lang, {}) else '📥 Import')
+                import_btn = style_button(
+                    QPushButton(), 'quiet', text='Import targets'
+                )
                 import_btn.setFixedHeight(28)
                 import_btn.clicked.connect(self._import_targets_dialog)
                 top.addWidget(import_btn)
 
-                import_scan_btn = QPushButton('📂 Import JSON')
+                import_scan_btn = style_button(
+                    QPushButton(), 'quiet', text='Import results'
+                )
                 import_scan_btn.setFixedHeight(28)
                 import_scan_btn.setToolTip('Import saved scan results JSON')
                 import_scan_btn.clicked.connect(self._import_scan_json_dialog)
@@ -2624,12 +2979,14 @@ def main() -> None:
             opts = QHBoxLayout()
             self._layout_opts = opts
             self.threads_spin = QSpinBox()
+            self.threads_spin.setAccessibleName('Scanner threads')
             self.threads_spin.setRange(1, 200)
             try:
                 self.threads_spin.setValue(int(self._prefs.get('threads', 5)))
             except Exception:
                 self.threads_spin.setValue(5)
             self.delay_spin = QDoubleSpinBox()
+            self.delay_spin.setAccessibleName('Delay between requests')
             self.delay_spin.setRange(0.0, 5.0)
             self.delay_spin.setSingleStep(0.05)
             try:
@@ -2637,6 +2994,7 @@ def main() -> None:
             except Exception:
                 self.delay_spin.setValue(0.2)
             self.concurrent_spin = QSpinBox()
+            self.concurrent_spin.setAccessibleName('Concurrent targets')
             self.concurrent_spin.setRange(1, 200)
             try:
                 self.concurrent_spin.setValue(int(self._prefs.get('concurrent', 2)))
@@ -2644,6 +3002,9 @@ def main() -> None:
                 self.concurrent_spin.setValue(2)
             # default to sequential execution (one target at a time)
             self.use_concurrent_chk = QCheckBox(_t('use_concurrent', self._lang))
+            self.use_concurrent_chk.setAccessibleDescription(
+                'Run more than one queued target at the same time'
+            )
             try:
                 self.use_concurrent_chk.setChecked(bool(self._prefs.get('use_concurrent', False)))
             except Exception:
@@ -2678,11 +3039,14 @@ def main() -> None:
                 self._legend_labels = {}
                 def _legend_label(key, text, color):
                     lbl = QLabel(f"{text} (0)")
-                    lbl.setStyleSheet(f'background:{color}; padding:4px; color: white; border-radius:3px')
+                    lbl.setStyleSheet(
+                        f'border-left:3px solid {color}; padding:4px 7px;'
+                    )
+                    lbl.setAccessibleName(f'{text} target count')
                     self._legend_labels[key] = lbl
                     return lbl
                 legend_h.addWidget(_legend_label('queued', _t('queued', self._lang), '#2a3340'))
-                legend_h.addWidget(_legend_label('running', _t('running', self._lang), '#6366f1'))
+                legend_h.addWidget(_legend_label('running', _t('running', self._lang), '#c99a45'))
                 legend_h.addWidget(_legend_label('done', _t('done', self._lang), '#15331f'))
                 legend_h.addWidget(_legend_label('error', _t('error', self._lang), '#ef4444'))
                 v.addLayout(legend_h)
@@ -2693,6 +3057,7 @@ def main() -> None:
             middle = QHBoxLayout()
             self._layout_middle = middle
             self.tree = QTreeWidget()
+            self.tree.setAccessibleName('Queued scan targets')
             self.tree.setColumnCount(3)
             self.tree.setHeaderLabels([_t('target', self._lang), _t('status', self._lang), _t('progress', self._lang) if 'progress' in TRANSLATIONS.get(self._lang, {}) else 'Progress'])
             try:
@@ -2720,6 +3085,7 @@ def main() -> None:
             self._layout_right = right_v
             self.log = QTextEdit()
             self.log.setReadOnly(True)
+            self.log.setAccessibleName('Scan activity log')
             # Prefer modern fonts for Qt widgets when available
             try:
                 mono_candidates = ["JetBrains Mono", "Fira Code", "Consolas", "DejaVu Sans Mono", "Courier New"]
@@ -2741,27 +3107,6 @@ def main() -> None:
                         self.log.setFont(QFont(ui, 10))
             except Exception:
                 pass
-            # attempt to set a faint watermark background using the bundled logo
-            try:
-                if os.path.exists(LOGO_PATH):
-                    # Always use dark mode opacity
-                    opacity = 0.08
-                    tmp = self._create_qt_watermark(opacity)
-                    if tmp and os.path.exists(tmp):
-                        try:
-                            from pathlib import Path
-                            css_path = Path(tmp).as_posix()
-                        except Exception:
-                            css_path = tmp.replace('\\', '/')
-                        self.log.setStyleSheet(
-                            "QTextEdit {"
-                            f" background-image: url('{css_path}');"
-                            " background-repeat: no-repeat; background-position: center; background-attachment: fixed;"
-                            " background-color: #12161d; color: #e6eaf0;"
-                            " border: 1px solid #262f3b; border-radius: 10px; padding: 8px; }"
-                        )
-            except Exception:
-                pass
             # Total progress bar above output
             total_progress_layout = QHBoxLayout()
             total_progress_label = QLabel(_t('total_progress', self._lang) if 'total_progress' in TRANSLATIONS.get(self._lang, {}) else 'Total Progress:')
@@ -2773,22 +3118,6 @@ def main() -> None:
             self._total_progress_bar.setTextVisible(True)
             self._total_progress_bar.setFormat('%p%')
             self._total_progress_bar.setFixedHeight(22)
-            self._total_progress_bar.setStyleSheet('''
-                QProgressBar {
-                    border: 1px solid #262f3b;
-                    border-radius: 7px;
-                    background-color: #1a212b;
-                    text-align: center;
-                    color: #e6eaf0;
-                    font-size: 12px;
-                    font-weight: bold;
-                }
-                QProgressBar::chunk {
-                    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                        stop:0 #4f52d6, stop:1 #6366f1);
-                    border-radius: 6px;
-                }
-            ''')
             total_progress_layout.addWidget(total_progress_label)
             total_progress_layout.addWidget(self._total_progress_bar, 1)
             right_v.addLayout(total_progress_layout)
@@ -2796,62 +3125,20 @@ def main() -> None:
             right_v.addWidget(QLabel(_t('output', self._lang)))
             right_v.addWidget(self.log, 1)
             # Results button at bottom of output area
-            self.results_btn = QPushButton(_t('results', self._lang))
+            self.results_btn = style_button(
+                QPushButton(),
+                'results',
+                text='Review findings',
+                tooltip='Open the evidence-led results workspace',
+            )
             self.results_btn.setEnabled(False)
             self.results_btn.setFixedHeight(40)
-            self._results_btn_base_style = '''
-                QPushButton {
-                    background-color: #1a212b;
-                    color: #e6eaf0;
-                    border: 1px solid #262f3b;
-                    padding: 8px 20px;
-                    border-radius: 8px;
-                    font-size: 14px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #1f2731;
-                    border-color: #6366f1;
-                }
-                QPushButton:disabled {
-                    background-color: #12161d;
-                    color: #6b7585;
-                    border-color: #1c232d;
-                }
-            '''
-            self._results_btn_green_style = '''
-                QPushButton {
-                    background-color: #22c55e;
-                    color: #000000;
-                    border: none;
-                    padding: 8px 20px;
-                    border-radius: 5px;
-                    font-size: 14px;
-                    font-weight: bold;
-                }
-                QPushButton:hover {
-                    background-color: #16a34a;
-                }
-            '''
-            self.results_btn.setStyleSheet(self._results_btn_base_style)
+            self.results_btn.setProperty('hasResults', 'false')
+            # Kept as empty compatibility values for older reset paths.
+            self._results_btn_base_style = ''
+            self._results_btn_green_style = ''
             self.results_btn.clicked.connect(lambda: self._navigate('results'))
             right_v.addWidget(self.results_btn)
-            
-            # Setup pulsating animation for Results button
-            self._results_pulse_effect = QGraphicsOpacityEffect(self.results_btn)
-            self.results_btn.setGraphicsEffect(self._results_pulse_effect)
-            self._results_pulse_effect.setOpacity(1.0)
-            self._results_pulse_anim = QPropertyAnimation(self._results_pulse_effect, b'opacity')
-            self._results_pulse_anim.setDuration(1000)
-            self._results_pulse_anim.setStartValue(1.0)
-            self._results_pulse_anim.setEndValue(0.6)
-            self._results_pulse_anim.setEasingCurve(QEasingCurve.InOutSine)
-            self._results_pulse_anim.setLoopCount(-1)  # Infinite loop
-            # Make it pulse back and forth
-            self._results_pulse_anim.finished.connect(lambda: None)  # placeholder
-            self._results_pulse_timer = QTimer()
-            self._results_pulse_timer.timeout.connect(self._toggle_pulse_direction)
-            self._results_pulse_forward = True
             
             middle.addLayout(right_v, 3)
             v.addLayout(middle, 1)
@@ -2859,20 +3146,29 @@ def main() -> None:
             # bottom controls
             bottom = QHBoxLayout()
             self._layout_bottom = bottom
-            self.start_btn = QPushButton(_t('start', self._lang))
-            self.start_btn.setObjectName('PrimaryButton')
+            self.start_btn = style_button(
+                QPushButton(),
+                'primary',
+                text='Start scan',
+                tooltip='Run the selected profile against queued targets',
+            )
             self.start_btn.setMinimumHeight(38)
             self.start_btn.clicked.connect(self.start_scan)
-            self.stop_btn = QPushButton(_t('stop', self._lang))
-            self.stop_btn.setObjectName('DangerButton')
+            self.stop_btn = style_button(
+                QPushButton(), 'danger', text='Stop scan'
+            )
             self.stop_btn.setMinimumHeight(38)
             self.stop_btn.setEnabled(False)
             self.stop_btn.clicked.connect(self.stop_scan)
-            self.save_btn = QPushButton(_t('save', self._lang))
+            self.save_btn = style_button(
+                QPushButton(), 'secondary', text='Export results'
+            )
             self.save_btn.setEnabled(False)
             self.save_btn.clicked.connect(self.save_results)
             # cleanup button: clear temp files and also clear the UI
-            self.clean_btn = QPushButton(_t('clear', self._lang))
+            self.clean_btn = style_button(
+                QPushButton(), 'quiet', text='Clear workspace'
+            )
             # when clicked by user from the UI, also clear the site list and outputs
             try:
                 self.clean_btn.clicked.connect(lambda: self.clean_tmp_files(False, True))
@@ -2887,6 +3183,26 @@ def main() -> None:
             bottom.addWidget(self.save_btn)
             bottom.addWidget(self.clean_btn)
             v.addLayout(bottom)
+
+            # Stable keyboard order through the normal (collapsed) scan path.
+            try:
+                QWidget.setTabOrder(self.target_edit, add_btn)
+                QWidget.setTabOrder(add_btn, remove_btn)
+                QWidget.setTabOrder(remove_btn, self.threads_spin)
+                QWidget.setTabOrder(self.threads_spin, self.concurrent_spin)
+                QWidget.setTabOrder(self.concurrent_spin, self.delay_spin)
+                QWidget.setTabOrder(
+                    self.delay_spin, self._engagement_combo
+                )
+                QWidget.setTabOrder(
+                    self._engagement_combo, self._scan_profile_combo
+                )
+                QWidget.setTabOrder(self._scan_profile_combo, self.tree)
+                QWidget.setTabOrder(self.tree, self.start_btn)
+                QWidget.setTabOrder(self.start_btn, self.stop_btn)
+                QWidget.setTabOrder(self.stop_btn, self.results_btn)
+            except Exception:
+                pass
 
             # Scheduler: poll once a minute for due scheduled jobs (scan or recon).
             try:
@@ -3031,8 +3347,8 @@ def main() -> None:
                     pass
 
         def _build_scan_profile_panel(self):
-            """In-page scan profile controls replacing the fixed category dialog."""
-            panel = QtWidgets.QGroupBox('Scan Profile & Scope')
+            """Task-first scan setup with optional category-level controls."""
+            panel = QtWidgets.QGroupBox('Scan profile & scope')
             panel.setObjectName('ScanProfilePanel')
             layout = QtWidgets.QVBoxLayout(panel)
             layout.setSpacing(10)
@@ -3043,22 +3359,71 @@ def main() -> None:
             engagement_lbl.setFixedWidth(130)
             top.addWidget(engagement_lbl)
             self._engagement_combo = QtWidgets.QComboBox()
+            self._engagement_combo.setAccessibleName('Active engagement')
             self._refresh_engagement_combo()
             top.addWidget(self._engagement_combo, 1)
-            manage_btn = QPushButton('Manage')
+            manage_btn = style_button(
+                QPushButton(), 'quiet', text='Manage engagements'
+            )
             manage_btn.clicked.connect(lambda: self._navigate('engagements'))
             top.addWidget(manage_btn)
             layout.addLayout(top)
 
+            adv = (self._prefs.get('advanced') or {}) if hasattr(self, '_prefs') else {}
+            profile_row = QHBoxLayout()
+            profile_label = QLabel('Profile:')
+            profile_label.setObjectName('FieldLabel')
+            profile_label.setFixedWidth(130)
+            profile_row.addWidget(profile_label)
+            self._scan_profile_combo = QtWidgets.QComboBox()
+            self._scan_profile_combo.setAccessibleName('Scan profile')
+            self._scan_profile_combo.setAccessibleDescription(
+                'Task-based selection of scanner categories and safety defaults'
+            )
+            for key, definition in SCAN_PROFILE_DEFINITIONS.items():
+                self._scan_profile_combo.addItem(definition['label'], key)
+            self._scan_profile_combo.addItem('Custom', 'custom')
+            saved_profile = str(self._prefs.get('scan_profile') or 'standard')
+            profile_index = self._scan_profile_combo.findData(saved_profile)
+            self._scan_profile_combo.setCurrentIndex(
+                profile_index if profile_index >= 0 else 1
+            )
+            profile_row.addWidget(self._scan_profile_combo, 1)
+            layout.addLayout(profile_row)
+
+            self._scan_profile_summary = QLabel()
+            self._scan_profile_summary.setWordWrap(True)
+            self._scan_profile_summary.setObjectName('FieldLabel')
+            layout.addWidget(self._scan_profile_summary)
+
+            advanced_group = QtWidgets.QGroupBox('Advanced controls')
+            advanced_group.setAccessibleName('Advanced scan controls')
+            advanced_group.setCheckable(True)
+            advanced_group.setChecked(False)
+            advanced_layout = QtWidgets.QVBoxLayout(advanced_group)
+            advanced_body = QWidget()
+            advanced_body_layout = QtWidgets.QVBoxLayout(advanced_body)
+            advanced_body_layout.setContentsMargins(0, 4, 0, 0)
+            advanced_body_layout.setSpacing(10)
+
             auth = QtWidgets.QGridLayout()
             self._authorize_file_edit = QLineEdit()
-            self._authorize_file_edit.setPlaceholderText('optional allowlist file for --authorize')
-            browse_btn = QPushButton('Browse')
+            self._authorize_file_edit.setText(str(adv.get('authorize') or ''))
+            self._authorize_file_edit.setPlaceholderText('optional target allowlist file')
+            browse_btn = style_button(
+                QPushButton(), 'quiet', text='Browse'
+            )
             browse_btn.clicked.connect(self._browse_authorize_file)
             self._scope_include_edit = QLineEdit()
-            self._scope_include_edit.setPlaceholderText('optional regex, comma-separated')
+            self._scope_include_edit.setText(
+                ', '.join(adv.get('scope_include') or [])
+            )
+            self._scope_include_edit.setPlaceholderText('optional include patterns')
             self._scope_exclude_edit = QLineEdit()
-            self._scope_exclude_edit.setPlaceholderText('optional regex, comma-separated')
+            self._scope_exclude_edit.setText(
+                ', '.join(adv.get('scope_exclude') or [])
+            )
+            self._scope_exclude_edit.setPlaceholderText('optional exclusion patterns')
             auth.setColumnMinimumWidth(0, 130)
             auth.setColumnStretch(1, 1)
             for _row, _text in enumerate(('Authorization file:', 'Scope include:', 'Scope exclude:')):
@@ -3070,10 +3435,9 @@ def main() -> None:
             auth.addWidget(browse_btn, 0, 2)
             auth.addWidget(self._scope_include_edit, 1, 1, 1, 2)
             auth.addWidget(self._scope_exclude_edit, 2, 1, 1, 2)
-            layout.addLayout(auth)
+            advanced_body_layout.addLayout(auth)
 
-            adv = (self._prefs.get('advanced') or {}) if hasattr(self, '_prefs') else {}
-            controls = QHBoxLayout()
+            controls = QtWidgets.QGridLayout()
             self._safe_mode_chk = QCheckBox('Safe mode')
             self._safe_mode_chk.setChecked(bool(adv.get('safe_mode', True)))
             self._safe_mode_chk.setToolTip('Skip noisy and DoS-flavored techniques')
@@ -3096,22 +3460,26 @@ def main() -> None:
             self._oob_combo.addItem('Self-hosted', 'selfhosted')
             self._oob_combo.setCurrentIndex({'off': 0, 'interactsh': 1,
                                              'selfhosted': 2}.get(adv.get('oob', 'off'), 0))
-            for w in (self._safe_mode_chk, self._intrusive_chk, self._dry_run_chk,
-                      self._reconfirm_chk,
-                      self._impersonate_chk, self._ai_triage_chk):
-                controls.addWidget(w)
-            controls.addWidget(self._oob_combo)
-            controls.addStretch()
-            layout.addLayout(controls)
+            for index, control in enumerate((
+                self._safe_mode_chk, self._reconfirm_chk, self._dry_run_chk,
+                self._intrusive_chk, self._impersonate_chk, self._ai_triage_chk,
+            )):
+                controls.addWidget(control, index // 3, index % 3)
+            controls.addWidget(self._oob_combo, 2, 0)
+            advanced_body_layout.addLayout(controls)
 
             cat_header = QHBoxLayout()
             cat_header.addWidget(QLabel('Categories:'))
-            select_all = QPushButton('Select All')
-            deselect_all = QPushButton('Deselect All')
+            select_all = style_button(
+                QPushButton(), 'quiet', text='Select all'
+            )
+            deselect_all = style_button(
+                QPushButton(), 'quiet', text='Deselect all'
+            )
             cat_header.addStretch()
             cat_header.addWidget(select_all)
             cat_header.addWidget(deselect_all)
-            layout.addLayout(cat_header)
+            advanced_body_layout.addLayout(cat_header)
 
             cats = QtWidgets.QGridLayout()
             cats.setSpacing(4)
@@ -3123,11 +3491,89 @@ def main() -> None:
                 cb.setToolTip(cat_info['description'])
                 cb.setChecked(cat_key in saved_set)
                 self._scan_cat_checks[cat_key] = cb
-                cats.addWidget(cb, i // 4, i % 4)
-            layout.addLayout(cats)
+                cats.addWidget(cb, i // 3, i % 3)
+            advanced_body_layout.addLayout(cats)
+            advanced_layout.addWidget(advanced_body)
+            advanced_body.setVisible(False)
+            advanced_group.toggled.connect(advanced_body.setVisible)
+            layout.addWidget(advanced_group)
+
+            self._preflight_summary = QLabel()
+            self._preflight_summary.setObjectName('PreflightSummary')
+            self._preflight_summary.setWordWrap(True)
+            layout.addWidget(self._preflight_summary)
+
+            self._applying_scan_profile = False
+
+            def refresh_summary():
+                key = self._scan_profile_combo.currentData() or 'standard'
+                settings = scan_profile_settings(
+                    key,
+                    [
+                        category for category, check in self._scan_cat_checks.items()
+                        if check.isChecked()
+                    ],
+                )
+                selected = [
+                    category for category, check in self._scan_cat_checks.items()
+                    if check.isChecked()
+                ]
+                self._scan_profile_summary.setText(settings['description'])
+                opts = {
+                    'safe_mode': self._safe_mode_chk.isChecked(),
+                    'no_reconfirm': not self._reconfirm_chk.isChecked(),
+                    'dry_run': self._dry_run_chk.isChecked(),
+                    'engagement_id': self._engagement_combo.currentData(),
+                    'authorize': self._authorize_file_edit.text().strip(),
+                }
+                self._preflight_summary.setText(
+                    scan_preflight_summary(
+                        [],
+                        settings['label'],
+                        selected,
+                        opts,
+                    )
+                )
+
+            def apply_profile():
+                key = self._scan_profile_combo.currentData() or 'standard'
+                custom = list(saved_set) if key == 'custom' else None
+                settings = scan_profile_settings(key, custom)
+                self._applying_scan_profile = True
+                try:
+                    selected = set(settings['categories'])
+                    for category, check in self._scan_cat_checks.items():
+                        check.setChecked(category in selected)
+                    if key != 'custom':
+                        self._safe_mode_chk.setChecked(settings['safe_mode'])
+                        self._intrusive_chk.setChecked(settings['intrusive'])
+                        self._reconfirm_chk.setChecked(settings['reconfirm'])
+                finally:
+                    self._applying_scan_profile = False
+                refresh_summary()
+
+            def category_changed():
+                if self._applying_scan_profile:
+                    return
+                custom_index = self._scan_profile_combo.findData('custom')
+                if custom_index >= 0:
+                    self._scan_profile_combo.setCurrentIndex(custom_index)
+                refresh_summary()
 
             select_all.clicked.connect(lambda checked=False: [cb.setChecked(True) for cb in self._scan_cat_checks.values()])
             deselect_all.clicked.connect(lambda checked=False: [cb.setChecked(False) for cb in self._scan_cat_checks.values()])
+            self._scan_profile_combo.currentIndexChanged.connect(apply_profile)
+            self._engagement_combo.currentIndexChanged.connect(refresh_summary)
+            self._authorize_file_edit.textChanged.connect(refresh_summary)
+            for check in self._scan_cat_checks.values():
+                check.stateChanged.connect(category_changed)
+            for control in (
+                self._safe_mode_chk, self._reconfirm_chk, self._dry_run_chk,
+                self._intrusive_chk,
+            ):
+                control.stateChanged.connect(refresh_summary)
+            apply_profile()
+            self._refresh_scan_preflight = refresh_summary
             return panel
 
         def _refresh_engagement_combo(self):
@@ -3175,8 +3621,15 @@ def main() -> None:
             prefs = _load_prefs()
             ai_provider = prefs.get('ai_provider') or 'anthropic'
             ai_key = (prefs.get('ai_api_key') or prefs.get('anthropic_api_key') or None)
+            profile_key = (
+                self._scan_profile_combo.currentData()
+                if getattr(self, '_scan_profile_combo', None) else 'custom'
+            )
+            profile = scan_profile_settings(profile_key, selected)
             advanced = {
                 'categories': selected,
+                'profile_key': profile_key,
+                'profile_label': profile['label'],
                 'safe_mode': bool(self._safe_mode_chk.isChecked()),
                 'intrusive': bool(self._intrusive_chk.isChecked()),
                 'dry_run': bool(self._dry_run_chk.isChecked()),
@@ -3196,6 +3649,7 @@ def main() -> None:
             }
             try:
                 prefs['advanced'] = advanced
+                prefs['scan_profile'] = profile_key
                 prefs['current_engagement_id'] = advanced.get('engagement_id')
                 _save_prefs(prefs)
                 self._prefs = prefs
@@ -3224,36 +3678,23 @@ def main() -> None:
                 pass
 
         def _toggle_pulse_direction(self):
-            """Toggle pulsating animation direction for Results button."""
-            try:
-                if self._results_pulse_forward:
-                    self._results_pulse_anim.setStartValue(1.0)
-                    self._results_pulse_anim.setEndValue(0.6)
-                else:
-                    self._results_pulse_anim.setStartValue(0.6)
-                    self._results_pulse_anim.setEndValue(1.0)
-                self._results_pulse_forward = not self._results_pulse_forward
-                self._results_pulse_anim.start()
-            except Exception:
-                pass
+            """Compatibility no-op: attention is conveyed without animation."""
 
         def _start_results_pulse(self):
-            """Start the pulsating animation on the Results button."""
+            """Mark results available using a stable border/text state."""
             try:
-                self._results_pulse_forward = True
-                self._results_pulse_anim.setStartValue(1.0)
-                self._results_pulse_anim.setEndValue(0.6)
-                self._results_pulse_anim.setLoopCount(1)
-                self._results_pulse_anim.finished.connect(self._toggle_pulse_direction)
-                self._results_pulse_anim.start()
+                self.results_btn.setProperty('hasResults', 'true')
+                self.results_btn.style().unpolish(self.results_btn)
+                self.results_btn.style().polish(self.results_btn)
             except Exception:
                 pass
 
         def _stop_results_pulse(self):
-            """Stop the pulsating animation and reset opacity."""
+            """Reset the stable results-available state."""
             try:
-                self._results_pulse_anim.stop()
-                self._results_pulse_effect.setOpacity(1.0)
+                self.results_btn.setProperty('hasResults', 'false')
+                self.results_btn.style().unpolish(self.results_btn)
+                self.results_btn.style().polish(self.results_btn)
             except Exception:
                 pass
 
@@ -3442,39 +3883,10 @@ def main() -> None:
                 pass
 
         def _target_progress_default_style(self):
-            return '''
-                QProgressBar {
-                    border: 1px solid #30363d;
-                    border-radius: 5px;
-                    background-color: #21262d;
-                    text-align: center;
-                    color: #d7e1ea;
-                    font-size: 11px;
-                }
-                QProgressBar::chunk {
-                    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                        stop:0 #238636, stop:1 #2ea043);
-                    border-radius: 4px;
-                }
-            '''
+            return ''
 
         def _total_progress_default_style(self):
-            return '''
-                QProgressBar {
-                    border: 1px solid #30363d;
-                    border-radius: 5px;
-                    background-color: #21262d;
-                    text-align: center;
-                    color: #d7e1ea;
-                    font-size: 12px;
-                    font-weight: bold;
-                }
-                QProgressBar::chunk {
-                    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                        stop:0 #2563eb, stop:1 #3b82f6);
-                    border-radius: 4px;
-                }
-            '''
+            return ''
 
         def _reset_progress_after_stop(self):
             """Normalize progress UI after a user-initiated stop."""
@@ -3529,6 +3941,18 @@ def main() -> None:
                 # Update total progress bar
                 self._update_total_progress()
             except Exception as e:
+                pass
+
+        def _on_scan_phase(self, target, label):
+            """Show the engine's explicit phase label in the target queue."""
+            try:
+                for index in range(self.tree.topLevelItemCount()):
+                    item = self.tree.topLevelItem(index)
+                    actual = item.data(0, 256) or item.text(0)
+                    if actual == target:
+                        item.setText(1, str(label))
+                        break
+            except Exception:
                 pass
         
         def _update_total_progress(self):
@@ -3726,9 +4150,68 @@ def main() -> None:
                 selected_categories, advanced_opts = scan_profile
             if selected_categories is None:
                 return
-            
+
+            # Validate linked authorization before the GUI's own WAF preflight
+            # request, so no network traffic precedes the scanner's CLI gate.
+            engagement_id = advanced_opts.get('engagement_id')
+            if engagement_id:
+                engagement = (
+                    self._db.get_engagement(int(engagement_id))
+                    if self._db else None
+                )
+                if not engagement or not engagement.get('scope'):
+                    QMessageBox.warning(
+                        self,
+                        'Scope required',
+                        'The selected engagement has no active scope entries.',
+                    )
+                    return
+                outside = [
+                    target for target in targets
+                    if not _engagement_authorizes(
+                        target,
+                        engagement.get('scope') or [],
+                        engagement.get('exclusions') or [],
+                    )
+                ]
+                if outside:
+                    QMessageBox.warning(
+                        self,
+                        'Target outside scope',
+                        f'{outside[0]} is not authorized by the selected engagement.',
+                    )
+                    return
+            authorize_path = advanced_opts.get('authorize')
+            if authorize_path:
+                from .authorization import is_authorized, load_allowlist
+
+                patterns = load_allowlist(authorize_path)
+                outside = [
+                    target for target in targets
+                    if not is_authorized(target, patterns)
+                ]
+                if outside:
+                    QMessageBox.warning(
+                        self,
+                        'Target outside allowlist',
+                        f'{outside[0]} is not authorized by the selected allowlist.',
+                    )
+                    return
+
+            preflight = scan_preflight_summary(
+                targets,
+                advanced_opts.get('profile_label') or 'Custom',
+                selected_categories,
+                advanced_opts,
+            )
+            try:
+                self._preflight_summary.setText(preflight)
+            except Exception:
+                pass
+
             # WAF Detection for first target
             self.log.clear()
+            self.append_log(f'[*] Preflight: {preflight}\n')
             # Reset total progress bar
             try:
                 self._total_progress_bar.setValue(0)
@@ -3814,6 +4297,7 @@ def main() -> None:
             self._worker.results_emitted.connect(self._on_results_emitted, QtCore.Qt.QueuedConnection)
             self._worker.target_summary.connect(self._on_target_summary, QtCore.Qt.QueuedConnection)
             self._worker.progress_update.connect(self._update_target_progress, QtCore.Qt.QueuedConnection)
+            self._worker.phase_update.connect(self._on_scan_phase, QtCore.Qt.QueuedConnection)
             self._worker.finished.connect(self._on_finished, QtCore.Qt.QueuedConnection)
             self._worker_thread.started.connect(self._worker.run)
 
@@ -3847,7 +4331,7 @@ def main() -> None:
             self._worker_thread.start()
             self.start_btn.setEnabled(False)
             self.stop_btn.setEnabled(True)
-            
+
             # disable controls while running
             try:
                 self.threads_spin.setEnabled(False)
@@ -3943,10 +4427,13 @@ def main() -> None:
                 header_row.addWidget(header)
                 header_row.addStretch()
                 
-                select_all_btn = QPushButton(_t('select_all', self._lang))
+                select_all_btn = style_button(
+                    QPushButton(), 'quiet', text=_t('select_all', self._lang)
+                )
                 select_all_btn.setCursor(QCursor(Qt.PointingHandCursor))
-                select_all_btn.setStyleSheet('QPushButton { background-color: #238636; border-color: #238636; color: white; } QPushButton:hover { background-color: #2ea043; }')
-                deselect_all_btn = QPushButton(_t('deselect_all', self._lang))
+                deselect_all_btn = style_button(
+                    QPushButton(), 'quiet', text=_t('deselect_all', self._lang)
+                )
                 deselect_all_btn.setCursor(QCursor(Qt.PointingHandCursor))
                 header_row.addWidget(select_all_btn)
                 header_row.addWidget(deselect_all_btn)
@@ -4102,13 +4589,18 @@ def main() -> None:
                 bottom_layout.addWidget(count_label)
                 bottom_layout.addStretch()
                 
-                cancel_btn = QPushButton(_t('cancel', self._lang))
+                cancel_btn = style_button(
+                    QPushButton(), 'quiet', text=_t('cancel', self._lang)
+                )
                 cancel_btn.setCursor(QCursor(Qt.PointingHandCursor))
                 cancel_btn.clicked.connect(dialog.reject)
                 
-                start_btn = QPushButton(f"▶  {_t('start_scan', self._lang)}")
+                start_btn = style_button(
+                    QPushButton(),
+                    'primary',
+                    text=_t('start_scan', self._lang),
+                )
                 start_btn.setCursor(QCursor(Qt.PointingHandCursor))
-                start_btn.setStyleSheet('QPushButton { background-color: #238636; border-color: #238636; color: white; padding: 8px 20px; } QPushButton:hover { background-color: #2ea043; }')
                 start_btn.clicked.connect(dialog.accept)
                 
                 bottom_layout.addWidget(cancel_btn)
@@ -4283,10 +4775,17 @@ def main() -> None:
                     if self._db and self._current_scan_id:
                         for result in data:
                             try:
+                                stored_result = result
                                 if getattr(self, '_current_engagement_id', None):
-                                    result = dict(result)
-                                    result.setdefault('engagement_id', self._current_engagement_id)
-                                self._db.add_result(self._current_scan_id, result)
+                                    result.setdefault(
+                                        'engagement_id',
+                                        self._current_engagement_id,
+                                    )
+                                result_id = self._db.add_result(
+                                    self._current_scan_id, stored_result
+                                )
+                                if result_id:
+                                    result['db_result_id'] = result_id
                             except Exception:
                                 pass
                     # Live findings window: refresh whenever it exists (per-target).
@@ -4349,23 +4848,13 @@ def main() -> None:
             dlg = QtWidgets.QWidget()
             dlg.setWindowTitle('External Tools')
             dlg.resize(940, 660)
-            dlg.setStyleSheet('''
-                QDialog { background-color: #0f1112; }
-                QLabel { color: #d7e1ea; }
-                QLineEdit { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; border-radius: 4px; padding: 5px; }
-                QTreeWidget { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; }
-                QTreeWidget::item { padding: 4px; }
-                QTreeWidget::item:selected { background-color: #3b82f6; }
-                QPushButton { background-color: #2b2f33; color: #d7e1ea; border: none; padding: 7px 14px; border-radius: 4px; }
-                QPushButton:hover { background-color: #3b3f43; }
-                QPushButton:disabled { color: #6b737b; }
-                QTextEdit { background-color: #0b0d0e; color: #9ee6a0; border: 1px solid #2b2f33; }
-            ''')
             outer = QVBoxLayout(dlg)
 
+            title = QLabel('External tools')
+            title.setObjectName('PageTitle')
+            outer.addWidget(title)
             banner = QLabel('Detect-and-drive: Blackthorn runs tools already installed on this machine. '
                             'Nothing is installed for you. Authorized targets only.')
-            banner.setStyleSheet('color:#8b949e; padding:2px;')
             banner.setWordWrap(True)
             outer.addWidget(banner)
 
@@ -4401,10 +4890,19 @@ def main() -> None:
             outer.addWidget(tree, 1)
 
             act = QHBoxLayout()
-            run_btn = QPushButton('▶ Run selected')
-            stop_btn = QPushButton('■ Stop'); stop_btn.setEnabled(False)
-            cfg_btn = QPushButton('⚙ Configure')
-            results_btn = QPushButton('◆ Open Results')
+            run_btn = style_button(
+                QPushButton(), 'primary', text='Run selected tool'
+            )
+            stop_btn = style_button(
+                QPushButton(), 'danger', text='Stop tool'
+            )
+            stop_btn.setEnabled(False)
+            cfg_btn = style_button(
+                QPushButton(), 'quiet', text='Configure'
+            )
+            results_btn = style_button(
+                QPushButton(), 'secondary', text='Review findings'
+            )
             act.addWidget(run_btn); act.addWidget(stop_btn); act.addWidget(cfg_btn)
             act.addStretch(); act.addWidget(results_btn)
             outer.addLayout(act)
@@ -4459,6 +4957,21 @@ def main() -> None:
                 it = tree.currentItem()
                 return it.data(0, 256) if it else None
 
+            def active_engagement():
+                engagement_id = (
+                    getattr(self, '_current_engagement_id', None)
+                    or self._prefs.get('current_engagement_id')
+                )
+                if not engagement_id or not self._db:
+                    return None
+                try:
+                    engagement = self._db.get_engagement(int(engagement_id))
+                except Exception:
+                    engagement = None
+                if not engagement or engagement.get('status') == 'archived':
+                    return None
+                return engagement
+
             def run_selected():
                 key = selected_key()
                 if not key:
@@ -4468,13 +4981,35 @@ def main() -> None:
                 if not tgt:
                     QMessageBox.information(dlg, 'Tools', 'Enter a target.')
                     return
+                engagement = active_engagement()
+                if not engagement or not engagement.get('scope'):
+                    QMessageBox.warning(
+                        dlg,
+                        'Scope required',
+                        'Select an active engagement with at least one scope entry '
+                        'before running an external tool.',
+                    )
+                    return
+                if not _engagement_authorizes(
+                    tgt,
+                    engagement.get('scope') or [],
+                    engagement.get('exclusions') or [],
+                ):
+                    QMessageBox.warning(
+                        dlg,
+                        'Target outside scope',
+                        'The target is not authorized by the selected engagement.',
+                    )
+                    return
                 cfg = (self._db.get_tool_config(key) if self._db else None) or {}
                 extra = (cfg.get('extra_args') or '').split() or None
                 wl = wordlist_edit.text().strip() or None
                 self._tool_thread = QtCore.QThread()
                 self._tool_worker = ToolRunWorker(key, tgt, custom_path=cfg.get('custom_path'),
                                                   extra_args=extra, api_key=cfg.get('api_key'),
-                                                  wordlist=wl)
+                                                  wordlist=wl,
+                                                  authorization_patterns=engagement.get('scope'),
+                                                  authorization_exclusions=engagement.get('exclusions'))
                 self._tool_worker.moveToThread(self._tool_thread)
                 self._tool_thread.started.connect(self._tool_worker.run)
                 self._tool_worker.log_line.connect(append)
@@ -4633,8 +5168,16 @@ def main() -> None:
             outer.addLayout(mid, 1)
 
             runrow = QHBoxLayout()
-            run_btn = QPushButton('▶ Run pipeline'); stop_btn = QPushButton('■ Stop'); stop_btn.setEnabled(False)
-            results_btn = QPushButton('◆ Open Results')
+            run_btn = style_button(
+                QPushButton(), 'primary', text='Run pipeline'
+            )
+            stop_btn = style_button(
+                QPushButton(), 'danger', text='Stop pipeline'
+            )
+            stop_btn.setEnabled(False)
+            results_btn = style_button(
+                QPushButton(), 'secondary', text='Review findings'
+            )
             runrow.addWidget(run_btn); runrow.addWidget(stop_btn); runrow.addStretch(); runrow.addWidget(results_btn)
             outer.addLayout(runrow)
             log = QTextEdit(); log.setReadOnly(True); log.setMaximumHeight(200)
@@ -4770,8 +5313,40 @@ def main() -> None:
                 errs = validate_pipeline(pdef)
                 if errs:
                     QMessageBox.warning(dlg, 'Pipeline', 'Invalid:\n' + '\n'.join(errs)); return
+                engagement_id = (
+                    getattr(self, '_current_engagement_id', None)
+                    or self._prefs.get('current_engagement_id')
+                )
+                engagement = (
+                    self._db.get_engagement(int(engagement_id))
+                    if self._db and engagement_id else None
+                )
+                if not engagement or not engagement.get('scope'):
+                    QMessageBox.warning(
+                        dlg,
+                        'Scope required',
+                        'Select an active engagement with at least one scope entry '
+                        'before running a pipeline.',
+                    )
+                    return
+                if not _engagement_authorizes(
+                    tgt,
+                    engagement.get('scope') or [],
+                    engagement.get('exclusions') or [],
+                ):
+                    QMessageBox.warning(
+                        dlg,
+                        'Target outside scope',
+                        'The target is not authorized by the selected engagement.',
+                    )
+                    return
                 self._pipe_thread = QtCore.QThread()
-                self._pipe_worker = PipelineWorker(pdef, tgt)
+                self._pipe_worker = PipelineWorker(
+                    pdef,
+                    tgt,
+                    authorization_patterns=engagement.get('scope'),
+                    authorization_exclusions=engagement.get('exclusions'),
+                )
                 self._pipe_worker.moveToThread(self._pipe_thread)
                 self._pipe_thread.started.connect(self._pipe_worker.run)
                 self._pipe_worker.log_line.connect(lambda m: log.append(str(m).rstrip()))
@@ -5679,7 +6254,7 @@ def main() -> None:
             (frozen --recon-worker vs `python -m wafpierce.recon`).
 
             ``opts`` is the per-stage customization from the recon page; when it is
-            None (e.g. the scheduler) the engine defaults apply (tls + gau + nmap).
+            None (e.g. the scheduler) passive/web discovery defaults apply.
             """
             opts = opts or {}
             if IS_FROZEN:
@@ -5687,12 +6262,12 @@ def main() -> None:
                        '--output', tmp_path]
             else:
                 cmd = [sys.executable, '-u', '-m', 'wafpierce.recon', target,
-                       '-o', tmp_path]
+                       '--report-output', tmp_path]
             cmd += ['--timeout', str(timeout), '--top-ports', str(top_ports)]
             cmd += ['--max-hosts', str(opts.get('max_hosts', 1000))]
             cmd += ['--crawl-depth', str(opts.get('crawl_depth', 2))]
-            if no_ports or not opts.get('do_ports', True):
-                cmd.append('--no-ports')
+            if not no_ports and opts.get('do_ports', False):
+                cmd.append('--ports')
             if not opts.get('do_tls', True):
                 cmd.append('--no-tls')
             if not opts.get('do_historical', True):
@@ -5721,7 +6296,9 @@ def main() -> None:
             from PySide6.QtWidgets import (
                 QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QSpinBox,
                 QCheckBox, QPushButton, QPlainTextEdit, QTreeWidget,
-                QTreeWidgetItem, QSplitter, QMessageBox, QFileDialog)
+                QTreeWidgetItem, QSplitter, QMessageBox, QFileDialog,
+                QGridLayout, QGroupBox, QComboBox, QTabWidget, QHeaderView,
+                QMenu)
             from PySide6.QtCore import Qt, QProcess, QProcessEnvironment
             from PySide6.QtGui import QTextCursor
             import tempfile
@@ -5730,37 +6307,82 @@ def main() -> None:
             dlg.setObjectName('ReconPage')
             lay = QVBoxLayout(dlg)
             lay.setContentsMargins(22, 20, 22, 20)
-            _hdr = QLabel('Recon  —  recon & light pentest')
-            _hdr.setStyleSheet('font-size:18px; font-weight:bold; color:#58a6ff;')
+            _hdr = QLabel('Discovery')
+            _hdr.setObjectName('PageTitle')
             _hdr.setToolTip('subfinder · amass · dnsx · httpx · nmap  +  tlsx · gau · katana · nuclei · naabu · dalfox')
             lay.addWidget(_hdr)
-
-            from PySide6.QtWidgets import QGridLayout, QGroupBox, QComboBox
+            _intro = QLabel(
+                'Find subdomains first, then see exactly which names resolve '
+                'and which ones answer over HTTP(S). Wildcard scope such as '
+                '*.example.com is accepted.'
+            )
+            _intro.setObjectName('FieldLabel')
+            _intro.setWordWrap(True)
+            lay.addWidget(_intro)
 
             # Target + core options
-            row = QHBoxLayout()
-            row.addWidget(QLabel('Target:'))
+            target_box = QGroupBox('Scope')
+            target_grid = QGridLayout(target_box)
+            target_grid.setColumnStretch(5, 1)
+            target_grid.addWidget(QLabel('Domain or wildcard'), 0, 0)
             target_edit = QLineEdit()
-            target_edit.setPlaceholderText('example.com or https://example.com')
+            target_edit.setAccessibleName('Discovery scope')
+            target_edit.setPlaceholderText('example.com or *.example.com')
             try:
                 target_edit.setText((self.target_edit.text() or '').strip())
             except Exception:
                 pass
-            row.addWidget(target_edit, 1)
-            row.addWidget(QLabel('Timeout(s):'))
+            target_grid.addWidget(target_edit, 0, 1, 1, 5)
+            scope_hint = QLabel('')
+            scope_hint.setObjectName('FieldLabel')
+            scope_hint.setWordWrap(True)
+            target_grid.addWidget(scope_hint, 1, 1, 1, 5)
+
+            target_grid.addWidget(QLabel('Tool timeout'), 2, 0)
             timeout_spin = QSpinBox(); timeout_spin.setRange(10, 3600); timeout_spin.setValue(300)
-            row.addWidget(timeout_spin)
-            row.addWidget(QLabel('Max hosts:'))
+            timeout_spin.setSuffix(' s')
+            timeout_spin.setMaximumWidth(150)
+            target_grid.addWidget(timeout_spin, 2, 1)
+            target_grid.addWidget(QLabel('HTTP probe cap'), 2, 2)
             maxhosts_spin = QSpinBox(); maxhosts_spin.setRange(1, 100000); maxhosts_spin.setValue(1000)
+            maxhosts_spin.setMaximumWidth(150)
             maxhosts_spin.setToolTip('Cap on how many resolved hosts to actively probe (httpx).')
-            row.addWidget(maxhosts_spin)
-            row.addWidget(QLabel('Top ports:'))
+            target_grid.addWidget(maxhosts_spin, 2, 3)
+            target_grid.addWidget(QLabel('Nmap top ports'), 2, 4)
             ports_spin = QSpinBox(); ports_spin.setRange(10, 65535); ports_spin.setValue(100)
-            row.addWidget(ports_spin)
-            lay.addLayout(row)
+            ports_spin.setMaximumWidth(150)
+            ports_spin.setEnabled(False)
+            target_grid.addWidget(ports_spin, 2, 5)
+            lay.addWidget(target_box)
+
+            def _update_scope_hint():
+                raw = target_edit.text().strip()
+                try:
+                    from .recon import normalize_domain
+                    normalized = normalize_domain(raw)
+                except Exception:
+                    normalized = ''
+                if not raw:
+                    scope_hint.setText(
+                        'Enter the authorized root domain you want to enumerate.'
+                    )
+                elif normalized:
+                    wildcard_note = (
+                        'Wildcard recognized. ' if '*.' in raw else ''
+                    )
+                    scope_hint.setText(
+                        f'{wildcard_note}Enumeration root: {normalized}'
+                    )
+                else:
+                    scope_hint.setText('This target cannot be parsed as a domain.')
+
+            target_edit.textChanged.connect(_update_scope_hint)
+            _update_scope_hint()
 
             # Stages — each one is individually switchable. ☑ = on by default.
-            stages_box = QGroupBox('Stages  (✓ = run; tools install on demand)')
+            stages_box = QGroupBox(
+                'Customize coverage (tools install on demand)'
+            )
             sg = QGridLayout(stages_box)
             stage_chks = {}
 
@@ -5771,11 +6393,18 @@ def main() -> None:
 
             _stage('tls', 'TLS / SAN (tlsx)', 'Grab TLS certs and harvest extra subdomains from SANs.', True, 0, 0)
             _stage('historical', 'Historical URLs (gau)', 'Pull URLs from wayback / commoncrawl / otx.', True, 0, 1)
-            _stage('ports', 'Ports (nmap)', 'nmap -sV service/version scan.', True, 0, 2)
+            _stage(
+                'ports',
+                'Active ports (Nmap) — opt in',
+                'Unprivileged TCP connect scan with light service detection. '
+                'Can trigger endpoint/network security alerts.',
+                False, 0, 2,
+            )
             _stage('naabu', 'Fast ports (naabu)', 'Fast TCP connect port discovery across many hosts.', False, 1, 0)
             _stage('crawl', 'Crawl (katana)', 'Crawl live sites (incl. JS) for endpoints.', False, 1, 1)
             _stage('nuclei', 'Vuln scan (nuclei)', 'Run nuclei templates against live web services.', False, 1, 2)
             _stage('xss', 'XSS (dalfox)', 'Test URLs that carry parameters for XSS.', False, 2, 0)
+            stage_chks['ports'].toggled.connect(ports_spin.setEnabled)
 
             # nuclei + crawl tuning (compact 3-column grid)
             sg.addWidget(QLabel('nuclei sev:'), 3, 0)
@@ -5794,23 +6423,52 @@ def main() -> None:
 
             # Presets
             preset_row = QHBoxLayout()
-            fast_btn = QPushButton('Preset: Fast')
-            full_btn = QPushButton('Preset: Full pentest')
-            fast_btn.setToolTip('subfinder/amass + dnsx + httpx only')
-            full_btn.setToolTip('Enable every stage (slower, deepest coverage)')
+            fast_btn = QPushButton('Passive + web')
+            full_btn = QPushButton('Full active coverage')
+            fast_btn.setToolTip(
+                'Subfinder, Amass, Certificate Transparency, dnsx, httpx, '
+                'TLS SANs, and historical URLs; no port or vulnerability scans.'
+            )
+            full_btn.setToolTip(
+                'Enable active port, crawl, template, and XSS stages.'
+            )
             preset_row.addWidget(QLabel('Presets:'))
             preset_row.addWidget(fast_btn); preset_row.addWidget(full_btn)
             preset_row.addStretch()
             sg.addLayout(preset_row, 6, 0, 1, 3)
 
             def _apply_preset(full):
-                # Full = every stage on. Fast = the light defaults only.
-                for k, chk in stage_chks.items():
-                    chk.setChecked(True if full else k in ('tls', 'historical', 'ports'))
+                for key, chk in stage_chks.items():
+                    chk.setChecked(
+                        True if full else key in ('tls', 'historical')
+                    )
             fast_btn.clicked.connect(lambda: _apply_preset(False))
             full_btn.clicked.connect(lambda: _apply_preset(True))
 
+            coverage_row = QHBoxLayout()
+            coverage_note = QLabel(
+                'Default: passive enumeration + DNS + HTTP(S) + TLS SANs + '
+                'historical URLs. No port scan.'
+            )
+            coverage_note.setObjectName('FieldLabel')
+            coverage_note.setWordWrap(True)
+            coverage_toggle = style_button(
+                QPushButton(), 'quiet', text='Customize stages'
+            )
+            coverage_row.addWidget(coverage_note, 1)
+            coverage_row.addWidget(coverage_toggle)
+            lay.addLayout(coverage_row)
+            stages_box.setVisible(False)
             lay.addWidget(stages_box)
+
+            def _toggle_coverage():
+                visible = not stages_box.isVisible()
+                stages_box.setVisible(visible)
+                coverage_toggle.setText(
+                    'Hide stage settings' if visible else 'Customize stages'
+                )
+
+            coverage_toggle.clicked.connect(_toggle_coverage)
 
             def _collect_opts():
                 return {
@@ -5830,9 +6488,16 @@ def main() -> None:
             # Actions — two compact rows so the buttons never overflow a narrow
             # window (run controls on top, output actions below).
             run_row = QHBoxLayout()
-            run_btn = QPushButton('▶  Run Recon')
-            stop_btn = QPushButton('■  Stop'); stop_btn.setEnabled(False)
-            tools_btn = QPushButton('⬇  Tools')
+            run_btn = style_button(
+                QPushButton(), 'primary', text='Run discovery'
+            )
+            stop_btn = style_button(
+                QPushButton(), 'danger', text='Stop discovery'
+            )
+            stop_btn.setEnabled(False)
+            tools_btn = style_button(
+                QPushButton(), 'quiet', text='Tool setup'
+            )
             tools_btn.setToolTip('Install optional recon tools: tlsx, gau, katana, nuclei, naabu, dalfox')
             run_row.addWidget(run_btn)
             run_row.addWidget(stop_btn)
@@ -5840,15 +6505,38 @@ def main() -> None:
             run_row.addWidget(tools_btn)
             lay.addLayout(run_row)
 
-            out_row = QHBoxLayout()
-            merge_btn = QPushButton('＋ Merge to Results'); merge_btn.setEnabled(False)
-            msf_btn = QPushButton('→ Metasploit'); msf_btn.setEnabled(False)
-            caido_btn = QPushButton('→ Caido'); caido_btn.setEnabled(False)
-            save_btn = QPushButton('Save JSON…'); save_btn.setEnabled(False)
-            for b in (merge_btn, msf_btn, caido_btn, save_btn):
-                out_row.addWidget(b)
-            out_row.addStretch()
-            lay.addLayout(out_row)
+            out_grid = QGridLayout()
+            merge_btn = style_button(
+                QPushButton(), 'secondary', text='Add to findings'
+            )
+            merge_btn.setEnabled(False)
+            msf_btn = style_button(
+                QPushButton(), 'quiet', text='Send to Metasploit'
+            )
+            msf_btn.setEnabled(False)
+            caido_btn = style_button(
+                QPushButton(), 'quiet', text='Send to Caido'
+            )
+            caido_btn.setEnabled(False)
+            save_btn = style_button(
+                QPushButton(), 'secondary', text='Export discovery'
+            )
+            save_btn.setEnabled(False)
+            copy_hosts_btn = style_button(
+                QPushButton(), 'secondary', text='Copy subdomains'
+            )
+            copy_hosts_btn.setEnabled(False)
+            copy_live_btn = style_button(
+                QPushButton(), 'secondary', text='Copy live URLs'
+            )
+            copy_live_btn.setEnabled(False)
+            for col, button in enumerate(
+                    (merge_btn, copy_hosts_btn, copy_live_btn, save_btn)):
+                out_grid.addWidget(button, 0, col)
+                out_grid.setColumnStretch(col, 1)
+            out_grid.addWidget(msf_btn, 1, 0, 1, 2)
+            out_grid.addWidget(caido_btn, 1, 2, 1, 2)
+            lay.addLayout(out_grid)
             tools_btn.clicked.connect(lambda: self._download_tools_dialog(
                 ['tlsx', 'gau', 'katana', 'nuclei', 'naabu', 'dalfox'],
                 'Optional recon tools — each one that installs adds a richer stage:\n'
@@ -5860,20 +6548,116 @@ def main() -> None:
                 '  dalfox — XSS scanning of URLs with parameters\n',
                 title='Install optional recon tools'))
 
-            # Results tree (top) + streaming log (bottom)
+            # Searchable host inventory + all recon findings + streaming log.
+            inventory_bar = QHBoxLayout()
+            inventory_title = QLabel('Discovered hosts')
+            inventory_title.setObjectName('FieldLabel')
+            inventory_bar.addWidget(inventory_title)
+            inventory_bar.addStretch()
+            inventory_filter = QComboBox()
+            inventory_filter.setAccessibleName('Discovery status filter')
+            for label, key in recon_host_filter_options([]):
+                inventory_filter.addItem(label, key)
+            inventory_search = QLineEdit()
+            inventory_search.setAccessibleName('Search discovered hosts')
+            inventory_search.setPlaceholderText('Search host, URL, IP, or status')
+            inventory_search.setMaximumWidth(440)
+            inventory_search.setClearButtonEnabled(True)
+            inventory_bar.addWidget(inventory_filter)
+            inventory_bar.addWidget(inventory_search)
+            lay.addLayout(inventory_bar)
+
+            summary_row = QHBoxLayout()
+            summary_labels = {}
+            for key, label in (
+                ('subdomains', 'Subdomains'),
+                ('dns_live', 'Resolved'),
+                ('web_live', 'Web live'),
+                ('dns_without_http', 'No HTTP'),
+                ('unresolved', 'Unresolved'),
+            ):
+                widget = QLabel(f'{label}: 0')
+                widget.setObjectName('FindingState')
+                widget.setAccessibleName(f'{label} count')
+                summary_labels[key] = widget
+                summary_row.addWidget(widget)
+            summary_row.addStretch()
+            lay.addLayout(summary_row)
+
+            inventory_action_hint = QLabel(
+                'Double-click a row to copy its URL. Right-click or press and '
+                'hold for URL, hostname, and IP copy options.'
+            )
+            inventory_action_hint.setObjectName('FieldLabel')
+            inventory_action_hint.setWordWrap(True)
+            lay.addWidget(inventory_action_hint)
+
             split = QSplitter(Qt.Vertical)
-            tree = QTreeWidget()
-            tree.setHeaderLabels(['Technique', 'Target', 'Severity', 'Detail'])
-            tree.setColumnWidth(0, 190); tree.setColumnWidth(1, 250); tree.setColumnWidth(2, 80)
-            split.addWidget(tree)
+            split.setObjectName('DiscoveryVerticalSplitter')
+            split.setChildrenCollapsible(False)
+            tabs = QTabWidget()
+            tabs.setDocumentMode(True)
+
+            host_tree = QTreeWidget()
+            host_tree.setAccessibleName('Discovered host inventory')
+            host_tree.setHeaderLabels([
+                'Subdomain', 'DNS', 'HTTP(S)', 'URL / title', 'IP addresses',
+                'Sources',
+            ])
+            host_tree.setAlternatingRowColors(True)
+            host_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+            host_tree.setToolTip(
+                'Double-click a row to copy its URL. Right-click or press and '
+                'hold for more copy options.'
+            )
+            try:
+                header = host_tree.header()
+                header.setSectionResizeMode(0, QHeaderView.Interactive)
+                header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+                header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+                header.setSectionResizeMode(3, QHeaderView.Stretch)
+                header.setSectionResizeMode(4, QHeaderView.Interactive)
+                header.setSectionResizeMode(5, QHeaderView.Interactive)
+                host_tree.setColumnWidth(0, 230)
+                host_tree.setColumnWidth(4, 180)
+                host_tree.setColumnWidth(5, 180)
+            except Exception:
+                pass
+            tabs.addTab(host_tree, 'Host inventory')
+
+            findings_tree = QTreeWidget()
+            findings_tree.setAccessibleName('Discovery findings')
+            findings_tree.setHeaderLabels(
+                ['Technique', 'Target', 'Severity', 'Detail']
+            )
+            try:
+                header = findings_tree.header()
+                header.setSectionResizeMode(0, QHeaderView.Interactive)
+                header.setSectionResizeMode(1, QHeaderView.Interactive)
+                header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+                header.setSectionResizeMode(3, QHeaderView.Stretch)
+                findings_tree.setColumnWidth(0, 190)
+                findings_tree.setColumnWidth(1, 250)
+            except Exception:
+                pass
+            tabs.addTab(findings_tree, 'All recon output')
+            split.addWidget(tabs)
             log = QPlainTextEdit(); log.setReadOnly(True)
+            log.setAccessibleName('Discovery activity log')
             log.setStyleSheet('background:#0f1112; color:#cfe3f0; '
                               'font-family:Consolas,monospace; font-size:12px;')
             split.addWidget(log)
-            split.setSizes([370, 250])
+            split.setStretchFactor(0, 3)
+            split.setStretchFactor(1, 1)
+            split.setSizes([520, 180])
             lay.addWidget(split, 1)
 
-            state = {'proc': None, 'tmp': None, 'findings': []}
+            state = {
+                'proc': None,
+                'tmp': None,
+                'findings': [],
+                'report': recon_report_parts(None),
+            }
 
             def _append(text):
                 if not text:
@@ -5882,8 +6666,131 @@ def main() -> None:
                 log.insertPlainText(text)
                 log.moveCursor(QTextCursor.End)
 
-            def _populate(findings):
-                tree.clear()
+            def _sync_status_filters(hosts):
+                """Add exact HTTP response codes observed in this report."""
+                selected = inventory_filter.currentData() or 'all'
+                inventory_filter.blockSignals(True)
+                inventory_filter.clear()
+                for label, key in recon_host_filter_options(hosts):
+                    inventory_filter.addItem(label, key)
+                selected_index = inventory_filter.findData(selected)
+                inventory_filter.setCurrentIndex(
+                    selected_index if selected_index >= 0 else 0
+                )
+                inventory_filter.blockSignals(False)
+
+            def _host_for_item(item):
+                if item is None:
+                    return {}
+                host = item.data(0, 257)
+                return host if isinstance(host, dict) else {}
+
+            def _copy_host_value(value, label):
+                value = str(value or '').strip()
+                if not value:
+                    return
+                QApplication.clipboard().setText(value)
+                inventory_action_hint.setText(f'Copied {label}: {value}')
+                _append(f'\n[recon] copied {label}: {value}\n')
+
+            def _copy_host_row(item, _column=0):
+                host = _host_for_item(item)
+                if not host:
+                    return
+                url = str(host.get('http_url') or '').strip()
+                if url:
+                    _copy_host_value(url, 'URL')
+                else:
+                    _copy_host_value(host.get('hostname'), 'hostname')
+
+            def _show_host_copy_menu(point):
+                item = host_tree.itemAt(point)
+                host = _host_for_item(item)
+                if not host:
+                    return
+                menu = QMenu(host_tree)
+                url = str(host.get('http_url') or '').strip()
+                hostname = str(host.get('hostname') or '').strip()
+                ips = ', '.join(
+                    str(value) for value in host.get('ip_addresses') or []
+                )
+                copy_url = menu.addAction('Copy URL')
+                copy_url.setEnabled(bool(url))
+                copy_hostname = menu.addAction('Copy hostname')
+                copy_hostname.setEnabled(bool(hostname))
+                copy_ips = menu.addAction('Copy IP address(es)')
+                copy_ips.setEnabled(bool(ips))
+                selected = menu.exec(
+                    host_tree.viewport().mapToGlobal(point)
+                )
+                if selected == copy_url:
+                    _copy_host_value(url, 'URL')
+                elif selected == copy_hostname:
+                    _copy_host_value(hostname, 'hostname')
+                elif selected == copy_ips:
+                    _copy_host_value(ips, 'IP address(es)')
+
+            def _populate_host_inventory():
+                host_tree.clear()
+                hosts = state['report'].get('stages', {}).get('hosts') or []
+                shown = filter_recon_hosts(
+                    hosts,
+                    inventory_filter.currentData() or 'all',
+                    inventory_search.text(),
+                )
+                from PySide6.QtGui import QBrush, QColor
+                for host in shown:
+                    dns_text = (
+                        'Resolved' if host.get('dns_live') else 'Unresolved'
+                    )
+                    if host.get('http_live'):
+                        http_status = host.get('http_status')
+                        http_text = (
+                            f'Live · {http_status}'
+                            if http_status is not None else 'Live'
+                        )
+                    elif host.get('dns_live'):
+                        http_text = 'No response'
+                    else:
+                        http_text = 'Not tested'
+                    url_title = str(host.get('http_url') or '')
+                    title = str(host.get('title') or '')
+                    if title:
+                        url_title += f' — {title}' if url_title else title
+                    item = QTreeWidgetItem([
+                        str(host.get('hostname') or ''),
+                        dns_text,
+                        http_text,
+                        url_title,
+                        ', '.join(str(x) for x in host.get('ip_addresses') or []),
+                        ', '.join(str(x) for x in host.get('sources') or []),
+                    ])
+                    item.setData(0, 257, host)
+                    try:
+                        item.setForeground(
+                            1,
+                            QBrush(QColor(
+                                '#63c174' if host.get('dns_live') else '#9aa7b2'
+                            )),
+                        )
+                        item.setForeground(
+                            2,
+                            QBrush(QColor(
+                                '#63c174' if host.get('http_live') else '#9aa7b2'
+                            )),
+                        )
+                    except Exception:
+                        pass
+                    host_tree.addTopLevelItem(item)
+                inventory_title.setText(
+                    f'Discovered hosts · showing {len(shown)} of {len(hosts)}'
+                )
+
+            def _populate(report):
+                findings_tree.clear()
+                report = recon_report_parts(report)
+                state['report'] = report
+                findings = report['findings']
                 sev_color = {'CRITICAL': '#ff5d6c', 'HIGH': '#ff9f43',
                              'MEDIUM': '#f6e05e', 'LOW': '#63b3ed', 'INFO': '#9aa7b2'}
                 from PySide6.QtGui import QBrush, QColor
@@ -5896,11 +6803,46 @@ def main() -> None:
                         it.setForeground(2, QBrush(QColor(sev_color.get(sev, '#9aa7b2'))))
                     except Exception:
                         pass
-                    tree.addTopLevelItem(it)
+                    findings_tree.addTopLevelItem(it)
+
+                hosts = report.get('stages', {}).get('hosts') or []
+                _sync_status_filters(hosts)
+                summary = dict(
+                    report.get('stages', {}).get('summary') or {}
+                )
+                if not summary and hosts:
+                    summary = {
+                        'subdomains': sum(
+                            1 for host in hosts if not host.get('is_apex')
+                        ),
+                        'dns_live': sum(
+                            1 for host in hosts if host.get('dns_live')
+                        ),
+                        'web_live': sum(
+                            1 for host in hosts if host.get('http_live')
+                        ),
+                        'dns_without_http': sum(
+                            1 for host in hosts
+                            if host.get('dns_live') and not host.get('http_live')
+                        ),
+                        'unresolved': sum(
+                            1 for host in hosts if not host.get('dns_live')
+                        ),
+                    }
+                for key, widget in summary_labels.items():
+                    widget.setText(
+                        f'{widget.accessibleName()}: {int(summary.get(key, 0) or 0)}'
+                    )
+                _populate_host_inventory()
 
             def _set_outputs_enabled(on):
                 for b in (merge_btn, msf_btn, caido_btn, save_btn):
                     b.setEnabled(on)
+                hosts = state['report'].get('stages', {}).get('hosts') or []
+                copy_hosts_btn.setEnabled(bool(hosts))
+                copy_live_btn.setEnabled(
+                    any(host.get('http_live') for host in hosts)
+                )
 
             def _on_stdout():
                 proc = state['proc']
@@ -5909,13 +6851,13 @@ def main() -> None:
 
             def _on_finished(code=0, status=None):
                 run_btn.setEnabled(True); stop_btn.setEnabled(False)
-                findings = []
+                report = recon_report_parts(None)
                 tmp = state['tmp']
                 if tmp and os.path.exists(tmp):
                     try:
                         with open(tmp, 'r', encoding='utf-8') as f:
                             data = json.load(f)
-                        findings = data if isinstance(data, list) else []
+                        report = recon_report_parts(data)
                     except Exception as e:
                         _append(f"\n[!] could not parse recon output: {e}\n")
                     finally:
@@ -5923,10 +6865,19 @@ def main() -> None:
                             os.unlink(tmp)
                         except Exception:
                             pass
-                state['findings'] = findings
-                _populate(findings)
-                _set_outputs_enabled(bool(findings))
-                _append(f"\n[recon] finished (exit {code}) — {len(findings)} finding(s)\n")
+                state['findings'] = report['findings']
+                _populate(report)
+                _set_outputs_enabled(bool(report['findings']))
+                host_count = len(report.get('stages', {}).get('hosts') or [])
+                _append(
+                    f"\n[recon] finished (exit {code}) — {host_count} host(s), "
+                    f"{len(report['findings'])} finding(s)\n"
+                )
+                if code and not report['findings']:
+                    _append(
+                        '[!] Discovery worker failed before producing a report. '
+                        'Review the log above for the failing tool.\n'
+                    )
 
             def _run():
                 import shutil
@@ -5939,8 +6890,7 @@ def main() -> None:
                 # them instead of leaving the user at a dead end.
                 try:
                     from .recon import preflight, format_preflight_error, STAGE_TOOL
-                    missing = [t for t in preflight()
-                               if not (t[0] == 'nmap' and not opts.get('do_ports', True))]
+                    missing = preflight()
                     if missing:
                         _append(format_preflight_error(missing) + '\n')
                         self._show_recon_tools_dialog(missing)
@@ -5965,12 +6915,36 @@ def main() -> None:
                             self._download_tools_dialog(
                                 want, 'Installing tools for the enabled recon stages…',
                                 title='Install recon tools')
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _append(f'[!] Tool preflight failed: {exc}\n')
+                    return
+                if opts.get('do_ports'):
+                    ret = QMessageBox.question(
+                        dlg,
+                        'Run active Nmap scan?',
+                        'Nmap is an active network scan and may trigger macOS, '
+                        'EDR, IDS, or provider alerts.\n\n'
+                        'Blackthorn will use an unprivileged TCP connect scan, '
+                        'light version detection, no NSE scripts, and at most '
+                        '10 resolved IPs.\n\n'
+                        'Continue only if this activity is authorized.',
+                        QMessageBox.Yes | QMessageBox.No,
+                        QMessageBox.No,
+                    )
+                    if ret != QMessageBox.Yes:
+                        return
                 tmpf = tempfile.NamedTemporaryFile(delete=False, suffix='.json')
                 tmpf.close()
                 state['tmp'] = tmpf.name
-                log.clear(); tree.clear(); _set_outputs_enabled(False)
+                state['report'] = recon_report_parts(None)
+                state['findings'] = []
+                log.clear()
+                host_tree.clear()
+                findings_tree.clear()
+                for key, widget in summary_labels.items():
+                    widget.setText(f'{widget.accessibleName()}: 0')
+                inventory_title.setText('Discovered hosts')
+                _set_outputs_enabled(False)
                 cmd = self._recon_worker_cmd(
                     target, state['tmp'], timeout_spin.value(),
                     ports_spin.value(), opts=opts)
@@ -5982,6 +6956,12 @@ def main() -> None:
                 proc.setProcessEnvironment(env)
                 proc.readyReadStandardOutput.connect(_on_stdout)
                 proc.finished.connect(_on_finished)
+                proc.errorOccurred.connect(
+                    lambda _error: _append(
+                        f'\n[!] Could not run discovery worker: '
+                        f'{proc.errorString()}\n'
+                    )
+                )
                 state['proc'] = proc
                 _append('[recon] $ ' + ' '.join(cmd) + '\n\n')
                 run_btn.setEnabled(False); stop_btn.setEnabled(True)
@@ -6006,14 +6986,45 @@ def main() -> None:
 
             def _save():
                 path, _ = QFileDialog.getSaveFileName(
-                    dlg, 'Save recon findings', 'recon.json', 'JSON files (*.json)')
+                    dlg, 'Export discovery report', 'discovery.json',
+                    'JSON files (*.json)')
                 if path:
                     try:
                         with open(path, 'w', encoding='utf-8') as f:
-                            json.dump(state['findings'], f, indent=2, default=str)
-                        _append(f"\n[recon] saved {len(state['findings'])} finding(s) to {path}\n")
+                            json.dump(
+                                state['report'], f, indent=2, default=str
+                            )
+                        hosts = state['report'].get('stages', {}).get('hosts') or []
+                        _append(
+                            f"\n[recon] exported {len(hosts)} host(s) and "
+                            f"{len(state['findings'])} finding(s) to {path}\n"
+                        )
                     except Exception as e:
                         QMessageBox.warning(dlg, 'Save failed', str(e))
+
+            def _copy_inventory(live_only=False):
+                hosts = state['report'].get('stages', {}).get('hosts') or []
+                if live_only:
+                    values = [
+                        str(host.get('http_url') or '')
+                        for host in hosts if host.get('http_live')
+                    ]
+                else:
+                    values = [
+                        str(host.get('hostname') or '')
+                        for host in hosts if not host.get('is_apex')
+                    ]
+                values = [value for value in dict.fromkeys(values) if value]
+                if not values and not live_only:
+                    values = [
+                        str(host.get('hostname') or '')
+                        for host in hosts if host.get('hostname')
+                    ]
+                QApplication.clipboard().setText('\n'.join(values))
+                _append(
+                    f"\n[recon] copied {len(values)} "
+                    f"{'live URL(s)' if live_only else 'subdomain(s)'}\n"
+                )
 
             def _run_handoff(cmd, env_extra, label):
                 """Run an msf/caido CLI subcommand against the recon findings."""
@@ -6078,8 +7089,24 @@ def main() -> None:
             stop_btn.clicked.connect(_stop)
             merge_btn.clicked.connect(_merge)
             save_btn.clicked.connect(_save)
+            copy_hosts_btn.clicked.connect(
+                lambda: _copy_inventory(False)
+            )
+            copy_live_btn.clicked.connect(
+                lambda: _copy_inventory(True)
+            )
             msf_btn.clicked.connect(_send_msf)
             caido_btn.clicked.connect(_send_caido)
+            inventory_filter.currentIndexChanged.connect(
+                lambda: _populate_host_inventory()
+            )
+            inventory_search.textChanged.connect(
+                lambda: _populate_host_inventory()
+            )
+            host_tree.itemDoubleClicked.connect(_copy_host_row)
+            host_tree.customContextMenuRequested.connect(
+                _show_host_copy_menu
+            )
 
             # Keep a handle so other code (e.g. abort on quit) can reach the proc.
             self._recon_state = state
@@ -7205,8 +8232,8 @@ def main() -> None:
 
             page = QtWidgets.QWidget(); page.setObjectName('PipelinePage')
             v = QVBoxLayout(page); v.setContentsMargins(22, 20, 22, 20)
-            hdr = QLabel('⛓  Pipeline — one-click chained pentest')
-            hdr.setStyleSheet('font-size:18px; font-weight:bold; color:#58a6ff;')
+            hdr = QLabel('Test pipeline')
+            hdr.setObjectName('PageTitle')
             v.addWidget(hdr)
 
             row = QHBoxLayout(); row.addWidget(QLabel('Target:'))
@@ -7238,10 +8265,20 @@ def main() -> None:
             v.addWidget(warn)
 
             brow = QHBoxLayout()
-            run_btn = QPushButton('▶  Run Pipeline'); run_btn.setObjectName('PrimaryButton')
-            stop_btn = QPushButton('■ Stop'); stop_btn.setEnabled(False)
-            merge_btn = QPushButton('＋ Merge to Results'); merge_btn.setEnabled(False)
-            tools_btn = QPushButton('⬇ Install tools')
+            run_btn = style_button(
+                QPushButton(), 'primary', text='Run pipeline'
+            )
+            stop_btn = style_button(
+                QPushButton(), 'danger', text='Stop pipeline'
+            )
+            stop_btn.setEnabled(False)
+            merge_btn = style_button(
+                QPushButton(), 'secondary', text='Add to findings'
+            )
+            merge_btn.setEnabled(False)
+            tools_btn = style_button(
+                QPushButton(), 'quiet', text='Tool setup'
+            )
             brow.addWidget(run_btn); brow.addWidget(stop_btn); brow.addWidget(merge_btn)
             brow.addStretch(); brow.addWidget(tools_btn)
             v.addLayout(brow)
@@ -7304,7 +8341,8 @@ def main() -> None:
                             data = _json.load(f)
                     except Exception:
                         data = []
-                for f in (data if isinstance(data, list) else []):
+                report = recon_report_parts(data)
+                for f in report['findings']:
                     _add_finding(f.get('technique', '?'), f.get('target', ''),
                                  f.get('severity', 'INFO'), f.get('reason', ''))
                     if f.get('technique') == 'HTTP Service':
@@ -8324,14 +9362,6 @@ def main() -> None:
                 h2.addStretch()
                 layout.addLayout(h2)
 
-                # watermark
-                wm_chk = QCheckBox(_t('show_watermark', self._lang))
-                try:
-                    wm_chk.setChecked(bool(prefs.get('watermark', True)))
-                except Exception:
-                    wm_chk.setChecked(True)
-                layout.addWidget(wm_chk)
-
                 # remember targets
                 remember_chk = QCheckBox(_t('remember_targets', self._lang))
                 try:
@@ -8368,6 +9398,15 @@ def main() -> None:
                 density_layout.addWidget(density_combo)
                 density_layout.addStretch()
                 layout.addLayout(density_layout)
+
+                reduce_motion_chk = QCheckBox('Reduce motion')
+                reduce_motion_chk.setChecked(
+                    bool(prefs.get('reduce_motion', True))
+                )
+                reduce_motion_chk.setToolTip(
+                    'Use stable state changes instead of attention animations'
+                )
+                layout.addWidget(reduce_motion_chk)
 
                 # Language selection
                 lang_layout = QtWidgets.QHBoxLayout()
@@ -8673,12 +9712,15 @@ def main() -> None:
                         new_lang = _normalize_language(lang_combo.currentData())
                         
                         prefs['font_size'] = int(font_spin.value())
-                        prefs['watermark'] = bool(wm_chk.isChecked())
+                        prefs['watermark'] = False
                         prefs['remember_targets'] = bool(remember_chk.isChecked())
                         prefs['retry_failed'] = int(retry_spin.value())
                         # Map density index back to key
                         density_keys = ['compact', 'comfortable', 'spacious']
                         prefs['ui_density'] = density_keys[density_combo.currentIndex()]
+                        prefs['reduce_motion'] = bool(
+                            reduce_motion_chk.isChecked()
+                        )
                         prefs['language'] = new_lang
                         
                         # Save proxy settings
@@ -8818,7 +9860,6 @@ def main() -> None:
                     pass
             except Exception:
                 pass
-            show_watermark = prefs.get('watermark', True)
             try:
                 self.setStyleSheet('')
             except Exception:
@@ -8853,24 +9894,10 @@ def main() -> None:
                     pass
             except Exception:
                 pass
+            # Keep logs visually quiet and readable; brand artwork belongs in
+            # the shell, not behind operational output.
             try:
-                if show_watermark:
-                    tmp = self._create_qt_watermark(0.08)
-                    if tmp and os.path.exists(tmp):
-                        try:
-                            from pathlib import Path
-                            css_path = Path(tmp).as_posix()
-                        except Exception:
-                            css_path = tmp.replace('\\', '/')
-                        self.log.setStyleSheet(
-                            "QTextEdit {"
-                            f" background-image: url('{css_path}');"
-                            " background-repeat: no-repeat; background-position: center; background-attachment: fixed;"
-                            " background-color: #12161d; color: #e6eaf0;"
-                            " border: 1px solid #262f3b; border-radius: 10px; padding: 8px; }"
-                        )
-                else:
-                    self.log.setStyleSheet('')
+                self.log.setStyleSheet('')
             except Exception:
                 pass
 
@@ -8937,32 +9964,6 @@ def main() -> None:
                     self.results_btn.setEnabled(True)
                 except Exception:
                     pass
-
-        def _create_qt_watermark(self, opacity: float = 0.08):
-            try:
-                if not os.path.exists(LOGO_PATH):
-                    return None
-                from PySide6.QtGui import QPixmap, QPainter
-                from PySide6.QtCore import Qt
-                pix = QPixmap(LOGO_PATH)
-                if pix.isNull():
-                    return None
-                scaled = pix.scaled(400, 400, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                tmpf = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
-                tmpf.close()
-                trans = QPixmap(scaled.size())
-                trans.fill(Qt.transparent)
-                p = QPainter(trans)
-                try:
-                    p.setOpacity(opacity)
-                    p.drawPixmap(0, 0, scaled)
-                finally:
-                    p.end()
-                trans.save(tmpf.name)
-                self._qt_watermark_tmp = tmpf.name
-                return tmpf.name
-            except Exception:
-                return None
 
         def save_results(self):
             """Save results with option to save as JSON or HTML."""
@@ -9043,10 +10044,10 @@ def main() -> None:
                 empty.setObjectName('ResultsPage')
                 ev = QVBoxLayout(empty)
                 ev.setContentsMargins(22, 20, 22, 20)
-                hdr = QLabel('◆  Results')
-                hdr.setStyleSheet('font-size:18px; font-weight:bold; color:#58a6ff;')
+                hdr = QLabel('Analyze')
+                hdr.setObjectName('PageTitle')
                 msg = QLabel(_t('no_results_msg', self._lang))
-                msg.setStyleSheet('color:#8b949e;')
+                msg.setObjectName('FieldLabel')
                 ev.addWidget(hdr)
                 ev.addWidget(msg)
                 ev.addStretch()
@@ -9080,41 +10081,39 @@ def main() -> None:
             
             dlg = QtWidgets.QWidget()
             dlg.setObjectName('ResultsPage')
-            dlg.setStyleSheet("""
-                QWidget#ResultsPage { background-color: #0f1112; }
-                QLabel { color: #d7e1ea; }
-                QListWidget { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; }
-                QListWidget::item { padding: 8px; border-bottom: 1px solid #2b2f33; }
-                QListWidget::item:selected { background-color: #3b82f6; }
-                QListWidget::item:hover { background-color: #2b2f33; }
-                QTreeWidget { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; }
-                QTreeWidget::item { padding: 4px; }
-                QTreeWidget::item:selected { background-color: #3b82f6; }
-                QComboBox { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; padding: 5px; }
-                QComboBox::drop-down { border: none; }
-                QComboBox QAbstractItemView { background-color: #16181a; color: #d7e1ea; selection-background-color: #3b82f6; }
-                QPushButton { background-color: #2b2f33; color: #d7e1ea; border: none; padding: 8px 16px; border-radius: 4px; }
-                QPushButton:hover { background-color: #3b3f43; }
-                QCheckBox { color: #d7e1ea; }
-                QGroupBox { color: #d7e1ea; border: 1px solid #2b2f33; margin-top: 10px; padding-top: 10px; }
-                QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }
-            """)
-            
-            main_layout = QHBoxLayout(dlg)
-            
+            outer_layout = QVBoxLayout(dlg)
+            title = QLabel('Analyze')
+            title.setObjectName('PageTitle')
+            subtitle = QLabel(
+                'Triage by verification state, inspect the evidence, then move '
+                'the finding through your reporting workflow.'
+            )
+            subtitle.setObjectName('FieldLabel')
+            subtitle.setWordWrap(True)
+            outer_layout.addWidget(title)
+            outer_layout.addWidget(subtitle)
+            workspace_splitter = QtWidgets.QSplitter(
+                QtCore.Qt.Orientation.Horizontal
+            )
+            workspace_splitter.setObjectName('ResultsWorkspaceSplitter')
+            workspace_splitter.setChildrenCollapsible(False)
+            outer_layout.addWidget(workspace_splitter, 1)
+
             # === LEFT PANEL: Site List ===
-            left_panel = QVBoxLayout()
+            left_widget = QWidget()
+            left_widget.setMinimumWidth(145)
+            left_panel = QVBoxLayout(left_widget)
+            left_panel.setContentsMargins(0, 0, 0, 0)
             left_panel.setSpacing(10)
             
             # Header
             sites_header = QLabel(_t('sites', self._lang))
-            sites_header.setFont(QFont('', 12, QFont.Bold))
-            sites_header.setStyleSheet('color: #d7e1ea; padding: 5px;')
+            sites_header.setObjectName('FieldLabel')
             left_panel.addWidget(sites_header)
             
             # "All Sites" option
             site_list = QtWidgets.QListWidget()
-            site_list.setFixedWidth(280)
+            site_list.setAccessibleName('Result targets')
             
             # Add "All Sites" first
             all_item = QtWidgets.QListWidgetItem(f'{_t("all_sites", self._lang)} ({len(self._results)} {_t("findings", self._lang)})')
@@ -9160,14 +10159,17 @@ def main() -> None:
             stats_label.setStyleSheet('color: #808080; padding: 5px;')
             left_panel.addWidget(stats_label)
             
-            main_layout.addLayout(left_panel)
-            
+            workspace_splitter.addWidget(left_widget)
+
             # === RIGHT PANEL: Results View ===
-            right_panel = QVBoxLayout()
+            results_widget = QWidget()
+            results_widget.setMinimumWidth(280)
+            right_panel = QVBoxLayout(results_widget)
+            right_panel.setContentsMargins(8, 0, 8, 0)
             right_panel.setSpacing(10)
             
             # Controls bar
-            controls = QHBoxLayout()
+            controls = QtWidgets.QGridLayout()
             
             # Sort options
             sort_label = QLabel(_t('sort_by', self._lang))
@@ -9180,68 +10182,67 @@ def main() -> None:
                 _t('category', self._lang),
                 _t('bypass_status', self._lang)
             ])
-            sort_combo.setFixedWidth(200)
-            controls.addWidget(sort_label)
-            controls.addWidget(sort_combo)
-            
-            controls.addSpacing(20)
+            sort_combo.setMinimumContentsLength(12)
+            controls.addWidget(sort_label, 0, 0)
+            controls.addWidget(sort_combo, 0, 1)
             
             # Filter options
             filter_label = QLabel(_t('filter', self._lang))
             filter_combo = QtWidgets.QComboBox()
-            filter_combo.addItems([
-                _t('all_results', self._lang),
-                _t('critical_only', self._lang),
-                _t('high_only', self._lang),
-                _t('medium_only', self._lang),
-                _t('low_only', self._lang),
-                _t('info_only', self._lang),
-                _t('bypasses_only', self._lang),
-                _t('non_bypasses_only', self._lang)
-            ])
-            filter_combo.setFixedWidth(180)
-            controls.addWidget(filter_label)
-            controls.addWidget(filter_combo)
+            filter_combo.setAccessibleName('Result filter')
+            for label, key in (
+                ('All results', 'all'),
+                ('Confirmed findings', 'confirmed'),
+                ('Candidates', 'candidate'),
+                ('Observations', 'observation'),
+                ('Critical severity', 'critical'),
+                ('High severity', 'high'),
+                ('Needs review', 'needs_review'),
+                ('Validated', 'workflow:validated'),
+                ('Reported', 'workflow:reported'),
+                ('Fixed', 'workflow:fixed'),
+            ):
+                filter_combo.addItem(label, key)
+            filter_combo.setMinimumContentsLength(11)
+            controls.addWidget(filter_label, 1, 0)
+            controls.addWidget(filter_combo, 1, 1)
+            controls.setColumnStretch(1, 1)
             
             right_panel.addLayout(controls)
             
             # Search bar row
-            search_row = QHBoxLayout()
-            search_label = QLabel('🔍 ' + _t('search', self._lang))
+            search_row = QtWidgets.QGridLayout()
+            search_label = QLabel(_t('search', self._lang))
             search_edit = QLineEdit()
+            search_edit.setAccessibleName('Search findings')
             search_edit.setPlaceholderText(_t('search_placeholder', self._lang))
-            search_edit.setStyleSheet('''
-                QLineEdit {
-                    background-color: #16181a;
-                    color: #d7e1ea;
-                    border: 1px solid #2b2f33;
-                    border-radius: 4px;
-                    padding: 6px 10px;
-                }
-                QLineEdit:focus {
-                    border: 1px solid #3b82f6;
-                }
-            ''')
-            search_clear_btn = QPushButton('✕')
-            search_clear_btn.setFixedWidth(30)
-            search_clear_btn.setStyleSheet('QPushButton { padding: 4px; }')
+            search_clear_btn = style_button(
+                QPushButton(), 'quiet', text='Clear'
+            )
+            search_clear_btn.setMinimumWidth(52)
             search_clear_btn.clicked.connect(lambda: search_edit.clear())
             
-            search_row.addWidget(search_label)
-            search_row.addWidget(search_edit, 1)
-            search_row.addWidget(search_clear_btn)
-            search_row.addSpacing(20)
+            search_row.addWidget(search_label, 0, 0)
+            search_row.addWidget(search_edit, 0, 1, 1, 2)
+            search_row.addWidget(search_clear_btn, 0, 3)
             
             # Expand/Collapse buttons
-            expand_btn = QPushButton(_t('expand_all', self._lang))
-            collapse_btn = QPushButton(_t('collapse_all', self._lang))
-            search_row.addWidget(expand_btn)
-            search_row.addWidget(collapse_btn)
+            expand_btn = style_button(
+                QPushButton(), 'quiet', text=_t('expand_all', self._lang)
+            )
+            collapse_btn = style_button(
+                QPushButton(), 'quiet', text=_t('collapse_all', self._lang)
+            )
+            search_row.addWidget(expand_btn, 1, 1)
+            search_row.addWidget(collapse_btn, 1, 2)
+            search_row.setColumnStretch(1, 1)
+            search_row.setColumnStretch(2, 1)
             
             right_panel.addLayout(search_row)
             
             # Results tree
             results_tree = QTreeWidget()
+            results_tree.setAccessibleName('Findings')
             results_tree.setColumnCount(4)
             results_tree.setHeaderLabels([_t('technique', self._lang), _t('severity', self._lang), _t('category', self._lang), _t('reason', self._lang)])
             results_tree.setAlternatingRowColors(True)
@@ -9257,21 +10258,95 @@ def main() -> None:
                 pass
             
             right_panel.addWidget(results_tree, 1)
-            
-            # Details section
-            details_group = QtWidgets.QGroupBox(_t('details', self._lang))
-            details_layout = QVBoxLayout(details_group)
-            details_text = QTextEdit()
+
+            workspace_splitter.addWidget(results_widget)
+
+            # === EVIDENCE + ACTIONS PANEL ===
+            details_panel = QtWidgets.QFrame()
+            details_panel.setObjectName('Card')
+            details_panel.setMinimumWidth(260)
+            details_layout = QVBoxLayout(details_panel)
+            details_title = QLabel('Evidence')
+            details_title.setObjectName('PageTitle')
+            details_layout.addWidget(details_title)
+            finding_state_label = QLabel('Select a finding to inspect its proof.')
+            finding_state_label.setObjectName('FindingState')
+            finding_state_label.setWordWrap(True)
+            details_layout.addWidget(finding_state_label)
+            details_text = QtWidgets.QTextBrowser()
             details_text.setReadOnly(True)
-            details_text.setMaximumHeight(200)
-            details_text.setStyleSheet('background-color: #16181a; border: none;')
-            details_layout.addWidget(details_text)
-            right_panel.addWidget(details_group)
-            
-            main_layout.addLayout(right_panel, 1)
-            
+            details_text.setOpenExternalLinks(True)
+            details_text.setAccessibleName('Finding evidence')
+            details_layout.addWidget(details_text, 1)
+
+            request_actions = QtWidgets.QGridLayout()
+            copy_curl_btn = style_button(
+                QPushButton(), 'quiet', text='Copy cURL'
+            )
+            copy_python_btn = style_button(
+                QPushButton(), 'quiet', text='Copy Python'
+            )
+            repeater_btn = style_button(
+                QPushButton(), 'secondary', text='Send to Repeater'
+            )
+            retest_btn = style_button(
+                QPushButton(), 'primary', text='Re-test request'
+            )
+            for index, button in enumerate((
+                copy_curl_btn, copy_python_btn, repeater_btn, retest_btn,
+            )):
+                button.setEnabled(False)
+                request_actions.addWidget(button, index // 2, index % 2)
+                request_actions.setColumnStretch(index % 2, 1)
+            details_layout.addLayout(request_actions)
+
+            workflow_row = QHBoxLayout()
+            workflow_row.addWidget(QLabel('Workflow:'))
+            workflow_combo = QtWidgets.QComboBox()
+            workflow_combo.setAccessibleName('Finding workflow state')
+            for state, label in WORKFLOW_STATE_LABELS.items():
+                workflow_combo.addItem(label, state)
+            workflow_row.addWidget(workflow_combo, 1)
+            save_state_btn = style_button(
+                QPushButton(), 'secondary', text='Save state'
+            )
+            save_state_btn.setEnabled(False)
+            workflow_row.addWidget(save_state_btn)
+            details_layout.addLayout(workflow_row)
+            evidence_notes = QLineEdit()
+            evidence_notes.setPlaceholderText('Optional analyst note')
+            evidence_notes.setAccessibleName('Analyst evidence note')
+            evidence_notes.setEnabled(False)
+            details_layout.addWidget(evidence_notes)
+            action_status = QLabel('')
+            action_status.setObjectName('FieldLabel')
+            action_status.setWordWrap(True)
+            details_layout.addWidget(action_status)
+            workspace_splitter.addWidget(details_panel)
+            workspace_splitter.setStretchFactor(0, 1)
+            workspace_splitter.setStretchFactor(1, 3)
+            workspace_splitter.setStretchFactor(2, 2)
+            workspace_splitter.setSizes([190, 560, 380])
+
+            try:
+                QWidget.setTabOrder(site_list, filter_combo)
+                QWidget.setTabOrder(filter_combo, search_edit)
+                QWidget.setTabOrder(search_edit, results_tree)
+                QWidget.setTabOrder(results_tree, details_text)
+                QWidget.setTabOrder(details_text, copy_curl_btn)
+                QWidget.setTabOrder(copy_curl_btn, copy_python_btn)
+                QWidget.setTabOrder(copy_python_btn, repeater_btn)
+                QWidget.setTabOrder(repeater_btn, retest_btn)
+                QWidget.setTabOrder(retest_btn, workflow_combo)
+                QWidget.setTabOrder(workflow_combo, evidence_notes)
+                QWidget.setTabOrder(evidence_notes, save_state_btn)
+            except Exception:
+                pass
+
             # === LOGIC FUNCTIONS ===
-            def get_filtered_sorted_results(target_key, sort_idx, filter_idx, search_text=''):
+            selected_result = {'value': None}
+
+            def get_filtered_sorted_results(target_key, sort_idx, filter_key, search_text=''):
                 """Get results for a target with sorting, filtering, and search applied."""
                 if target_key == '__ALL__':
                     results = list(self._results)
@@ -9289,21 +10364,10 @@ def main() -> None:
                         search_lower in r.get('severity', '').lower()
                     ]
                 
-                # Apply filter
-                if filter_idx == 1:  # CRITICAL only
-                    results = [r for r in results if r.get('severity') == 'CRITICAL']
-                elif filter_idx == 2:  # HIGH only
-                    results = [r for r in results if r.get('severity') == 'HIGH']
-                elif filter_idx == 3:  # MEDIUM only
-                    results = [r for r in results if r.get('severity') == 'MEDIUM']
-                elif filter_idx == 4:  # LOW only
-                    results = [r for r in results if r.get('severity') == 'LOW']
-                elif filter_idx == 5:  # INFO only
-                    results = [r for r in results if r.get('severity') == 'INFO']
-                elif filter_idx == 6:  # Confirmed only
-                    results = [r for r in results if _is_confirmed_result(r)]
-                elif filter_idx == 7:  # Candidates / observations
-                    results = [r for r in results if not _is_confirmed_result(r)]
+                results = [
+                    result for result in results
+                    if result_matches_filter(result, filter_key)
+                ]
                 
                 # Apply sort
                 if sort_idx == 0:  # Severity High to Low
@@ -9419,9 +10483,188 @@ def main() -> None:
                 </div>
                 """
 
+            def set_selected_result(result):
+                selected_result['value'] = result if isinstance(result, dict) else None
+                has_result = isinstance(result, dict)
+                request_spec = finding_request_spec(result) if has_result else None
+                for button in (
+                    copy_curl_btn, copy_python_btn, repeater_btn, retest_btn,
+                ):
+                    button.setEnabled(request_spec is not None)
+                save_state_btn.setEnabled(has_result)
+                workflow_combo.setEnabled(has_result)
+                evidence_notes.setEnabled(has_result)
+                if not has_result:
+                    details_text.clear()
+                    finding_state_label.setText(
+                        'Select a finding to inspect its proof.'
+                    )
+                    evidence_notes.clear()
+                    action_status.clear()
+                    return
+
+                details_text.setHtml(build_finding_detail_html(result))
+                workflow = str(result.get('workflow_state') or 'candidate')
+                workflow_index = workflow_combo.findData(workflow)
+                workflow_combo.setCurrentIndex(
+                    workflow_index if workflow_index >= 0 else 0
+                )
+                evidence_notes.setText(str(result.get('evidence_notes') or ''))
+                finding_state_label.setText(
+                    f'{_finding_status_label(result)} · '
+                    f'{WORKFLOW_STATE_LABELS.get(workflow, workflow.title())}'
+                )
+                action_status.setText(
+                    '' if request_spec is not None
+                    else 'This result does not include an exact replayable request.'
+                )
+
+            def copy_selected(format_name):
+                result = selected_result['value']
+                if not isinstance(result, dict):
+                    return
+                text = (
+                    _finding_to_curl(result)
+                    if format_name == 'curl'
+                    else _finding_to_python(result)
+                )
+                try:
+                    QApplication.clipboard().setText(text)
+                    action_status.setText(
+                        f'Copied {format_name} reproduction to the clipboard.'
+                    )
+                except Exception as exc:
+                    action_status.setText(f'Copy failed: {exc}')
+
+            def send_selected_to_repeater():
+                result = selected_result['value']
+                if finding_request_spec(result) is None:
+                    return
+                self._repeater_load(result)
+
+            def target_authorized_for_retest(url):
+                engagement_id = (
+                    getattr(self, '_current_engagement_id', None)
+                    or self._prefs.get('current_engagement_id')
+                )
+                if engagement_id and self._db:
+                    engagement = self._db.get_engagement(int(engagement_id))
+                    if engagement:
+                        return _engagement_authorizes(
+                            url,
+                            engagement.get('scope') or [],
+                            engagement.get('exclusions') or [],
+                        )
+                authorize_path = (
+                    (self._prefs.get('advanced') or {}).get('authorize')
+                )
+                if authorize_path:
+                    from .authorization import is_authorized, load_allowlist
+                    return is_authorized(url, load_allowlist(authorize_path))
+                return False
+
+            def retest_selected():
+                result = selected_result['value']
+                spec = finding_request_spec(result)
+                if spec is None:
+                    return
+                if not target_authorized_for_retest(spec['url']):
+                    QMessageBox.warning(
+                        dlg,
+                        'Authorization required',
+                        'Select an engagement or allowlist that authorizes this '
+                        'request before re-testing it.',
+                    )
+                    return
+
+                retest_btn.setEnabled(False)
+                action_status.setText('Re-testing the exact recorded request…')
+                pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
+                def send_request():
+                    import requests
+
+                    kwargs = {
+                        'method': spec['method'],
+                        'url': spec['url'],
+                        'headers': spec['headers'] or None,
+                        'timeout': 20,
+                        'verify': False,
+                        'allow_redirects': False,
+                    }
+                    body = spec.get('body')
+                    content_type = next(
+                        (
+                            str(value).lower()
+                            for key, value in spec['headers'].items()
+                            if str(key).lower() == 'content-type'
+                        ),
+                        '',
+                    )
+                    if isinstance(body, dict) and 'json' in content_type:
+                        kwargs['json'] = body
+                    elif body is not None:
+                        kwargs['data'] = body
+                    started = time.monotonic()
+                    response = requests.request(**kwargs)
+                    return (
+                        response.status_code,
+                        len(response.content),
+                        int((time.monotonic() - started) * 1000),
+                    )
+
+                future = pool.submit(send_request)
+                timer = QTimer(dlg)
+
+                def poll_retest():
+                    if not future.done():
+                        return
+                    timer.stop()
+                    pool.shutdown(wait=False)
+                    retest_btn.setEnabled(True)
+                    try:
+                        status, size, elapsed = future.result()
+                        action_status.setText(
+                            f'Re-test returned HTTP {status}, {size} bytes in '
+                            f'{elapsed} ms. Compare the evidence before validating.'
+                        )
+                    except Exception as exc:
+                        action_status.setText(f'Re-test failed: {exc}')
+
+                timer.timeout.connect(poll_retest)
+                timer.start(100)
+
+            def save_workflow_state():
+                result = selected_result['value']
+                if not isinstance(result, dict):
+                    return
+                state = str(workflow_combo.currentData() or 'candidate')
+                notes = evidence_notes.text().strip()
+                result['workflow_state'] = state
+                result['evidence_notes'] = notes
+                result_id = result.get('db_result_id') or result.get('id')
+                persisted = False
+                if self._db and result_id:
+                    try:
+                        persisted = self._db.update_finding_state(
+                            int(result_id), state, notes
+                        )
+                    except Exception:
+                        persisted = False
+                finding_state_label.setText(
+                    f'{_finding_status_label(result)} · '
+                    f'{WORKFLOW_STATE_LABELS.get(state, state.title())}'
+                )
+                action_status.setText(
+                    'Workflow state saved.'
+                    if persisted else
+                    'Workflow state updated for this workspace session.'
+                )
+
             def update_results_tree():
                 """Update the results tree based on current selection, filters, and search."""
                 results_tree.clear()
+                set_selected_result(None)
                 
                 # Get selected site
                 sel = site_list.currentItem()
@@ -9430,10 +10673,12 @@ def main() -> None:
                 target_key = sel.data(256)  # Qt.UserRole
                 
                 sort_idx = sort_combo.currentIndex()
-                filter_idx = filter_combo.currentIndex()
+                filter_key = filter_combo.currentData() or 'all'
                 search_text = search_edit.text().strip()
                 
-                results = get_filtered_sorted_results(target_key, sort_idx, filter_idx, search_text)
+                results = get_filtered_sorted_results(
+                    target_key, sort_idx, filter_key, search_text
+                )
                 
                 # Group by category for better organization
                 by_category = {}
@@ -9458,11 +10703,11 @@ def main() -> None:
 
                         # Keep candidates visually distinct from confirmed findings.
                         if state == 'confirmed':
-                            technique = f'\u2705 {technique}'
+                            technique = f'Confirmed · {technique}'
                         elif state == 'candidate':
-                            technique = f'⚠️ {technique}'
-                        
-                        child = QTreeWidgetItem([technique, f'{severity_icons.get(sev, "")} {sev}', category, reason])
+                            technique = f'Candidate · {technique}'
+
+                        child = QTreeWidgetItem([technique, sev, category, reason])
                         try:
                             child.setForeground(1, QBrush(QColor(severity_colors.get(sev, '#ffffff'))))
                         except Exception:
@@ -9471,80 +10716,21 @@ def main() -> None:
                         # Store full result data for details view
                         child.setData(0, 257, r)  # Qt.UserRole + 1
                         parent.addChild(child)
-                        # Inline accordion: one hidden detail sub-row, rendered lazily
-                        # the first time the finding is expanded (see on_finding_expanded).
-                        detail = QTreeWidgetItem(['', '', '', ''])
-                        detail.setData(0, 259, '__detail__')
-                        child.addChild(detail)
-                        try:
-                            detail.setFirstColumnSpanned(True)
-                        except Exception:
-                            pass
 
                     parent.setExpanded(True)
             
             def on_site_selected():
                 """Handle site selection change."""
                 update_results_tree()
-                details_text.clear()
-            
+
             def on_result_selected():
                 """Show details for selected result."""
                 sel = results_tree.currentItem()
                 r = sel.data(0, 257) if sel else None  # Qt.UserRole + 1
-                # Findings carry a result dict; category parents and the inline
-                # detail sub-rows do not, so they just clear the panel.
-                if not isinstance(r, dict):
-                    details_text.clear()
-                    return
-
-                # The bottom panel and inline accordion intentionally share one
-                # renderer, so verification/evidence cannot silently diverge.
-                details_text.setHtml(build_finding_detail_html(r))
+                set_selected_result(r)
             
-            def on_finding_expanded(item):
-                """Lazily render a finding's inline detail the first time it is
-                expanded, so hundreds of findings stay cheap (only expanded rows pay
-                the HTML/widget cost). No-op for category parents and detail rows."""
-                r = item.data(0, 257)
-                if not isinstance(r, dict) or item.childCount() < 1:
-                    return
-                if item.data(0, 258):  # already built
-                    return
-                detail = item.child(0)
-                try:
-                    browser = QtWidgets.QTextBrowser()
-                    browser.setOpenExternalLinks(True)
-                    browser.setStyleSheet('QTextBrowser { background-color: #16181a; color: #d7e1ea; border: none; }')
-                    browser.setHtml(build_finding_detail_html(r))
-                    try:
-                        vw = results_tree.viewport().width() - 48
-                    except Exception:
-                        vw = 800
-                    if vw < 200:
-                        vw = 800
-                    doc = browser.document()
-                    doc.setTextWidth(vw)
-                    h = max(60, min(int(doc.size().height()) + 16, 460))
-                    browser.setFixedHeight(h)
-                    detail.setSizeHint(0, QtCore.QSize(0, h))
-                    try:
-                        detail.setFirstColumnSpanned(True)
-                    except Exception:
-                        pass
-                    results_tree.setItemWidget(detail, 0, browser)
-                    item.setData(0, 258, True)
-                except Exception:
-                    pass
-
-            def on_finding_clicked(item, _col):
-                """Expand-on-click: clicking a finding row toggles its inline detail."""
-                r = item.data(0, 257)
-                if isinstance(r, dict) and item.childCount() >= 1:
-                    item.setExpanded(not item.isExpanded())
-
             def expand_all():
-                # Expand category groups only (cheap); finding accordions render on demand.
+                # Only category groups are expandable; evidence stays in one pane.
                 for i in range(results_tree.topLevelItemCount()):
                     results_tree.topLevelItem(i).setExpanded(True)
 
@@ -9557,10 +10743,13 @@ def main() -> None:
             filter_combo.currentIndexChanged.connect(lambda: update_results_tree())
             search_edit.textChanged.connect(lambda: update_results_tree())
             results_tree.currentItemChanged.connect(on_result_selected)
-            results_tree.itemExpanded.connect(on_finding_expanded)
-            results_tree.itemClicked.connect(on_finding_clicked)
             expand_btn.clicked.connect(expand_all)
             collapse_btn.clicked.connect(collapse_all)
+            copy_curl_btn.clicked.connect(lambda: copy_selected('curl'))
+            copy_python_btn.clicked.connect(lambda: copy_selected('python'))
+            repeater_btn.clicked.connect(send_selected_to_repeater)
+            retest_btn.clicked.connect(retest_selected)
+            save_state_btn.clicked.connect(save_workflow_state)
             
             # Select "All Sites" by default
             site_list.setCurrentRow(0)
@@ -9570,30 +10759,48 @@ def main() -> None:
             
             # HTTP Log button (only if data exists)
             if self._http_log:
-                http_log_btn = QPushButton(_t('view_http_log', self._lang) if 'view_http_log' in TRANSLATIONS.get(self._lang, {}) else '📝 View HTTP Log')
-                http_log_btn.setStyleSheet('QPushButton { background-color: #1f6feb; } QPushButton:hover { background-color: #388bfd; }')
+                http_log_btn = style_button(
+                    QPushButton(),
+                    'quiet',
+                    text=(
+                        _t('view_http_log', self._lang)
+                        if 'view_http_log' in TRANSLATIONS.get(self._lang, {})
+                        else 'View HTTP log'
+                    ),
+                )
                 http_log_btn.clicked.connect(self._show_http_log_dialog)
                 bottom_layout.addWidget(http_log_btn)
             
             # SSL Analysis button (only if data exists)
             if self._ssl_info and self._ssl_info.get('ssl_enabled'):
-                ssl_info_btn = QPushButton(_t('view_ssl_info', self._lang) if 'view_ssl_info' in TRANSLATIONS.get(self._lang, {}) else '🔐 View SSL/TLS Info')
-                ssl_info_btn.setStyleSheet('QPushButton { background-color: #238636; } QPushButton:hover { background-color: #2ea043; }')
+                ssl_info_btn = style_button(
+                    QPushButton(),
+                    'quiet',
+                    text=(
+                        _t('view_ssl_info', self._lang)
+                        if 'view_ssl_info' in TRANSLATIONS.get(self._lang, {})
+                        else 'View TLS details'
+                    ),
+                )
                 ssl_info_btn.clicked.connect(self._show_ssl_info_dialog)
                 bottom_layout.addWidget(ssl_info_btn)
             
             bottom_layout.addStretch()
             
-            export_btn = QPushButton(_t('export_view', self._lang))
+            export_btn = style_button(
+                QPushButton(), 'secondary', text='Export current view'
+            )
             export_btn.clicked.connect(lambda: self._export_results_view(get_filtered_sorted_results(
                 site_list.currentItem().data(256) if site_list.currentItem() else '__ALL__',
                 sort_combo.currentIndex(),
-                filter_combo.currentIndex(),
+                filter_combo.currentData() or 'all',
                 search_edit.text().strip()
             )))
             bottom_layout.addWidget(export_btn)
             
-            close_btn = QPushButton(_t('close', self._lang))
+            close_btn = style_button(
+                QPushButton(), 'quiet', text='Back to scan'
+            )
             close_btn.clicked.connect(lambda: self._navigate('scan'))
             bottom_layout.addWidget(close_btn)
 
@@ -10867,10 +12074,14 @@ def main() -> None:
 
                 header_row = QHBoxLayout()
                 title_box = QVBoxLayout()
-                title = QLabel('Dashboard')
+                title = QLabel('Report')
                 title.setObjectName('PageTitle')
-                subtitle = QLabel('Scan history, finding mix, and workflow pressure.')
+                subtitle = QLabel(
+                    'A compact workspace summary. Drag the divider below to '
+                    'give either table more room.'
+                )
                 subtitle.setObjectName('FieldLabel')
+                subtitle.setWordWrap(True)
                 title_box.addWidget(title)
                 title_box.addWidget(subtitle)
                 header_row.addLayout(title_box)
@@ -10891,26 +12102,26 @@ def main() -> None:
                     ('Bypasses', stats.get('total_bypasses', 0)),
                     ('Targets', len(stats.get('top_targets', []) or [])),
                 ]
-                for col, (label, value) in enumerate(metric_values):
+                for index, (label, value) in enumerate(metric_values):
+                    row, col = divmod(index, 2)
                     val = QLabel(str(value))
                     val.setFont(QFont('', 22, QFont.Bold))
                     name = QLabel(label)
                     name.setObjectName('FieldLabel')
                     val.setAlignment(Qt.AlignmentFlag.AlignCenter)
                     name.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                    metrics_layout.addWidget(val, 0, col)
-                    metrics_layout.addWidget(name, 1, col)
+                    metrics_layout.addWidget(val, row * 2, col)
+                    metrics_layout.addWidget(name, row * 2 + 1, col)
                     metrics_layout.setColumnStretch(col, 1)
-                layout.addWidget(metrics)
-
                 sev_dist = stats.get('severity_distribution', {})
                 sev_colors = {'CRITICAL': '#dc2626', 'HIGH': '#ea580c', 'MEDIUM': '#ca8a04', 'LOW': '#2563eb', 'INFO': '#6b7280'}
                 severity_frame = QtWidgets.QFrame()
                 severity_frame.setObjectName('Card')
-                severity_layout = QHBoxLayout(severity_frame)
+                severity_layout = QtWidgets.QGridLayout(severity_frame)
                 severity_layout.setContentsMargins(12, 10, 12, 10)
                 severity_layout.setSpacing(8)
-                for sev in ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO']:
+                for index, sev in enumerate(
+                        ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO']):
                     item = QtWidgets.QFrame()
                     item.setObjectName('DashboardPill')
                     item_layout = QHBoxLayout(item)
@@ -10921,14 +12132,29 @@ def main() -> None:
                     item_layout.addWidget(dot)
                     item_layout.addWidget(txt)
                     item_layout.addStretch()
-                    severity_layout.addWidget(item)
-                layout.addWidget(severity_frame)
+                    row, col = divmod(index, 3)
+                    severity_layout.addWidget(item, row, col)
+                    severity_layout.setColumnStretch(col, 1)
+                summary_splitter = QtWidgets.QSplitter(
+                    Qt.Orientation.Horizontal
+                )
+                summary_splitter.setObjectName('ReportSummarySplitter')
+                summary_splitter.setChildrenCollapsible(False)
+                summary_splitter.addWidget(metrics)
+                summary_splitter.addWidget(severity_frame)
+                summary_splitter.setStretchFactor(0, 2)
+                summary_splitter.setStretchFactor(1, 3)
+                summary_splitter.setSizes([380, 620])
+                layout.addWidget(summary_splitter)
 
                 tables = QtWidgets.QSplitter()
+                tables.setObjectName('ReportTablesSplitter')
                 tables.setOrientation(Qt.Orientation.Horizontal)
+                tables.setChildrenCollapsible(False)
                 layout.addWidget(tables, 1)
 
                 tech_box = QtWidgets.QWidget()
+                tech_box.setMinimumWidth(220)
                 tech_layout = QVBoxLayout(tech_box)
                 tech_layout.setContentsMargins(0, 0, 8, 0)
                 tech_title = QLabel('Top Techniques')
@@ -10952,6 +12178,7 @@ def main() -> None:
                 tables.addWidget(tech_box)
 
                 activity_box = QtWidgets.QWidget()
+                activity_box.setMinimumWidth(280)
                 activity_layout = QVBoxLayout(activity_box)
                 activity_layout.setContentsMargins(8, 0, 0, 0)
                 activity_title = QLabel('Recent Activity')
@@ -10974,7 +12201,9 @@ def main() -> None:
                     activity_table.setItem(r, 3, QtWidgets.QTableWidgetItem(str(item.get('bypasses', 0))))
                 activity_layout.addWidget(activity_table)
                 tables.addWidget(activity_box)
-                tables.setSizes([520, 520])
+                tables.setStretchFactor(0, 2)
+                tables.setStretchFactor(1, 3)
+                tables.setSizes([420, 620])
 
                 if not (stats.get('top_techniques') or stats.get('recent_activity')):
                     empty = QLabel('No scan history yet.')
@@ -12503,14 +13732,17 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                     if os.path.exists(tmpf.name):
                         with open(tmpf.name, 'r', encoding='utf-8') as f:
                             data = json.load(f)
-                        if isinstance(data, list):
-                            self._results.extend(data)
+                        report = recon_report_parts(data)
+                        findings = report['findings']
+                        if findings:
+                            self._results.extend(findings)
                             try:
                                 self._live_refresh()
                             except Exception:
                                 pass
                             self.append_log(
-                                f"[scheduler] recon finished: {len(data)} finding(s) for {target}\n")
+                                f"[scheduler] recon finished: "
+                                f"{len(findings)} finding(s) for {target}\n")
                         os.unlink(tmpf.name)
                 except Exception as e:
                     self.append_log(f"[scheduler] recon parse failed: {e}\n")
@@ -12603,24 +13835,24 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
             from PySide6.QtGui import QPalette, QColor
             app.setStyle('Fusion')
             dark_palette = QPalette()
-            dark_palette.setColor(QPalette.Window, QColor(22, 24, 26))
-            dark_palette.setColor(QPalette.WindowText, QColor(215, 225, 234))
-            dark_palette.setColor(QPalette.Base, QColor(15, 17, 18))
-            dark_palette.setColor(QPalette.AlternateBase, QColor(22, 24, 26))
-            dark_palette.setColor(QPalette.ToolTipBase, QColor(215, 225, 234))
-            dark_palette.setColor(QPalette.ToolTipText, QColor(215, 225, 234))
-            dark_palette.setColor(QPalette.Text, QColor(215, 225, 234))
-            dark_palette.setColor(QPalette.Button, QColor(43, 47, 51))
-            dark_palette.setColor(QPalette.ButtonText, QColor(215, 225, 234))
+            dark_palette.setColor(QPalette.Window, QColor(12, 15, 18))
+            dark_palette.setColor(QPalette.WindowText, QColor(232, 226, 216))
+            dark_palette.setColor(QPalette.Base, QColor(17, 21, 25))
+            dark_palette.setColor(QPalette.AlternateBase, QColor(22, 27, 32))
+            dark_palette.setColor(QPalette.ToolTipBase, QColor(22, 27, 32))
+            dark_palette.setColor(QPalette.ToolTipText, QColor(232, 226, 216))
+            dark_palette.setColor(QPalette.Text, QColor(232, 226, 216))
+            dark_palette.setColor(QPalette.Button, QColor(26, 32, 38))
+            dark_palette.setColor(QPalette.ButtonText, QColor(232, 226, 216))
             dark_palette.setColor(QPalette.BrightText, QColor(255, 77, 77))
-            dark_palette.setColor(QPalette.Link, QColor(88, 166, 255))
-            dark_palette.setColor(QPalette.Highlight, QColor(99, 102, 241))
-            dark_palette.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
+            dark_palette.setColor(QPalette.Link, QColor(201, 154, 69))
+            dark_palette.setColor(QPalette.Highlight, QColor(201, 154, 69))
+            dark_palette.setColor(QPalette.HighlightedText, QColor(17, 16, 13))
             app.setPalette(dark_palette)
         except Exception:
             pass
 
-        # Apply the centralized modern neutral-dark theme (global QSS).
+        # Apply the centralized midnight-and-brass theme (global QSS).
         try:
             try:
                 from .theme import apply_theme
@@ -12649,18 +13881,7 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
         
         w = PierceQtApp()
         w.show()
-        # run the Qt event loop and capture exit code so we can cleanup the tmp watermark
-        rc = app.exec()
-        try:
-            tmp = getattr(w, '_qt_watermark_tmp', None)
-            if tmp and os.path.exists(tmp):
-                try:
-                    os.remove(tmp)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        return rc
+        return app.exec()
 
     # run Qt GUI
     return_code = run_qt()

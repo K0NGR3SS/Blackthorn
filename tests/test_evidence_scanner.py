@@ -116,6 +116,28 @@ def test_route_miss_to_success_is_candidate_but_auth_denial_is_confirmed():
     assert auth_change['evidence'][0]['type'] == 'blocked_to_allowed'
 
 
+def test_dynamic_endpoint_uses_closest_sampled_control():
+    control_a = {
+        'status': 200, 'size': 11, 'text': 'variant one',
+        'normalized': 'variant one', 'headers': {}, 'location': '',
+    }
+    control_b = {
+        'status': 200, 'size': 27, 'text': 'legitimate rotating variant',
+        'normalized': 'legitimate rotating variant', 'headers': {}, 'location': '',
+    }
+    observed = dict(control_b)
+    sampled_control = {
+        **control_a,
+        'samples': [control_a, control_b],
+    }
+
+    verdict = analyze_response(observed, sampled_control)
+
+    assert verdict['bypass'] is False
+    assert verdict['comparison']['similarity'] == 1.0
+    assert verdict['comparison']['control_samples'] == 2
+
+
 def test_same_endpoint_control_prevents_route_delta_finding(baselined_scanner):
     result = baselined_scanner._test_request(
         path='/endpoint-specific?name=mutated',
@@ -231,4 +253,34 @@ def test_imported_query_stays_separate_and_request_context_survives(
         },
         'body': body,
         'url': f'{mock_waf}/search?mode=preview&empty=',
+        'parameter_location': None,
     }]
+
+
+def test_imported_post_json_and_query_create_separate_mutation_surfaces(
+        mock_waf):
+    scanner = CloudFrontBypasser(
+        mock_waf, threads=1, delay=0, timeout=5,
+        enable_crawl=False, enable_schema=False,
+    )
+    scanner.crawl_targets = [{
+        'path': '/api/search',
+        'params': {'preview': '1'},
+        'method': 'POST',
+        'headers': {
+            'Content-Type': 'application/json',
+            'Content-Length': '999',
+            'Host': 'captured.invalid',
+        },
+        'body': '{"query":"hello","limit":10}',
+    }]
+
+    targets = scanner._injection_targets()
+
+    assert [target['mutation_location'] for target in targets] == [
+        'query', 'json',
+    ]
+    assert targets[0]['mutation_fields'] == {'preview': '1'}
+    assert targets[1]['mutation_fields'] == {'query': 'hello', 'limit': 10}
+    assert 'Content-Length' not in targets[1]['headers']
+    assert 'Host' not in targets[1]['headers']

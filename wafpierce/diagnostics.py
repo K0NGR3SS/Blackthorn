@@ -151,11 +151,10 @@ def _check_oob() -> Tuple[bool, str]:
 
 def _check_recon_tools() -> List[Tuple[str, bool, str]]:
     """(label, available, hint) for each required external recon binary."""
-    import shutil
-    from .recon import REQUIRED_TOOLS
+    from .recon import REQUIRED_TOOLS, _which
     rows = []
     for binary, label, _stage, hint in REQUIRED_TOOLS:
-        path = shutil.which(binary)
+        path = _which(binary)
         rows.append((label, path is not None, path or hint))
     return rows
 

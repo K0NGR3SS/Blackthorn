@@ -48,6 +48,23 @@ def test_session_expiry_detection():
     assert CloudFrontBypasser.looks_like_session_expiry(200, 'welcome back, user') is False
 
 
+def test_reauthentication_reports_success_for_probe_replay(
+        mock_waf, monkeypatch):
+    scanner = CloudFrontBypasser(
+        mock_waf, threads=1, delay=0, timeout=3,
+        auth={'login': {'url': '/login'}},
+    )
+    scanner._last_reauth = 0
+    monkeypatch.setattr(scanner, '_perform_login', lambda _login: True)
+
+    response = type('Response', (), {
+        'status_code': 401,
+        'text': 'session expired',
+    })()
+
+    assert scanner._maybe_reauth(response) is True
+
+
 def test_feedback_db_attached_by_create_scanner(tmp_path, monkeypatch, mock_waf):
     # create_scanner should attach a feedback DB when db-extras are enabled.
     import wafpierce.pierce as p

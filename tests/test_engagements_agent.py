@@ -25,13 +25,15 @@ def test_engagement_roundtrip_and_finding_state():
     assert got['scope'] == ['example.com', 'api.example.com']
 
     db.create_scan('scan-1', ['https://example.com'], engagement_id=eid)
-    db.add_result('scan-1', {
+    result_id = db.add_result('scan-1', {
         'target': 'https://example.com',
         'technique': 'Header Bypass',
         'severity': 'HIGH',
         'engagement_id': eid,
     })
+    assert isinstance(result_id, int) and result_id > 0
     result = db.get_scan_results('scan-1')[0]
+    assert result['id'] == result_id
     assert result['workflow_state'] == 'candidate'
     assert result['engagement_id'] == eid
     assert db.update_finding_state(result['id'], 'validated', 'minimal repro captured')
@@ -62,6 +64,22 @@ def test_scan_result_preserves_canonical_evidence_and_response_status():
     assert saved['evidence'][0]['type'] == 'execution_marker'
     assert saved['baseline']['scope'] == 'matched'
     assert saved['comparison']['similarity'] == 0.2
+
+
+def test_observations_default_to_informative_workflow_state():
+    db = _db()
+    db.create_scan('scan-info', ['https://example.com'])
+    result_id = db.add_result('scan-info', {
+        'target': 'https://example.com',
+        'technique': 'Open port',
+        'kind': 'observation',
+        'verification_status': 'informational',
+    })
+
+    saved = db.get_scan_results('scan-info')[0]
+
+    assert saved['id'] == result_id
+    assert saved['workflow_state'] == 'informative'
 
 
 def test_agent_reads_scope_and_refuses_out_of_scope_scan():

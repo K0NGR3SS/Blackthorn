@@ -8,9 +8,15 @@ import os
 from wafpierce.gui import (
     _finding_url, _finding_to_curl, _finding_to_python, _finding_proof_html,
     _advanced_cli_flags, _finding_status_label, _is_candidate_result,
+    _engagement_authorizes,
     profile_from_prefs, merge_profile, PROFILE_KEYS,
     _load_prefs, _normalize_language, _save_prefs,
     BANNER_PATH, LOGO_PATH, SIDEBAR_LOGO_PATH,
+    LEGAL_ACCEPTANCE_VERSION, SCAN_CATEGORIES_GUI, SCAN_PROFILE_DEFINITIONS,
+    legal_acceptance_is_current, parse_scan_phase_event,
+    scan_preflight_summary, scan_profile_settings,
+    finding_request_spec, result_matches_filter,
+    filter_recon_hosts, recon_host_filter_options, recon_report_parts,
 )
 
 
@@ -90,7 +96,141 @@ def test_gui_status_distinguishes_candidate_from_confirmed():
     assert _is_candidate_result(candidate)
     assert 'CANDIDATE' in _finding_status_label(candidate)
     assert 'CONFIRMED' in _finding_status_label(confirmed)
-    assert 'Observation' in _finding_status_label(observation)
+    assert 'OBSERVATION' in _finding_status_label(observation)
+
+
+def test_results_filters_separate_evidence_state_from_workflow_state():
+    confirmed = {
+        'verification_status': 'confirmed',
+        'kind': 'finding',
+        'severity': 'HIGH',
+        'workflow_state': 'validated',
+    }
+    candidate = {
+        'verification_status': 'candidate',
+        'kind': 'suspected',
+        'severity': 'LOW',
+    }
+
+    assert result_matches_filter(confirmed, 'confirmed')
+    assert result_matches_filter(confirmed, 'high')
+    assert result_matches_filter(confirmed, 'workflow:validated')
+    assert not result_matches_filter(confirmed, 'needs_review')
+    assert result_matches_filter(candidate, 'candidate')
+    assert result_matches_filter(candidate, 'needs_review')
+
+
+def test_recon_report_normalizes_full_and_legacy_output():
+    full = recon_report_parts({
+        'target': 'example.com',
+        'findings': [{'technique': 'Discovery'}],
+        'stages': {'hosts': [{'hostname': 'api.example.com'}]},
+    })
+    legacy = recon_report_parts([{
+        'technique': 'Discovered Host',
+        'discovery': {'hostname': 'old.example.com'},
+    }])
+
+    assert full['target'] == 'example.com'
+    assert full['stages']['hosts'][0]['hostname'] == 'api.example.com'
+    assert legacy['stages']['hosts'][0]['hostname'] == 'old.example.com'
+
+
+def test_recon_host_filters_separate_dns_and_http_liveness():
+    hosts = [
+        {
+            'hostname': 'web.example.com',
+            'dns_live': True,
+            'http_live': True,
+            'http_status': 200,
+            'http_url': 'https://web.example.com',
+            'ip_addresses': ['192.0.2.1'],
+            'sources': ['subfinder'],
+            'technologies': ['nginx'],
+        },
+        {
+            'hostname': 'mail.example.com',
+            'dns_live': True,
+            'http_live': False,
+            'ip_addresses': ['192.0.2.2'],
+            'sources': ['amass'],
+        },
+        {
+            'hostname': 'old.example.com',
+            'dns_live': False,
+            'http_live': False,
+            'sources': ['certificate transparency'],
+        },
+        {
+            'hostname': 'redirect.example.com',
+            'dns_live': True,
+            'http_live': True,
+            'http_status': 301,
+            'http_url': 'https://redirect.example.com',
+            'sources': ['certificate transparency'],
+        },
+        {
+            'hostname': 'denied.example.com',
+            'dns_live': True,
+            'http_live': True,
+            'http_status': '403',
+            'http_url': 'https://denied.example.com',
+            'sources': ['amass'],
+        },
+    ]
+
+    assert [h['hostname'] for h in filter_recon_hosts(
+        hosts, 'web_live'
+    )] == [
+        'web.example.com', 'redirect.example.com', 'denied.example.com'
+    ]
+    assert [h['hostname'] for h in filter_recon_hosts(
+        hosts, 'resolved'
+    )] == [
+        'web.example.com', 'mail.example.com', 'redirect.example.com',
+        'denied.example.com',
+    ]
+    assert [h['hostname'] for h in filter_recon_hosts(
+        hosts, 'dns_no_http'
+    )] == ['mail.example.com']
+    assert [h['hostname'] for h in filter_recon_hosts(
+        hosts, 'http_status:200'
+    )] == ['web.example.com']
+    assert [h['hostname'] for h in filter_recon_hosts(
+        hosts, 'http_3xx'
+    )] == ['redirect.example.com']
+    assert [h['hostname'] for h in filter_recon_hosts(
+        hosts, 'http_4xx'
+    )] == ['denied.example.com']
+    assert [h['hostname'] for h in filter_recon_hosts(
+        hosts, query='certificate'
+    )] == ['old.example.com', 'redirect.example.com']
+    assert [h['hostname'] for h in filter_recon_hosts(
+        hosts, query='403'
+    )] == ['denied.example.com']
+    options = recon_host_filter_options(hosts)
+    assert ('HTTP 200 only', 'http_status:200') in options
+    assert ('HTTP 301 only', 'http_status:301') in options
+    assert ('HTTP 403 only', 'http_status:403') in options
+
+
+def test_finding_request_spec_requires_an_exact_absolute_request():
+    spec = finding_request_spec({
+        'request': {
+            'method': 'POST',
+            'url': 'https://app.example.test/api',
+            'headers': {'Content-Type': 'application/json'},
+            'body': {'probe': 'bt'},
+        },
+    })
+
+    assert spec['method'] == 'POST'
+    assert spec['body'] == {'probe': 'bt'}
+    assert finding_request_spec({
+        'url': 'https://app.example.test',
+        'request': {'available': False},
+    }) is None
+    assert finding_request_spec({'path': '/relative'}) is None
 
 
 def test_gui_advanced_flags_forward_intrusive_opt_in():
@@ -102,6 +242,72 @@ def test_gui_advanced_flags_forward_intrusive_opt_in():
     assert '--intrusive' in flags
     assert flags[flags.index('--scope-include') + 1] == '/api'
     assert '--oob' not in flags
+
+
+def test_gui_engagement_scope_is_fail_closed_and_honors_exclusions():
+    scope = ['https://app.example.test/api']
+    assert _engagement_authorizes(
+        'https://app.example.test/api/users', scope
+    )
+    assert not _engagement_authorizes(
+        'https://app.example.test/admin', scope
+    )
+    assert not _engagement_authorizes(
+        'https://app.example.test/api/logout',
+        scope,
+        ['https://app.example.test/api/logout'],
+    )
+    assert not _engagement_authorizes('https://app.example.test/api', [])
+
+
+def test_task_profiles_only_reference_registered_categories():
+    registered = set(SCAN_CATEGORIES_GUI)
+    for definition in SCAN_PROFILE_DEFINITIONS.values():
+        assert set(definition['categories']) <= registered
+        assert definition['intrusive'] is False
+        assert definition['reconfirm'] is True
+
+    custom = scan_profile_settings('custom', ['jwt_auth'])
+    assert custom['categories'] == ('jwt_auth',)
+
+
+def test_preflight_summary_exposes_safety_verification_and_authorization():
+    summary = scan_preflight_summary(
+        ['https://app.example.test'],
+        'Authenticated app',
+        ['jwt_auth', 'business_logic'],
+        {
+            'safe_mode': True,
+            'no_reconfirm': False,
+            'engagement_id': 7,
+        },
+    )
+
+    assert '1 target' in summary
+    assert '2 categories' in summary
+    assert 'safe mode' in summary
+    assert 're-confirmation on' in summary
+    assert 'engagement scope linked' in summary
+
+
+def test_structured_scan_phase_events_are_strict_and_bounded():
+    assert parse_scan_phase_event(
+        '::blackthorn-phase::{"label":"Testing selected techniques","progress":45}'
+    ) == ('Testing selected techniques', 45)
+    assert parse_scan_phase_event(
+        '::blackthorn-phase::{"label":"Done","progress":800}'
+    ) == ('Done', 100)
+    assert parse_scan_phase_event('[*] Testing selected techniques') is None
+    assert parse_scan_phase_event('::blackthorn-phase::{broken') is None
+
+
+def test_legal_acceptance_is_versioned():
+    assert legal_acceptance_is_current({
+        'legal_accepted_version': LEGAL_ACCEPTANCE_VERSION,
+    })
+    assert not legal_acceptance_is_current({
+        'legal_accepted_version': 'older-copy',
+    })
 
 
 def test_finding_proof_html_renders_structured_evidence_and_escapes_values():

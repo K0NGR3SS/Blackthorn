@@ -49,12 +49,27 @@ from .error_handler import (
 from .repro import build_curl
 from .techniques_v16 import ExtraTechniques
 from .evidence import analyze_response, public_response, snapshot_response
+from .scan_capabilities import build_capability_catalog
 
 
 logger = logging.getLogger(__name__)
 
+_PHASE_EVENT_PREFIX = '::blackthorn-phase::'
+
 
 _REAL_STDOUT = None
+
+
+def _emit_phase_event(phase_id: str, label: str, progress: int) -> None:
+    """Emit one machine-readable GUI progress event alongside human logs."""
+    print(
+        _PHASE_EVENT_PREFIX + json.dumps({
+            'id': phase_id,
+            'label': label,
+            'progress': max(0, min(100, int(progress))),
+        }, separators=(',', ':')),
+        flush=True,
+    )
 
 
 def _quiet_stdout() -> None:
@@ -1129,6 +1144,10 @@ class CloudFrontBypasser(ExtraTechniques):
         self._baseline_norm = ""        # normalized baseline body for similarity
         self._baseline_jitter = 0       # observed size jitter band (bytes)
         self._baseline_dynamic = False  # True if the page changes between loads
+        self._baseline_samples: List[Dict[str, Any]] = []
+        # A matched endpoint control is sampled more than once so rotating
+        # tokens, counters, and A/B variants do not turn into false candidates.
+        self.control_samples = 2
 
         # Discovered endpoints/params (populated by the crawler / schema ingestion).
         # Each entry: {'path': str, 'params': {name: value}, 'method': str}
@@ -1297,6 +1316,17 @@ class CloudFrontBypasser(ExtraTechniques):
     DISABLED_ACCURACY_TECHNIQUES = {
         '_test_dns_rebinding',
     }
+
+    @classmethod
+    def capability_catalog(cls) -> Dict[str, Dict[str, object]]:
+        """Describe proof quality and safety requirements for every technique."""
+        return build_capability_catalog(
+            SCAN_CATEGORIES,
+            disabled_transport=cls.DISABLED_TRANSPORT_TECHNIQUES,
+            disabled_accuracy=cls.DISABLED_ACCURACY_TECHNIQUES,
+            intrusive=cls.INTRUSIVE_WORKFLOW_SKIP,
+            safe_skip=cls.SAFE_MODE_SKIP,
+        )
 
     def _in_scope(self, url: str) -> bool:
         """Scope guard for discovered/recon URLs. Exclude wins; if an include list
@@ -1663,12 +1693,14 @@ class CloudFrontBypasser(ExtraTechniques):
             ScanInterruptedError: If scan is interrupted
         """
         logger.info(f"Starting scan of {self.target}")
+        _emit_phase_event('prepare', 'Preparing target', 2)
         print(f"[*] Scanning {self.target}")
 
         # Start the clock for the optional --max-time budget.
         self._scan_start = time.monotonic()
 
         # Establish baseline first
+        _emit_phase_event('baseline', 'Establishing baseline', 8)
         print("[*] Establishing baseline...")
         try:
             baseline = self._get_baseline()
@@ -1684,6 +1716,9 @@ class CloudFrontBypasser(ExtraTechniques):
             self._baseline_headers = dict(baseline.headers)
             self._baseline_body_sample = baseline.text[:5000] if baseline.content else ""
             self._baseline_norm = _normalize_body(baseline.text if baseline.content else "")
+            self._baseline_samples = [
+                snapshot_response(baseline, _normalize_body)
+            ]
 
             # Multi-sample: fetch the baseline a couple more times to learn the
             # natural jitter of the page. Pages with CSRF tokens / timestamps change
@@ -1696,6 +1731,9 @@ class CloudFrontBypasser(ExtraTechniques):
                     if extra is not None:
                         sizes.append(len(extra.content))
                         norms.append(_normalize_body(extra.text if extra.content else ""))
+                        self._baseline_samples.append(
+                            snapshot_response(extra, _normalize_body)
+                        )
                 except Exception:
                     break
 
@@ -1729,6 +1767,7 @@ class CloudFrontBypasser(ExtraTechniques):
         print(f"[*] Testing bypass techniques...\n")
         
         # Run WAF Detection first
+        _emit_phase_event('fingerprint', 'Fingerprinting edge controls', 20)
         print("[*] Phase 1: WAF Detection & Fingerprinting...")
         waf_results = self._detect_waf()
         if waf_results:
@@ -1744,6 +1783,7 @@ class CloudFrontBypasser(ExtraTechniques):
             self.results.extend(cdn_results)
         
         # Detect target operating system
+        _emit_phase_event('platform', 'Profiling the application', 28)
         print("\n[*] Phase 2: OS Detection...")
         detected_os, os_confidence, os_results = self._detect_target_os()
         if os_results:
@@ -1751,6 +1791,7 @@ class CloudFrontBypasser(ExtraTechniques):
 
         # Discover real endpoints + params so injection tests hit live inputs.
         if self.enable_crawl or self.enable_schema or self.seed_targets:
+            _emit_phase_event('discovery', 'Discovering request surfaces', 36)
             print("\n[*] Phase 2.5: Endpoint & Parameter Discovery...")
             try:
                 self._run_discovery()
@@ -1767,6 +1808,7 @@ class CloudFrontBypasser(ExtraTechniques):
         elif self.oob and self.safe_mode:
             print("[*] Safe mode: skipped active out-of-band callback probes")
 
+        _emit_phase_event('testing', 'Testing selected techniques', 45)
         print("\n[*] Phase 3: Testing bypass techniques...")
         
         # Build technique list based on selected categories
@@ -2088,12 +2130,14 @@ class CloudFrontBypasser(ExtraTechniques):
         # demoted rather than shipped as findings.
         if self.reconfirm:
             try:
+                _emit_phase_event('verification', 'Re-confirming candidates', 88)
                 self._reconfirm_bypasses(samples=self.reconfirm_samples)
             except Exception as e:
                 logger.debug(f"Re-confirmation phase error: {e}")
 
         # Bring direct/legacy scanner records onto the same explicit state model
         # as the evidence-aware request path before they reach GUI/export/CI.
+        _emit_phase_event('finalize', 'Normalizing evidence', 96)
         self._normalize_result_records()
 
         # Backfill reproduction commands for any results built outside the
@@ -2124,6 +2168,7 @@ class CloudFrontBypasser(ExtraTechniques):
         actionable_count = sum(1 for r in self.results if _is_actionable_result(r))
         logger.info(f"Scan complete: {actionable_count} actionable findings, "
                     f"{len(self.results) - actionable_count} observations")
+        _emit_phase_event('complete', 'Scan complete', 100)
         return self.results
 
     @staticmethod
@@ -2138,27 +2183,28 @@ class CloudFrontBypasser(ExtraTechniques):
                    'authentication required')
         return any(m in sample for m in markers)
 
-    def _maybe_reauth(self, resp) -> None:
+    def _maybe_reauth(self, resp) -> bool:
         """Re-run the login flow if the session looks expired (throttled).
 
         Only active when authenticated scanning was configured with a login flow.
         """
         login = (self.auth or {}).get('login')
         if not isinstance(login, dict) or not login.get('url'):
-            return
+            return False
         try:
             if not self.looks_like_session_expiry(getattr(resp, 'status_code', 0),
                                                   getattr(resp, 'text', '') or ''):
-                return
+                return False
             now = time.time()
             if now - self._last_reauth < 30:   # throttle: at most once / 30s
-                return
+                return False
             self._last_reauth = now
             logger.info("Session looks expired; re-authenticating")
             print("[*] Session expired — re-authenticating")
-            self._perform_login(login)
+            return bool(self._perform_login(login))
         except Exception as e:
             logger.debug(f"Re-auth error: {e}")
+        return False
 
     def _reconfirm_bypasses(self, samples: int = 2, keep_threshold: float = 0.5) -> None:
         """Replay each flagged bypass ``samples`` more times and demote flukes.
@@ -2668,13 +2714,33 @@ class CloudFrontBypasser(ExtraTechniques):
                 incoming_params = dict(ep.get('params') or {})
                 params = dict(parse_qsl(parsed_path.query, keep_blank_values=True))
                 params.update(incoming_params)
-                method = ep.get('method', 'GET')
-                key = f"{method}:{path}:{','.join(sorted(params.keys()))}"
+                method = str(ep.get('method', 'GET')).upper()
+                body = ep.get('body')
+                body_names = []
+                if isinstance(body, dict):
+                    body_names = sorted(map(str, body.keys()))
+                elif isinstance(body, str) and body.strip():
+                    try:
+                        parsed_body = json.loads(body)
+                        if isinstance(parsed_body, dict):
+                            body_names = sorted(map(str, parsed_body.keys()))
+                    except Exception:
+                        try:
+                            body_names = sorted(
+                                key for key, _ in parse_qsl(body, keep_blank_values=True)
+                            )
+                        except Exception:
+                            pass
+                key = (
+                    f"{method}:{path}:{','.join(sorted(params.keys()))}:"
+                    f"{','.join(body_names)}"
+                )
                 if key not in discovered:
                     discovered[key] = {
                         'path': path, 'params': dict(params), 'method': method,
                         'headers': dict(ep.get('headers') or {}),
-                        'body': ep.get('body'), 'url': ep.get('url'),
+                        'body': body, 'url': ep.get('url'),
+                        'parameter_location': ep.get('parameter_location'),
                     }
 
         # Seed from imported traffic first (HAR/Postman/Burp).
@@ -2721,13 +2787,80 @@ class CloudFrontBypasser(ExtraTechniques):
             print(f"[+] Discovery complete: {len(self.crawl_targets)} testable endpoint(s)")
 
     def _injection_targets(self) -> List[Dict[str, Any]]:
-        """GET endpoints with parameters worth fuzzing.
+        """Return query and body mutation surfaces from discovered requests.
 
-        Falls back to a single root entry with a synthetic param so legacy probes
-        still run when nothing was discovered.
+        A single imported POST can yield two surfaces: URL query parameters and
+        top-level JSON/form fields. HTML form fields are represented as
+        ``params`` with a non-GET method and no captured body.
         """
-        targets = [t for t in self.crawl_targets
-                   if t.get('method', 'GET') == 'GET' and t.get('params')]
+        targets: List[Dict[str, Any]] = []
+        for raw in self.crawl_targets:
+            ep = dict(raw)
+            method = str(ep.get('method') or 'GET').upper()
+            params = dict(ep.get('params') or {})
+            body = ep.get('body')
+            headers = {
+                str(k): v for k, v in dict(ep.get('headers') or {}).items()
+                if str(k).lower() not in {'host', 'content-length'}
+            }
+
+            # GET params are query inputs. Captured non-GET requests can also
+            # carry query params alongside a request body.
+            if params and (method == 'GET' or body is not None
+                           or ep.get('parameter_location') == 'query'):
+                query_ep = dict(ep)
+                query_ep.update({
+                    'method': method,
+                    'headers': headers,
+                    'mutation_location': 'query',
+                    'mutation_fields': params,
+                })
+                targets.append(query_ep)
+
+            body_fields: Dict[str, Any] = {}
+            body_format = ''
+            if isinstance(body, dict):
+                body_fields = dict(body)
+                body_format = 'json'
+            elif isinstance(body, str) and body.strip():
+                content_type = next(
+                    (str(v).lower() for k, v in headers.items()
+                     if str(k).lower() == 'content-type'),
+                    '',
+                )
+                if 'json' in content_type or body.lstrip().startswith(('{', '[')):
+                    try:
+                        decoded = json.loads(body)
+                        if isinstance(decoded, dict):
+                            body_fields = decoded
+                            body_format = 'json'
+                    except Exception:
+                        pass
+                if not body_fields:
+                    try:
+                        pairs = parse_qsl(body, keep_blank_values=True)
+                        if pairs and ('=' in body or '&' in body):
+                            body_fields = dict(pairs)
+                            body_format = 'form'
+                    except Exception:
+                        pass
+
+            # HTML forms have no captured body yet: their field dictionary is
+            # the form body template.
+            if method != 'GET' and body is None and params:
+                body_fields = params
+                body_format = 'form'
+
+            if body_fields:
+                body_ep = dict(ep)
+                body_ep.update({
+                    'method': method,
+                    'headers': headers,
+                    'mutation_location': 'json' if body_format == 'json' else 'body',
+                    'mutation_fields': body_fields,
+                    'body_format': body_format,
+                })
+                targets.append(body_ep)
         return targets
 
     def _fuzz_param_endpoints(self, payloads: List[str], technique_prefix: str,
@@ -2735,41 +2868,71 @@ class CloudFrontBypasser(ExtraTechniques):
                               max_payloads: int = 8,
                               oracle: Optional[Dict[str, Any]] = None,
                               detector_id: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Inject ``payloads`` into each discovered parameter and batch-test.
-
-        For every discovered GET endpoint, each parameter is fuzzed in turn while
-        the other params keep their benign values, so requests stay realistic.
-        """
+        """Inject payloads into discovered query, form, and JSON fields."""
         from .crawler import build_injection_path
         targets = self._injection_targets()
         if not targets:
             return []
         test_cases = []
         for ep in targets[:max_endpoints]:
-            path, params = ep['path'], ep['params']
+            path = ep['path']
+            params = dict(ep.get('mutation_fields') or {})
+            method = str(ep.get('method') or 'GET').upper()
+            headers = dict(ep.get('headers') or {})
+            location = str(ep.get('mutation_location') or 'query')
+            query_params = dict(ep.get('params') or {})
             for pname in params:
                 for payload in payloads[:max_payloads]:
-                    inj = build_injection_path(path, params, pname, payload)
-                    control_path = build_injection_path(
-                        path, params, pname, params.get(pname, 'blackthorn-control')
-                    )
+                    request_path = path
+                    control_path = path
+                    request_data = ep.get('body')
+                    control_data = ep.get('body')
+                    if location == 'query':
+                        request_path = build_injection_path(path, params, pname, payload)
+                        control_path = build_injection_path(
+                            path, params, pname,
+                            params.get(pname, 'blackthorn-control'),
+                        )
+                    else:
+                        # Preserve captured query parameters while mutating only
+                        # one body field.
+                        if query_params:
+                            request_path = f"{path}?{urlencode(query_params, doseq=True)}"
+                            control_path = request_path
+                        mutated = dict(params)
+                        mutated[pname] = payload
+                        benign = dict(params)
+                        benign[pname] = params.get(pname, 'blackthorn-control')
+                        if ep.get('body_format') == 'json':
+                            request_data = json.dumps(mutated, separators=(',', ':'))
+                            control_data = json.dumps(benign, separators=(',', ':'))
+                            headers.setdefault('Content-Type', 'application/json')
+                        else:
+                            request_data = mutated
+                            control_data = benign
                     oracle_spec = dict(oracle or {})
                     if oracle_spec.get('value') == '$PAYLOAD':
                         oracle_spec['value'] = payload
                     if oracle_spec.get('type') == 'marker':
                         oracle_spec.setdefault('payload', payload)
                     test_cases.append({
-                        'headers': {},
-                        'path': inj,
+                        'headers': headers,
+                        'method': method,
+                        'path': request_path,
+                        'data': request_data,
                         'technique': f'{technique_prefix} [{pname}]: {payload[:30]}',
                         'category': category or 'INJECTION',
                         'payload': payload,
                         'parameter': pname,
-                        'insertion_point': {'type': 'query', 'name': pname},
+                        'insertion_point': {'type': location, 'name': pname},
                         'detector_id': detector_id or 'parameter-differential-v2',
                         'oracle': oracle_spec or None,
-                        'control': {'method': 'GET', 'path': control_path,
-                                    'headers': {}, 'data': None},
+                        'control': {
+                            'method': method,
+                            'path': control_path,
+                            'headers': headers,
+                            'data': control_data,
+                        },
                     })
         results = self._batch_test(test_cases) if test_cases else []
         if category:
@@ -3235,11 +3398,19 @@ class CloudFrontBypasser(ExtraTechniques):
             kwargs['proxies'] = {'http': proxy, 'https': proxy}
         self._limiter.acquire()
         try:
-            response = self._session.request(**kwargs)
-            self._log_http_transaction(method, url, req_headers, response)
-            if response is None:
+            samples: List[Dict[str, Any]] = []
+            for _ in range(max(1, int(getattr(self, 'control_samples', 2) or 1))):
+                response = self._session.request(**kwargs)
+                self._log_http_transaction(method, url, req_headers, response)
+                if response is not None:
+                    samples.append(snapshot_response(response, _normalize_body))
+            if not samples:
                 return None
-            snap = snapshot_response(response, _normalize_body)
+            # Keep one public representative and all internal samples. The
+            # evidence analyzer selects the closest legitimate control before
+            # calculating a differential.
+            snap = dict(samples[0])
+            snap['samples'] = [dict(sample) for sample in samples]
             snap['request'] = {
                 'method': method, 'path': path, 'url': url,
                 'headers': extra_headers, 'body': data,
@@ -3260,7 +3431,7 @@ class CloudFrontBypasser(ExtraTechniques):
             'cache-control', 'vary', 'www-authenticate', 'content-security-policy',
         }
         body = self._baseline_body_sample or ''
-        return {
+        snapshot = {
             'status': int(self._baseline_status or 0),
             'size': int(self._baseline_size or 0),
             'content_type': headers.get('content-type', ''),
@@ -3273,6 +3444,11 @@ class CloudFrontBypasser(ExtraTechniques):
             'request': {'method': 'GET', 'path': '/', 'url': self.target,
                         'headers': {}, 'body': None},
         }
+        if self._baseline_samples:
+            snapshot['samples'] = [
+                dict(sample) for sample in self._baseline_samples
+            ]
+        return snapshot
 
     def _test_request(
         self,
@@ -3373,7 +3549,14 @@ class CloudFrontBypasser(ExtraTechniques):
 
             # Authenticated scanning: re-login if the session looks expired.
             if resp.status_code in (401, 403) and (self.auth or {}).get('login'):
-                self._maybe_reauth(resp)
+                if self._maybe_reauth(resp):
+                    # The denied response belongs to the expired session, not
+                    # the probe. Replay the exact request once with the renewed
+                    # session so expiry does not create a false negative.
+                    resp = self._session.request(**req_kwargs)
+                    self._log_http_transaction(method, url, req_headers, resp)
+                    if resp is None:
+                        return None
 
             # Pacing delay (may have been adjusted by rate-limit handling),
             # plus optional random jitter to defeat rate-based heuristics.

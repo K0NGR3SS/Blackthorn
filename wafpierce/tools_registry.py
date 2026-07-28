@@ -243,7 +243,8 @@ def tools_by_category() -> Dict[str, list]:
     out: Dict[str, list] = {c: [] for c in TOOL_CATEGORIES}
     for spec in TOOL_REGISTRY.values():
         out.setdefault(spec.category, []).append(spec)
-    return out
+    # Do not render placeholder sections that contain no supported tools.
+    return {category: specs for category, specs in out.items() if specs}
 
 
 def get_spec(key: str) -> ToolSpec:

@@ -16,7 +16,7 @@ import base64
 import json
 import logging
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse, parse_qsl
+from urllib.parse import parse_qsl, urlencode, urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,56 @@ def _entry(url: str, method: str = 'GET', headers=None, body=None) -> Dict[str, 
     }
 
 
+def _pairs_body(items, *, name_key: str, value_key: str) -> Optional[str]:
+    """Serialize captured form fields without inventing values for file parts."""
+    pairs = []
+    for item in items or []:
+        if not isinstance(item, dict) or item.get('disabled'):
+            continue
+        name = item.get(name_key)
+        if (
+            not name
+            or item.get('type') == 'file'
+            or item.get('_postman_type') == 'file'
+        ):
+            continue
+        value = item.get(value_key)
+        pairs.append((str(name), '' if value is None else str(value)))
+    return urlencode(pairs, doseq=True) if pairs else None
+
+
+def _har_body(post_data: Dict[str, Any]) -> Optional[str]:
+    text = post_data.get('text')
+    if text is not None:
+        return str(text)
+    return _pairs_body(post_data.get('params'), name_key='name', value_key='value')
+
+
+def _postman_body(body_spec: Dict[str, Any]) -> Optional[str]:
+    mode = str(body_spec.get('mode') or '').lower()
+    if mode == 'raw' or (not mode and 'raw' in body_spec):
+        raw = body_spec.get('raw')
+        return None if raw is None else str(raw)
+    if mode == 'urlencoded':
+        return _pairs_body(
+            body_spec.get('urlencoded'), name_key='key', value_key='value'
+        )
+    if mode == 'formdata':
+        # Text-only multipart captures can still be fuzzed as a form template.
+        # File parts are intentionally skipped instead of reading local paths.
+        return _pairs_body(
+            body_spec.get('formdata'), name_key='key', value_key='value'
+        )
+    if mode == 'graphql':
+        graphql = body_spec.get('graphql') or {}
+        if isinstance(graphql, dict):
+            return json.dumps({
+                'query': graphql.get('query') or '',
+                'variables': graphql.get('variables') or {},
+            })
+    return None
+
+
 def from_har(path: str) -> List[Dict[str, Any]]:
     """Parse a HAR (HTTP Archive) file."""
     with open(path, 'r', encoding='utf-8', errors='replace') as f:
@@ -45,7 +95,7 @@ def from_har(path: str) -> List[Dict[str, Any]]:
             continue
         headers = {h.get('name'): h.get('value') for h in req.get('headers', [])
                    if h.get('name') and not h['name'].startswith(':')}
-        body = (req.get('postData') or {}).get('text')
+        body = _har_body(req.get('postData') or {})
         out.append(_entry(url, req.get('method', 'GET'), headers, body))
     return out
 
@@ -71,7 +121,7 @@ def from_postman(path: str) -> List[Dict[str, Any]]:
                 continue
             headers = {h.get('key'): h.get('value') for h in req.get('header', [])
                        if h.get('key')}
-            body = (req.get('body') or {}).get('raw')
+            body = _postman_body(req.get('body') or {})
             out.append(_entry(url, req.get('method', 'GET'), headers, body))
 
     _walk(coll.get('item', []))
