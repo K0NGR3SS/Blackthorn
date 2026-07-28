@@ -28,6 +28,7 @@ from typing import Callable, Dict, List, Optional
 
 from .tools_runtime import popen_killable, kill_proc_tree, run_tool
 from .tools_registry import TOOL_REGISTRY
+from .secret_store import get_tool_api_key, set_tool_api_key
 
 
 SCHEMA_VERSION = 1
@@ -116,16 +117,20 @@ def build_scan_argv(target: str, config: Dict, output_path: str,
                 '--delay', str(config.get('delay', 0.2)), '--output', output_path]
         if cats:
             argv += ['--categories', ','.join(cats)]
-        if config.get('safe_mode'):
+        if config.get('safe_mode') is True:
             argv += ['--safe-mode']
+        elif config.get('safe_mode') is False:
+            argv += ['--full-impact']
     else:
         argv = [python_exe, '-u', '-m', 'wafpierce.pierce', target,
                 '-t', str(config.get('threads', 10)), '-d', str(config.get('delay', 0.2)),
                 '-o', output_path]
         if cats:
             argv += ['-c', ','.join(cats)]
-        if config.get('safe_mode'):
+        if config.get('safe_mode') is True:
             argv += ['--safe-mode']
+        elif config.get('safe_mode') is False:
+            argv += ['--full-impact']
     return argv
 
 
@@ -266,12 +271,15 @@ class PipelineRunner:
 
     def _run_tool_stage(self, stage: Stage):
         tool = stage.config.get('tool')
+        legacy_api_key = stage.config.pop('api_key', None)
+        if legacy_api_key and tool:
+            set_tool_api_key(str(tool), str(legacy_api_key))
         extra = (stage.config.get('extra_args') or '')
         extra_list = extra.split() if isinstance(extra, str) else (extra or None)
         res = run_tool(tool, self.target,
                        extra_args=extra_list or None,
                        wordlist=stage.config.get('wordlist'),
-                       api_key=stage.config.get('api_key'),
+                       api_key=get_tool_api_key(str(tool)) or None,
                        on_line=self.hooks.log,
                        register_proc=self.hooks.register_proc,
                        timeout=self.tool_timeout,

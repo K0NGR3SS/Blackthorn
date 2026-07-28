@@ -35,6 +35,18 @@ def test_build_scan_argv_source_and_frozen():
     assert '--scan-worker' in frz and '--categories' in frz and '--safe-mode' in frz
 
 
+def test_build_scan_argv_requires_explicit_full_impact():
+    cfg = {'safe_mode': False}
+    src = pl.build_scan_argv(
+        'https://e', cfg, '/tmp/o.json', frozen=False, python_exe='py'
+    )
+    frz = pl.build_scan_argv(
+        'https://e', cfg, '/tmp/o.json', frozen=True, python_exe='py'
+    )
+    assert '--full-impact' in src
+    assert '--full-impact' in frz
+
+
 def test_db_pipeline_roundtrip():
     db = WAFPierceDB(db_path=os.path.join(tempfile.mkdtemp(), 'p.db'))
     pdef = pl.default_pipeline()

@@ -11852,11 +11852,11 @@ def _print_technique_list() -> None:
 _PROFILE_PRESETS = {
     'stealth':    {'threads': 3,  'delay': 1.0, 'jitter': 1.5, 'safe_mode': True,
                    'impersonate': 'chrome'},
-    'normal':     {'threads': 10, 'delay': 0.2, 'jitter': 0.0, 'safe_mode': False},
-    'aggressive': {'threads': 30, 'delay': 0.0, 'jitter': 0.0, 'safe_mode': False},
+    'normal':     {'threads': 10, 'delay': 0.2, 'jitter': 0.0, 'safe_mode': True},
+    'aggressive': {'threads': 30, 'delay': 0.0, 'jitter': 0.0, 'safe_mode': True},
 }
 # argparse defaults used to detect "user didn't set this".
-_ARG_DEFAULTS = {'threads': 10, 'delay': 0.2, 'jitter': 0.0, 'safe_mode': False,
+_ARG_DEFAULTS = {'threads': 10, 'delay': 0.2, 'jitter': 0.0, 'safe_mode': None,
                  'impersonate': None}
 
 
@@ -12066,8 +12066,16 @@ def main(argv=None):
                        help='Only test discovered URLs matching this regex (repeatable)')
     parser.add_argument('--scope-exclude', action='append', default=[], metavar='REGEX',
                        help='Never test discovered URLs matching this regex (repeatable)')
-    parser.add_argument('--safe-mode', action='store_true',
-                       help='Skip noisy/DoS-flavored and state-changing techniques')
+    safety_mode = parser.add_mutually_exclusive_group()
+    safety_mode.add_argument(
+        '--safe-mode', dest='safe_mode', action='store_true', default=None,
+        help='Skip noisy/DoS-flavored and state-changing techniques (default)',
+    )
+    safety_mode.add_argument(
+        '--full-impact', dest='safe_mode', action='store_false',
+        help='Disable safe mode for this authorized scan; state-changing workflows '
+             'still require --intrusive',
+    )
     parser.add_argument('--intrusive', action='store_true',
                        help='Explicitly enable guessed state-changing workflows (uploads, '
                             'emails, race/cache tests). Requires separate impact authorization.')
@@ -12166,6 +12174,8 @@ def main(argv=None):
 
     # Resolve --profile presets (explicit flags win) before anything reads them.
     _apply_profile(args)
+    if args.safe_mode is None:
+        args.safe_mode = True
 
     # A target is required (from the positional arg or the config file).
     if not args.target:

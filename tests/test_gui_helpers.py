@@ -244,6 +244,12 @@ def test_gui_advanced_flags_forward_intrusive_opt_in():
     assert '--oob' not in flags
 
 
+def test_gui_advanced_flags_forward_full_impact_opt_in():
+    flags = _advanced_cli_flags({'safe_mode': False, 'intrusive': False})
+    assert '--full-impact' in flags
+    assert '--safe-mode' not in flags
+
+
 def test_gui_engagement_scope_is_fail_closed_and_honors_exclusions():
     scope = ['https://app.example.test/api']
     assert _engagement_authorizes(

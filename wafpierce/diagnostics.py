@@ -25,6 +25,7 @@ OPTIONAL_COMPONENTS: List[Tuple[str, str, str, Optional[str]]] = [
     ('cryptography', 'cryptography', 'SSL/TLS cert analysis + Interactsh OOB crypto', 'pip install cryptography'),
     ('playwright', 'playwright', 'Headless-browser tests: DOM XSS / CSPT', 'pip install playwright && python -m playwright install chromium'),
     ('anthropic', 'anthropic', 'AI triage / AI report (--ai-triage / --ai-report)', 'pip install anthropic'),
+    ('keyring', 'keyring', 'OS credential-store persistence for GUI secrets', 'pip install keyring'),
     ('PySide6', 'PySide6', 'Desktop GUI (blackthorn gui / run_gui.py)', 'pip install PySide6'),
     ('pymetasploit3', 'pymetasploit3', 'Metasploit RPC integration (blackthorn msf)', 'pip install pymetasploit3'),
 ]

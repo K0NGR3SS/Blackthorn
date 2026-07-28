@@ -26,7 +26,7 @@ def test_version_is_single_sourced():
 def test_component_report_shape():
     report = diagnostics.component_report()
     names = {c['import_name'] for c in report}
-    assert {'curl_cffi', 'reportlab', 'anthropic', 'playwright'} <= names
+    assert {'curl_cffi', 'reportlab', 'anthropic', 'playwright', 'keyring'} <= names
     for c in report:
         assert set(c) >= {'import_name', 'label', 'purpose', 'available', 'version'}
         assert isinstance(c['available'], bool)
@@ -101,13 +101,24 @@ def test_dry_run_bare_url_defaults_to_scan(capsys):
     assert rc == 0
     assert 'DRY RUN' in out
     assert 'categories' in out
+    assert 'safe_mode=on' in out
+
+
+def test_full_impact_requires_explicit_flag(capsys):
+    rc = cli.main([
+        'scan', 'https://example.invalid', '--dry-run', '--full-impact',
+        '-c', 'protocol_level',
+    ])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert 'safe_mode=off' in out
 
 
 # ------------------------------------------------------------------ --profile
 def _ns(**kw):
     import argparse
     base = dict(profile=None, threads=10, delay=0.2, jitter=0.0,
-                safe_mode=False, impersonate=None)
+                safe_mode=None, impersonate=None)
     base.update(kw)
     return argparse.Namespace(**base)
 
@@ -123,10 +134,12 @@ def test_profile_stealth_applies_when_defaults():
 def test_profile_does_not_override_explicit_flags():
     from wafpierce.pierce import _apply_profile
     # User explicitly set threads=50 and impersonate; profile must not clobber.
-    args = _ns(profile='aggressive', threads=50, impersonate='safari17_0')
+    args = _ns(profile='aggressive', threads=50, safe_mode=False,
+               impersonate='safari17_0')
     _apply_profile(args)
     assert args.threads == 50               # user value kept
     assert args.impersonate == 'safari17_0'  # user value kept
+    assert args.safe_mode is False          # explicit --full-impact kept
     assert args.delay == 0.0                # filled from preset (was default)
 
 

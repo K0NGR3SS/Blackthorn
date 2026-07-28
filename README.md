@@ -14,7 +14,7 @@
 
 > **Naming note (ex-WAFPierce):** Blackthorn is the current product name. The repository URL, Python package, and some legacy commands still use `WAFPierce`/`wafpierce` for compatibility.
 
-> Use Blackthorn only on systems you own or are explicitly authorized to test. Use `--authorize`, `--safe-mode`, and scope rules when testing production-like targets.
+> Use Blackthorn only on systems you own or are explicitly authorized to test. Scans use safe mode by default. Use `--authorize` and scope rules for production-like targets; `--full-impact` is an explicit opt-out from safe mode.
 
 ## Run it now
 
@@ -154,7 +154,8 @@ blackthorn scan --list-techniques
 - Resume interrupted scans from checkpoints.
 - Run multiple targets from the GUI queue with per-target and total progress.
 - Use dry-run mode to inspect the plan without sending requests.
-- Use safe mode to skip noisy, denial-of-service, and state-changing probes.
+- Safe mode is on by default and skips noisy, denial-of-service, and state-changing probes.
+- Use `--full-impact` only when the engagement explicitly permits the additional probes.
 - Use `--intrusive` only when the engagement explicitly permits guessed state-changing workflows such as uploads, email, cache, race, and metadata tests.
 
 ### Reporting and automation
@@ -439,13 +440,12 @@ blackthorn recon example.com --ports
 ### Practical scan examples
 
 ```bash
-# Inspect the request plan without sending traffic
-blackthorn scan https://target.example --dry-run --safe-mode
+# Inspect the safe-by-default request plan without sending traffic
+blackthorn scan https://target.example --dry-run
 
 # Authorized, allowlisted scan with browser impersonation
 blackthorn scan https://target.example \
   --authorize scope.txt \
-  --safe-mode \
   --impersonate chrome \
   --export report.html \
   --export-format html
@@ -465,6 +465,11 @@ blackthorn scan https://target.example \
 blackthorn scan https://target.example \
   --oob interactsh \
   --oob-wait 15
+
+# Disable safe mode only for an engagement that explicitly permits it
+blackthorn scan https://target.example \
+  --authorize scope.txt \
+  --full-impact
 
 # CI output and severity gate
 blackthorn scan https://target.example \
@@ -508,11 +513,20 @@ python -m playwright install chromium
 # Anthropic AI provider
 pip install -e ".[ai]"
 
-# Browser, AI, and development dependencies
+# OS keychain storage for GUI-entered integration secrets
+pip install -e ".[secrets]"
+
+# Browser, AI, keychain, and development dependencies
 pip install -e ".[full,dev]"
 ```
 
 Other optional integrations include Metasploit RPC through `pymetasploit3`, a running Caido instance, a local Ollama server, or an OpenAI-compatible API endpoint.
+
+### Credential storage
+
+Blackthorn does not write AI keys, external-tool API keys, proxy passwords, ZAP keys, or the Metasploit RPC password to its preferences JSON or SQLite database. Environment variables take precedence. With the optional `keyring` extra installed, GUI-entered secrets are saved in the operating-system credential store; otherwise they remain available only for the current process.
+
+Common variables include `ANTHROPIC_API_KEY`, `AI_API_KEY`, `OPENAI_API_KEY`, `MSF_RPC_PASSWORD`, and `ZAP_API_KEY`. External-tool keys use `BLACKTHORN_TOOL_<TOOL>_API_KEY`.
 
 ## Build the desktop executable
 

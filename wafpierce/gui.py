@@ -67,8 +67,17 @@ WORKBENCH_ITEMS = (
     ('Plugins', 'plugins'),
 )
 
-# Use shared config module
-from .config import get_gui_prefs_path
+# Use shared config and secret-storage modules.
+from .config import get_gui_prefs_path, prepare_private_file
+from .secret_store import (
+    get_ai_api_key,
+    get_msf_password,
+    get_zap_api_key,
+    set_ai_api_key,
+    set_msf_password,
+    set_zap_api_key,
+    tool_secret_env_name,
+)
 from . import __version__
 
 
@@ -273,6 +282,8 @@ def _advanced_cli_flags(opts: dict) -> list:
     flags = []
     if opts.get('safe_mode'):
         flags.append('--safe-mode')
+    elif opts.get('safe_mode') is False:
+        flags.append('--full-impact')
     if opts.get('intrusive'):
         flags.append('--intrusive')
     if opts.get('dry_run'):
@@ -618,6 +629,13 @@ _LANGUAGE_ALIASES = {
     'uk-ua': 'uk',
 }
 _LANGUAGE_CODES = {'en', 'ar', 'uk'}
+_PERSISTED_SECRET_FIELDS = frozenset({
+    'ai_api_key',
+    'ai_key',
+    'anthropic_api_key',
+    'msf_password',
+    'zap_apikey',
+})
 
 
 def _normalize_language(value) -> str:
@@ -626,6 +644,40 @@ def _normalize_language(value) -> str:
     if '-' in code and code not in _LANGUAGE_CODES:
         code = code.split('-', 1)[0]
     return code if code in _LANGUAGE_CODES else 'en'
+
+
+def _without_persisted_secrets(value):
+    """Return a JSON-compatible copy with known secret fields removed."""
+    if isinstance(value, dict):
+        return {
+            key: _without_persisted_secrets(item)
+            for key, item in value.items()
+            if key not in _PERSISTED_SECRET_FIELDS
+        }
+    if isinstance(value, list):
+        return [_without_persisted_secrets(item) for item in value]
+    return value
+
+
+def _migrate_legacy_pref_secrets(data: dict) -> dict:
+    """Move legacy plaintext preference values to the secret-storage boundary."""
+    provider = str(data.get('ai_provider') or 'anthropic')
+    advanced = data.get('advanced') if isinstance(data.get('advanced'), dict) else {}
+    ai_value = (
+        data.get('ai_api_key')
+        or advanced.get('ai_key')
+        or data.get('anthropic_api_key')
+    )
+    if ai_value:
+        set_ai_api_key(provider, str(ai_value))
+    anthropic_value = data.get('anthropic_api_key')
+    if anthropic_value and provider != 'anthropic':
+        set_ai_api_key('anthropic', str(anthropic_value))
+    if data.get('msf_password'):
+        set_msf_password(str(data['msf_password']))
+    if data.get('zap_apikey'):
+        set_zap_api_key(str(data['zap_apikey']))
+    return _without_persisted_secrets(data)
 
 
 # default settings, change if you want different ones for the application
@@ -652,7 +704,10 @@ def _load_prefs() -> dict:
             with open(path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 if isinstance(data, dict):
-                    defaults.update(data)
+                    sanitized = _migrate_legacy_pref_secrets(data)
+                    defaults.update(sanitized)
+                    if sanitized != data:
+                        _save_prefs(sanitized)
     except Exception:
         pass
     defaults['language'] = _normalize_language(defaults.get('language', 'en'))
@@ -1629,7 +1684,7 @@ def _censor_url(url: str, censor: bool = False) -> str:
 
 def _save_prefs(prefs: dict) -> None:
     path = get_gui_prefs_path()
-    data = dict(prefs or {})
+    data = _without_persisted_secrets(dict(prefs or {}))
     data['language'] = _normalize_language(data.get('language', 'en'))
     tmp_path = None
     try:
@@ -1642,6 +1697,7 @@ def _save_prefs(prefs: dict) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, path)
+        prepare_private_file(path)
     except Exception:
         try:
             if tmp_path and os.path.exists(tmp_path):
@@ -3620,7 +3676,7 @@ def main() -> None:
                 return None
             prefs = _load_prefs()
             ai_provider = prefs.get('ai_provider') or 'anthropic'
-            ai_key = (prefs.get('ai_api_key') or prefs.get('anthropic_api_key') or None)
+            ai_key = get_ai_api_key(ai_provider) or None
             profile_key = (
                 self._scan_profile_combo.currentData()
                 if getattr(self, '_scan_profile_combo', None) else 'custom'
@@ -4621,7 +4677,9 @@ def main() -> None:
                         'impersonate': 'chrome' if impersonate_chk.isChecked() else None,
                         'oob': oob_combo.currentData(),
                         'ai_triage': ai_triage_chk.isChecked(),
-                        'ai_key': (_aiprefs.get('anthropic_api_key') or None),
+                        'ai_key': (get_ai_api_key(
+                            _aiprefs.get('ai_provider') or 'anthropic'
+                        ) or None),
                         'ai_model': (_aiprefs.get('ai_model') or None),
                     }
                     # Persist as defaults for next time.
@@ -5087,7 +5145,10 @@ def main() -> None:
             v.addWidget(QLabel('Binary path:')); v.addLayout(row)
             v.addWidget(QLabel('Extra args:')); v.addWidget(args_edit)
             if spec.needs_api_key:
-                v.addWidget(QLabel('API key:')); v.addWidget(api_edit)
+                v.addWidget(QLabel(
+                    f'API key (OS keychain or {tool_secret_env_name(tool_key)}):'
+                ))
+                v.addWidget(api_edit)
             btns = QHBoxLayout(); save = QPushButton('Save'); cancel = QPushButton('Cancel')
             btns.addStretch(); btns.addWidget(cancel); btns.addWidget(save)
             v.addLayout(btns)
@@ -5098,7 +5159,7 @@ def main() -> None:
                         self._db.save_tool_config(
                             tool_key, custom_path=path_edit.text().strip() or None,
                             extra_args=args_edit.text().strip() or None,
-                            api_key=api_edit.text().strip() or None, enabled=True)
+                            api_key=api_edit.text().strip(), enabled=True)
                     except Exception:
                         pass
                 d.accept()
@@ -5760,7 +5821,7 @@ def main() -> None:
             zrow = QHBoxLayout()
             host = QLineEdit(str(self._prefs.get('zap_host', '127.0.0.1'))); host.setFixedWidth(120)
             port = QLineEdit(str(self._prefs.get('zap_port', 8080))); port.setFixedWidth(64)
-            apikey = QLineEdit(self._prefs.get('zap_apikey', '')); apikey.setPlaceholderText('apikey (optional)')
+            apikey = QLineEdit(get_zap_api_key()); apikey.setPlaceholderText('apikey (optional)')
             detect_btn = QPushButton('Detect'); zstatus = QLabel('unknown'); zstatus.setStyleSheet('color:#8b949e;')
             zrow.addWidget(QLabel('Host:')); zrow.addWidget(host); zrow.addWidget(QLabel('Port:')); zrow.addWidget(port)
             zrow.addWidget(QLabel('Key:')); zrow.addWidget(apikey, 1); zrow.addWidget(detect_btn); zrow.addWidget(zstatus)
@@ -5819,7 +5880,8 @@ def main() -> None:
                     self._prefs['zap_port'] = int(port.text() or 8080)
                 except Exception:
                     pass
-                self._prefs['zap_apikey'] = apikey.text().strip()
+                set_zap_api_key(apikey.text().strip())
+                _save_prefs(self._prefs)
                 self._zap_thread = QtCore.QThread()
                 self._zap_worker = ZapWorker(host.text().strip(), port.text().strip(),
                                              apikey.text().strip(), t,
@@ -7054,7 +7116,7 @@ def main() -> None:
 
             def _send_msf():
                 prefs = self._prefs or {}
-                pw = prefs.get('msf_password', '') or os.environ.get('MSF_RPC_PASSWORD', '')
+                pw = get_msf_password()
                 if not pw:
                     QMessageBox.information(
                         dlg, 'Metasploit',
@@ -9113,12 +9175,17 @@ def main() -> None:
             model_edit.setPlaceholderText('qwen2.5-coder:7b / claude-sonnet-4-6 / model id')
             base_url_edit = QLineEdit(str(prefs.get('ai_base_url', '') or ''))
             base_url_edit.setPlaceholderText('http://127.0.0.1:11434 or https://host/v1')
-            key_edit = QLineEdit(str(prefs.get('ai_api_key') or prefs.get('anthropic_api_key') or ''))
+            key_edit = QLineEdit(get_ai_api_key(provider_value))
             key_edit.setEchoMode(QLineEdit.EchoMode.Password)
             key_edit.setPlaceholderText('optional API key')
             show_key = QCheckBox('show')
             show_key.toggled.connect(lambda on: key_edit.setEchoMode(
                 QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password))
+            provider_combo.currentIndexChanged.connect(
+                lambda _index: key_edit.setText(
+                    get_ai_api_key(provider_combo.currentData() or 'anthropic')
+                )
+            )
             status_lbl = QLabel('Not checked')
             status_lbl.setObjectName('FieldLabel')
             cfg_layout.addWidget(form_label('Provider'), 0, 0)
@@ -9200,12 +9267,14 @@ def main() -> None:
                 p['ai_provider'] = args['provider']
                 p['ai_model'] = args['model']
                 p['ai_base_url'] = args['base_url']
-                p['ai_api_key'] = args['api_key'] or ''
-                if args['provider'] == 'anthropic':
-                    p['anthropic_api_key'] = args['api_key'] or ''
+                persisted = set_ai_api_key(args['provider'], args['api_key'])
                 _save_prefs(p)
                 self._prefs = p
-                status_lbl.setText('Saved')
+                status_lbl.setText(
+                    'Saved to OS keychain' if persisted
+                    else 'Available this session; set the provider environment variable '
+                         'for persistence'
+                )
 
             def test_provider():
                 save_config()
@@ -9562,14 +9631,15 @@ def main() -> None:
                 ai_layout = QVBoxLayout(ai_group)
                 ai_layout.addWidget(QLabel(
                     'Full provider setup and automation actions live in AI / Automation. '
-                    'This shortcut keeps legacy Claude key/model fields available.'))
+                    'Keys use the OS keychain when available, otherwise the '
+                    'ANTHROPIC_API_KEY environment variable or current session.'))
                 key_row = QtWidgets.QHBoxLayout()
                 key_row.addWidget(QLabel('API key:'))
                 ai_key_edit = QLineEdit()
                 ai_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
                 ai_key_edit.setPlaceholderText('sk-ant-…')
                 try:
-                    ai_key_edit.setText(str(prefs.get('anthropic_api_key', '') or ''))
+                    ai_key_edit.setText(get_ai_api_key('anthropic'))
                 except Exception:
                     pass
                 show_key_chk = QCheckBox('show')
@@ -9596,8 +9666,9 @@ def main() -> None:
                 integ_layout = QVBoxLayout(integ_group)
                 integ_layout.addWidget(QLabel(
                     'Used by the Recon section ("Send to …") and the msf/caido CLI. '
-                    'The Metasploit password is stored locally and passed via the '
-                    'MSF_RPC_PASSWORD environment variable, never on the command line.'))
+                    'The Metasploit password uses the OS keychain when available, '
+                    'or MSF_RPC_PASSWORD/current-session storage, and is never put '
+                    'on the command line.'))
 
                 # -- Metasploit RPC --
                 integ_layout.addWidget(QLabel('Metasploit (msfrpcd):'))
@@ -9618,7 +9689,7 @@ def main() -> None:
                 msf_row2 = QtWidgets.QHBoxLayout()
                 msf_row2.addWidget(QLabel('Password:'))
                 msf_pw_edit = QLineEdit(); msf_pw_edit.setEchoMode(QLineEdit.EchoMode.Password)
-                msf_pw_edit.setText(str(prefs.get('msf_password', '') or ''))
+                msf_pw_edit.setText(get_msf_password())
                 msf_show = QCheckBox('show')
                 msf_show.toggled.connect(lambda on: msf_pw_edit.setEchoMode(
                     QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password))
@@ -9738,14 +9809,13 @@ def main() -> None:
 
                         # Save legacy AI shortcut settings. Full provider setup
                         # lives in the AI / Automation page.
-                        prefs['anthropic_api_key'] = ai_key_edit.text().strip()
-                        prefs['ai_api_key'] = ai_key_edit.text().strip()
+                        set_ai_api_key('anthropic', ai_key_edit.text().strip())
                         prefs['ai_model'] = ai_model_edit.text().strip()
 
                         # Save Integrations (Metasploit + Caido) settings
                         prefs['msf_host'] = msf_host_edit.text().strip() or '127.0.0.1'
                         prefs['msf_port'] = int(msf_port_spin.value())
-                        prefs['msf_password'] = msf_pw_edit.text().strip()
+                        set_msf_password(msf_pw_edit.text().strip())
                         prefs['msf_workspace'] = msf_ws_edit.text().strip() or 'blackthorn'
                         prefs['msf_no_ssl'] = bool(msf_nossl_chk.isChecked())
                         prefs['caido_proxy_url'] = caido_proxy_edit.text().strip() or 'http://127.0.0.1:8080'
