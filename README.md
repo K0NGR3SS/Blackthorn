@@ -114,7 +114,7 @@ blackthorn scan --list-techniques
 - Enumerate subdomains and check DNS resolution, certificate transparency, historical DNS, and zone-transfer exposure.
 - Fingerprint frameworks, servers, CMS platforms, cloud providers, edge controls, and known vulnerable software versions.
 - Detect subdomain takeover conditions across supported provider signatures.
-- Run a dedicated external reconnaissance workflow with Subfinder, Amass, dnsx, httpx, and Nmap.
+- Run a dedicated discovery workflow with Subfinder, Amass, Certificate Transparency, dnsx, and ProjectDiscovery httpx; Nmap is a separately confirmed active option.
 
 ### Active web-security testing
 
@@ -400,11 +400,23 @@ Availability, binary path, and version are detected at runtime. Empty output is
 reported as an empty run—not fabricated as a finding—and tool alerts enter the
 candidate workflow until Blackthorn verifies them independently.
 
-The dedicated `blackthorn recon` workflow expects Subfinder, Amass, dnsx, ProjectDiscovery httpx, and Nmap. Check readiness with:
+The dedicated `blackthorn recon` workflow expects Subfinder, Amass, dnsx, and
+the ProjectDiscovery httpx binary (not the Python package with the same command
+name). It merges those sources with public Certificate Transparency names and
+keeps DNS-resolved, HTTP-live, DNS-only, and unresolved hosts distinct.
+Wildcard scope notation is accepted and normalized:
 
 ```bash
 blackthorn doctor
-blackthorn recon example.com
+blackthorn recon '*.example.com'
+```
+
+Nmap is disabled by default because it is an active scan that can trigger
+network or endpoint security alerts. Enable its unprivileged, capped connect
+scan only for an authorized target:
+
+```bash
+blackthorn recon example.com --ports
 ```
 
 ## CLI commands

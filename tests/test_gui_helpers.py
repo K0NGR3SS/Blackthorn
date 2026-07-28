@@ -16,6 +16,7 @@ from wafpierce.gui import (
     legal_acceptance_is_current, parse_scan_phase_event,
     scan_preflight_summary, scan_profile_settings,
     finding_request_spec, result_matches_filter,
+    filter_recon_hosts, recon_report_parts,
 )
 
 
@@ -117,6 +118,57 @@ def test_results_filters_separate_evidence_state_from_workflow_state():
     assert not result_matches_filter(confirmed, 'needs_review')
     assert result_matches_filter(candidate, 'candidate')
     assert result_matches_filter(candidate, 'needs_review')
+
+
+def test_recon_report_normalizes_full_and_legacy_output():
+    full = recon_report_parts({
+        'target': 'example.com',
+        'findings': [{'technique': 'Discovery'}],
+        'stages': {'hosts': [{'hostname': 'api.example.com'}]},
+    })
+    legacy = recon_report_parts([{
+        'technique': 'Discovered Host',
+        'discovery': {'hostname': 'old.example.com'},
+    }])
+
+    assert full['target'] == 'example.com'
+    assert full['stages']['hosts'][0]['hostname'] == 'api.example.com'
+    assert legacy['stages']['hosts'][0]['hostname'] == 'old.example.com'
+
+
+def test_recon_host_filters_separate_dns_and_http_liveness():
+    hosts = [
+        {
+            'hostname': 'web.example.com',
+            'dns_live': True,
+            'http_live': True,
+            'ip_addresses': ['192.0.2.1'],
+            'sources': ['subfinder'],
+        },
+        {
+            'hostname': 'mail.example.com',
+            'dns_live': True,
+            'http_live': False,
+            'ip_addresses': ['192.0.2.2'],
+            'sources': ['amass'],
+        },
+        {
+            'hostname': 'old.example.com',
+            'dns_live': False,
+            'http_live': False,
+            'sources': ['certificate transparency'],
+        },
+    ]
+
+    assert [h['hostname'] for h in filter_recon_hosts(
+        hosts, 'web_live'
+    )] == ['web.example.com']
+    assert [h['hostname'] for h in filter_recon_hosts(
+        hosts, 'dns_no_http'
+    )] == ['mail.example.com']
+    assert [h['hostname'] for h in filter_recon_hosts(
+        hosts, query='certificate'
+    )] == ['old.example.com']
 
 
 def test_finding_request_spec_requires_an_exact_absolute_request():

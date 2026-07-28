@@ -92,6 +92,8 @@ hidden_imports = [
     'wafpierce.integrations',
     'wafpierce.cli',
     'wafpierce.diagnostics',
+    'wafpierce.recon',
+    'wafpierce.recon_install',
     'wafpierce.redaction',
     'wafpierce.authorization',
     'wafpierce.configfile',
@@ -123,7 +125,7 @@ hidden_imports = [
 binaries = []
 try:
     from PyInstaller.utils.hooks import collect_all
-    for _pkg in ('curl_cffi', 'cryptography', 'reportlab'):
+    for _pkg in ('certifi', 'curl_cffi', 'cryptography', 'reportlab'):
         try:
             _datas, _bins, _hidden = collect_all(_pkg)
             datas += _datas

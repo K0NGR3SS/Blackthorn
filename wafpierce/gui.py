@@ -128,6 +128,66 @@ def result_matches_filter(finding: dict, filter_key: str) -> bool:
     return True
 
 
+def recon_report_parts(data):
+    """Normalize current full reports and legacy findings-only recon files."""
+    if isinstance(data, dict):
+        findings = data.get('findings')
+        stages = data.get('stages')
+        return {
+            'target': str(data.get('target') or ''),
+            'findings': list(findings) if isinstance(findings, list) else [],
+            'stages': dict(stages) if isinstance(stages, dict) else {},
+        }
+    if isinstance(data, list):
+        findings = list(data)
+        hosts = []
+        for finding in findings:
+            discovery = (
+                finding.get('discovery')
+                if isinstance(finding, dict) else None
+            )
+            if isinstance(discovery, dict):
+                hosts.append(discovery)
+        return {
+            'target': '',
+            'findings': findings,
+            'stages': {'hosts': hosts, 'summary': {}},
+        }
+    return {'target': '', 'findings': [], 'stages': {}}
+
+
+def filter_recon_hosts(hosts, filter_key='all', query=''):
+    """Filter the Discover inventory without changing the report data."""
+    key = str(filter_key or 'all')
+    needle = str(query or '').strip().lower()
+    out = []
+    for host in hosts or []:
+        if not isinstance(host, dict):
+            continue
+        dns_live = bool(host.get('dns_live'))
+        http_live = bool(host.get('http_live'))
+        if key == 'dns_live' and not dns_live:
+            continue
+        if key == 'web_live' and not http_live:
+            continue
+        if key == 'dns_no_http' and not (dns_live and not http_live):
+            continue
+        if key == 'unresolved' and dns_live:
+            continue
+        if needle:
+            haystack = ' '.join([
+                str(host.get('hostname') or ''),
+                ' '.join(str(x) for x in host.get('ip_addresses') or []),
+                ' '.join(str(x) for x in host.get('sources') or []),
+                str(host.get('title') or ''),
+                str(host.get('server') or ''),
+            ]).lower()
+            if needle not in haystack:
+                continue
+        out.append(host)
+    return out
+
+
 def finding_request_spec(finding: dict):
     """Return the exact replayable request fields, or ``None`` when unavailable."""
     if not isinstance(finding, dict):
@@ -6136,7 +6196,7 @@ def main() -> None:
             (frozen --recon-worker vs `python -m wafpierce.recon`).
 
             ``opts`` is the per-stage customization from the recon page; when it is
-            None (e.g. the scheduler) the engine defaults apply (tls + gau + nmap).
+            None (e.g. the scheduler) passive/web discovery defaults apply.
             """
             opts = opts or {}
             if IS_FROZEN:
@@ -6144,12 +6204,12 @@ def main() -> None:
                        '--output', tmp_path]
             else:
                 cmd = [sys.executable, '-u', '-m', 'wafpierce.recon', target,
-                       '-o', tmp_path]
+                       '--report-output', tmp_path]
             cmd += ['--timeout', str(timeout), '--top-ports', str(top_ports)]
             cmd += ['--max-hosts', str(opts.get('max_hosts', 1000))]
             cmd += ['--crawl-depth', str(opts.get('crawl_depth', 2))]
-            if no_ports or not opts.get('do_ports', True):
-                cmd.append('--no-ports')
+            if not no_ports and opts.get('do_ports', False):
+                cmd.append('--ports')
             if not opts.get('do_tls', True):
                 cmd.append('--no-tls')
             if not opts.get('do_historical', True):
@@ -6178,7 +6238,8 @@ def main() -> None:
             from PySide6.QtWidgets import (
                 QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QSpinBox,
                 QCheckBox, QPushButton, QPlainTextEdit, QTreeWidget,
-                QTreeWidgetItem, QSplitter, QMessageBox, QFileDialog)
+                QTreeWidgetItem, QSplitter, QMessageBox, QFileDialog,
+                QGridLayout, QGroupBox, QComboBox, QTabWidget, QHeaderView)
             from PySide6.QtCore import Qt, QProcess, QProcessEnvironment
             from PySide6.QtGui import QTextCursor
             import tempfile
@@ -6191,33 +6252,78 @@ def main() -> None:
             _hdr.setObjectName('PageTitle')
             _hdr.setToolTip('subfinder · amass · dnsx · httpx · nmap  +  tlsx · gau · katana · nuclei · naabu · dalfox')
             lay.addWidget(_hdr)
-
-            from PySide6.QtWidgets import QGridLayout, QGroupBox, QComboBox
+            _intro = QLabel(
+                'Find subdomains first, then see exactly which names resolve '
+                'and which ones answer over HTTP(S). Wildcard scope such as '
+                '*.example.com is accepted.'
+            )
+            _intro.setObjectName('FieldLabel')
+            _intro.setWordWrap(True)
+            lay.addWidget(_intro)
 
             # Target + core options
-            row = QHBoxLayout()
-            row.addWidget(QLabel('Target:'))
+            target_box = QGroupBox('Scope')
+            target_grid = QGridLayout(target_box)
+            target_grid.setColumnStretch(5, 1)
+            target_grid.addWidget(QLabel('Domain or wildcard'), 0, 0)
             target_edit = QLineEdit()
-            target_edit.setPlaceholderText('example.com or https://example.com')
+            target_edit.setAccessibleName('Discovery scope')
+            target_edit.setPlaceholderText('example.com or *.example.com')
             try:
                 target_edit.setText((self.target_edit.text() or '').strip())
             except Exception:
                 pass
-            row.addWidget(target_edit, 1)
-            row.addWidget(QLabel('Timeout(s):'))
+            target_grid.addWidget(target_edit, 0, 1, 1, 5)
+            scope_hint = QLabel('')
+            scope_hint.setObjectName('FieldLabel')
+            scope_hint.setWordWrap(True)
+            target_grid.addWidget(scope_hint, 1, 1, 1, 5)
+
+            target_grid.addWidget(QLabel('Tool timeout'), 2, 0)
             timeout_spin = QSpinBox(); timeout_spin.setRange(10, 3600); timeout_spin.setValue(300)
-            row.addWidget(timeout_spin)
-            row.addWidget(QLabel('Max hosts:'))
+            timeout_spin.setSuffix(' s')
+            timeout_spin.setMaximumWidth(150)
+            target_grid.addWidget(timeout_spin, 2, 1)
+            target_grid.addWidget(QLabel('HTTP probe cap'), 2, 2)
             maxhosts_spin = QSpinBox(); maxhosts_spin.setRange(1, 100000); maxhosts_spin.setValue(1000)
+            maxhosts_spin.setMaximumWidth(150)
             maxhosts_spin.setToolTip('Cap on how many resolved hosts to actively probe (httpx).')
-            row.addWidget(maxhosts_spin)
-            row.addWidget(QLabel('Top ports:'))
+            target_grid.addWidget(maxhosts_spin, 2, 3)
+            target_grid.addWidget(QLabel('Nmap top ports'), 2, 4)
             ports_spin = QSpinBox(); ports_spin.setRange(10, 65535); ports_spin.setValue(100)
-            row.addWidget(ports_spin)
-            lay.addLayout(row)
+            ports_spin.setMaximumWidth(150)
+            ports_spin.setEnabled(False)
+            target_grid.addWidget(ports_spin, 2, 5)
+            lay.addWidget(target_box)
+
+            def _update_scope_hint():
+                raw = target_edit.text().strip()
+                try:
+                    from .recon import normalize_domain
+                    normalized = normalize_domain(raw)
+                except Exception:
+                    normalized = ''
+                if not raw:
+                    scope_hint.setText(
+                        'Enter the authorized root domain you want to enumerate.'
+                    )
+                elif normalized:
+                    wildcard_note = (
+                        'Wildcard recognized. ' if '*.' in raw else ''
+                    )
+                    scope_hint.setText(
+                        f'{wildcard_note}Enumeration root: {normalized}'
+                    )
+                else:
+                    scope_hint.setText('This target cannot be parsed as a domain.')
+
+            target_edit.textChanged.connect(_update_scope_hint)
+            _update_scope_hint()
 
             # Stages — each one is individually switchable. ☑ = on by default.
-            stages_box = QGroupBox('Stages  (✓ = run; tools install on demand)')
+            stages_box = QGroupBox(
+                'Customize coverage (tools install on demand)'
+            )
             sg = QGridLayout(stages_box)
             stage_chks = {}
 
@@ -6228,11 +6334,18 @@ def main() -> None:
 
             _stage('tls', 'TLS / SAN (tlsx)', 'Grab TLS certs and harvest extra subdomains from SANs.', True, 0, 0)
             _stage('historical', 'Historical URLs (gau)', 'Pull URLs from wayback / commoncrawl / otx.', True, 0, 1)
-            _stage('ports', 'Ports (nmap)', 'nmap -sV service/version scan.', True, 0, 2)
+            _stage(
+                'ports',
+                'Active ports (Nmap) — opt in',
+                'Unprivileged TCP connect scan with light service detection. '
+                'Can trigger endpoint/network security alerts.',
+                False, 0, 2,
+            )
             _stage('naabu', 'Fast ports (naabu)', 'Fast TCP connect port discovery across many hosts.', False, 1, 0)
             _stage('crawl', 'Crawl (katana)', 'Crawl live sites (incl. JS) for endpoints.', False, 1, 1)
             _stage('nuclei', 'Vuln scan (nuclei)', 'Run nuclei templates against live web services.', False, 1, 2)
             _stage('xss', 'XSS (dalfox)', 'Test URLs that carry parameters for XSS.', False, 2, 0)
+            stage_chks['ports'].toggled.connect(ports_spin.setEnabled)
 
             # nuclei + crawl tuning (compact 3-column grid)
             sg.addWidget(QLabel('nuclei sev:'), 3, 0)
@@ -6251,23 +6364,52 @@ def main() -> None:
 
             # Presets
             preset_row = QHBoxLayout()
-            fast_btn = QPushButton('Preset: Fast')
-            full_btn = QPushButton('Preset: Full pentest')
-            fast_btn.setToolTip('subfinder/amass + dnsx + httpx only')
-            full_btn.setToolTip('Enable every stage (slower, deepest coverage)')
+            fast_btn = QPushButton('Passive + web')
+            full_btn = QPushButton('Full active coverage')
+            fast_btn.setToolTip(
+                'Subfinder, Amass, Certificate Transparency, dnsx, httpx, '
+                'TLS SANs, and historical URLs; no port or vulnerability scans.'
+            )
+            full_btn.setToolTip(
+                'Enable active port, crawl, template, and XSS stages.'
+            )
             preset_row.addWidget(QLabel('Presets:'))
             preset_row.addWidget(fast_btn); preset_row.addWidget(full_btn)
             preset_row.addStretch()
             sg.addLayout(preset_row, 6, 0, 1, 3)
 
             def _apply_preset(full):
-                # Full = every stage on. Fast = the light defaults only.
-                for k, chk in stage_chks.items():
-                    chk.setChecked(True if full else k in ('tls', 'historical', 'ports'))
+                for key, chk in stage_chks.items():
+                    chk.setChecked(
+                        True if full else key in ('tls', 'historical')
+                    )
             fast_btn.clicked.connect(lambda: _apply_preset(False))
             full_btn.clicked.connect(lambda: _apply_preset(True))
 
+            coverage_row = QHBoxLayout()
+            coverage_note = QLabel(
+                'Default: passive enumeration + DNS + HTTP(S) + TLS SANs + '
+                'historical URLs. No port scan.'
+            )
+            coverage_note.setObjectName('FieldLabel')
+            coverage_note.setWordWrap(True)
+            coverage_toggle = style_button(
+                QPushButton(), 'quiet', text='Customize stages'
+            )
+            coverage_row.addWidget(coverage_note, 1)
+            coverage_row.addWidget(coverage_toggle)
+            lay.addLayout(coverage_row)
+            stages_box.setVisible(False)
             lay.addWidget(stages_box)
+
+            def _toggle_coverage():
+                visible = not stages_box.isVisible()
+                stages_box.setVisible(visible)
+                coverage_toggle.setText(
+                    'Hide stage settings' if visible else 'Customize stages'
+                )
+
+            coverage_toggle.clicked.connect(_toggle_coverage)
 
             def _collect_opts():
                 return {
@@ -6304,7 +6446,7 @@ def main() -> None:
             run_row.addWidget(tools_btn)
             lay.addLayout(run_row)
 
-            out_row = QHBoxLayout()
+            out_grid = QGridLayout()
             merge_btn = style_button(
                 QPushButton(), 'secondary', text='Add to findings'
             )
@@ -6318,13 +6460,24 @@ def main() -> None:
             )
             caido_btn.setEnabled(False)
             save_btn = style_button(
-                QPushButton(), 'quiet', text='Export JSON'
+                QPushButton(), 'secondary', text='Export discovery'
             )
             save_btn.setEnabled(False)
-            for b in (merge_btn, msf_btn, caido_btn, save_btn):
-                out_row.addWidget(b)
-            out_row.addStretch()
-            lay.addLayout(out_row)
+            copy_hosts_btn = style_button(
+                QPushButton(), 'secondary', text='Copy subdomains'
+            )
+            copy_hosts_btn.setEnabled(False)
+            copy_live_btn = style_button(
+                QPushButton(), 'secondary', text='Copy live URLs'
+            )
+            copy_live_btn.setEnabled(False)
+            for col, button in enumerate(
+                    (merge_btn, copy_hosts_btn, copy_live_btn, save_btn)):
+                out_grid.addWidget(button, 0, col)
+                out_grid.setColumnStretch(col, 1)
+            out_grid.addWidget(msf_btn, 1, 0, 1, 2)
+            out_grid.addWidget(caido_btn, 1, 2, 1, 2)
+            lay.addLayout(out_grid)
             tools_btn.clicked.connect(lambda: self._download_tools_dialog(
                 ['tlsx', 'gau', 'katana', 'nuclei', 'naabu', 'dalfox'],
                 'Optional recon tools — each one that installs adds a richer stage:\n'
@@ -6336,20 +6489,107 @@ def main() -> None:
                 '  dalfox — XSS scanning of URLs with parameters\n',
                 title='Install optional recon tools'))
 
-            # Results tree (top) + streaming log (bottom)
+            # Searchable host inventory + all recon findings + streaming log.
+            inventory_bar = QHBoxLayout()
+            inventory_title = QLabel('Discovered hosts')
+            inventory_title.setObjectName('FieldLabel')
+            inventory_bar.addWidget(inventory_title)
+            inventory_bar.addStretch()
+            inventory_filter = QComboBox()
+            inventory_filter.setAccessibleName('Discovery status filter')
+            for label, key in (
+                ('All', 'all'),
+                ('DNS live', 'dns_live'),
+                ('Web live', 'web_live'),
+                ('DNS live · no HTTP', 'dns_no_http'),
+                ('Unresolved', 'unresolved'),
+            ):
+                inventory_filter.addItem(label, key)
+            inventory_search = QLineEdit()
+            inventory_search.setAccessibleName('Search discovered hosts')
+            inventory_search.setPlaceholderText('Search host, IP, title, or source')
+            inventory_bar.addWidget(inventory_filter)
+            inventory_bar.addWidget(inventory_search, 1)
+            lay.addLayout(inventory_bar)
+
+            summary_row = QHBoxLayout()
+            summary_labels = {}
+            for key, label in (
+                ('subdomains', 'Subdomains'),
+                ('dns_live', 'DNS live'),
+                ('web_live', 'Web live'),
+                ('dns_without_http', 'No HTTP'),
+                ('unresolved', 'Unresolved'),
+            ):
+                widget = QLabel(f'{label}: 0')
+                widget.setObjectName('FindingState')
+                widget.setAccessibleName(f'{label} count')
+                summary_labels[key] = widget
+                summary_row.addWidget(widget)
+            summary_row.addStretch()
+            lay.addLayout(summary_row)
+
             split = QSplitter(Qt.Vertical)
-            tree = QTreeWidget()
-            tree.setHeaderLabels(['Technique', 'Target', 'Severity', 'Detail'])
-            tree.setColumnWidth(0, 190); tree.setColumnWidth(1, 250); tree.setColumnWidth(2, 80)
-            split.addWidget(tree)
+            split.setObjectName('DiscoveryVerticalSplitter')
+            split.setChildrenCollapsible(False)
+            tabs = QTabWidget()
+            tabs.setDocumentMode(True)
+
+            host_tree = QTreeWidget()
+            host_tree.setAccessibleName('Discovered host inventory')
+            host_tree.setHeaderLabels([
+                'Subdomain', 'DNS', 'HTTP(S)', 'URL / title', 'IP addresses',
+                'Sources',
+            ])
+            host_tree.setAlternatingRowColors(True)
+            try:
+                header = host_tree.header()
+                header.setSectionResizeMode(0, QHeaderView.Interactive)
+                header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+                header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+                header.setSectionResizeMode(3, QHeaderView.Stretch)
+                header.setSectionResizeMode(4, QHeaderView.Interactive)
+                header.setSectionResizeMode(5, QHeaderView.Interactive)
+                host_tree.setColumnWidth(0, 230)
+                host_tree.setColumnWidth(4, 180)
+                host_tree.setColumnWidth(5, 180)
+            except Exception:
+                pass
+            tabs.addTab(host_tree, 'Host inventory')
+
+            findings_tree = QTreeWidget()
+            findings_tree.setAccessibleName('Discovery findings')
+            findings_tree.setHeaderLabels(
+                ['Technique', 'Target', 'Severity', 'Detail']
+            )
+            try:
+                header = findings_tree.header()
+                header.setSectionResizeMode(0, QHeaderView.Interactive)
+                header.setSectionResizeMode(1, QHeaderView.Interactive)
+                header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+                header.setSectionResizeMode(3, QHeaderView.Stretch)
+                findings_tree.setColumnWidth(0, 190)
+                findings_tree.setColumnWidth(1, 250)
+            except Exception:
+                pass
+            tabs.addTab(findings_tree, 'All recon output')
+            split.addWidget(tabs)
             log = QPlainTextEdit(); log.setReadOnly(True)
+            log.setAccessibleName('Discovery activity log')
             log.setStyleSheet('background:#0f1112; color:#cfe3f0; '
                               'font-family:Consolas,monospace; font-size:12px;')
             split.addWidget(log)
-            split.setSizes([370, 250])
+            split.setStretchFactor(0, 3)
+            split.setStretchFactor(1, 1)
+            split.setSizes([520, 180])
             lay.addWidget(split, 1)
 
-            state = {'proc': None, 'tmp': None, 'findings': []}
+            state = {
+                'proc': None,
+                'tmp': None,
+                'findings': [],
+                'report': recon_report_parts(None),
+            }
 
             def _append(text):
                 if not text:
@@ -6358,8 +6598,67 @@ def main() -> None:
                 log.insertPlainText(text)
                 log.moveCursor(QTextCursor.End)
 
-            def _populate(findings):
-                tree.clear()
+            def _populate_host_inventory():
+                host_tree.clear()
+                hosts = state['report'].get('stages', {}).get('hosts') or []
+                shown = filter_recon_hosts(
+                    hosts,
+                    inventory_filter.currentData() or 'all',
+                    inventory_search.text(),
+                )
+                from PySide6.QtGui import QBrush, QColor
+                for host in shown:
+                    dns_text = (
+                        'Resolved' if host.get('dns_live') else 'Unresolved'
+                    )
+                    if host.get('http_live'):
+                        http_status = host.get('http_status')
+                        http_text = (
+                            f'Live · {http_status}'
+                            if http_status is not None else 'Live'
+                        )
+                    elif host.get('dns_live'):
+                        http_text = 'No response'
+                    else:
+                        http_text = 'Not tested'
+                    url_title = str(host.get('http_url') or '')
+                    title = str(host.get('title') or '')
+                    if title:
+                        url_title += f' — {title}' if url_title else title
+                    item = QTreeWidgetItem([
+                        str(host.get('hostname') or ''),
+                        dns_text,
+                        http_text,
+                        url_title,
+                        ', '.join(str(x) for x in host.get('ip_addresses') or []),
+                        ', '.join(str(x) for x in host.get('sources') or []),
+                    ])
+                    item.setData(0, 257, host)
+                    try:
+                        item.setForeground(
+                            1,
+                            QBrush(QColor(
+                                '#63c174' if host.get('dns_live') else '#9aa7b2'
+                            )),
+                        )
+                        item.setForeground(
+                            2,
+                            QBrush(QColor(
+                                '#63c174' if host.get('http_live') else '#9aa7b2'
+                            )),
+                        )
+                    except Exception:
+                        pass
+                    host_tree.addTopLevelItem(item)
+                inventory_title.setText(
+                    f'Discovered hosts · showing {len(shown)} of {len(hosts)}'
+                )
+
+            def _populate(report):
+                findings_tree.clear()
+                report = recon_report_parts(report)
+                state['report'] = report
+                findings = report['findings']
                 sev_color = {'CRITICAL': '#ff5d6c', 'HIGH': '#ff9f43',
                              'MEDIUM': '#f6e05e', 'LOW': '#63b3ed', 'INFO': '#9aa7b2'}
                 from PySide6.QtGui import QBrush, QColor
@@ -6372,11 +6671,45 @@ def main() -> None:
                         it.setForeground(2, QBrush(QColor(sev_color.get(sev, '#9aa7b2'))))
                     except Exception:
                         pass
-                    tree.addTopLevelItem(it)
+                    findings_tree.addTopLevelItem(it)
+
+                hosts = report.get('stages', {}).get('hosts') or []
+                summary = dict(
+                    report.get('stages', {}).get('summary') or {}
+                )
+                if not summary and hosts:
+                    summary = {
+                        'subdomains': sum(
+                            1 for host in hosts if not host.get('is_apex')
+                        ),
+                        'dns_live': sum(
+                            1 for host in hosts if host.get('dns_live')
+                        ),
+                        'web_live': sum(
+                            1 for host in hosts if host.get('http_live')
+                        ),
+                        'dns_without_http': sum(
+                            1 for host in hosts
+                            if host.get('dns_live') and not host.get('http_live')
+                        ),
+                        'unresolved': sum(
+                            1 for host in hosts if not host.get('dns_live')
+                        ),
+                    }
+                for key, widget in summary_labels.items():
+                    widget.setText(
+                        f'{widget.accessibleName()}: {int(summary.get(key, 0) or 0)}'
+                    )
+                _populate_host_inventory()
 
             def _set_outputs_enabled(on):
                 for b in (merge_btn, msf_btn, caido_btn, save_btn):
                     b.setEnabled(on)
+                hosts = state['report'].get('stages', {}).get('hosts') or []
+                copy_hosts_btn.setEnabled(bool(hosts))
+                copy_live_btn.setEnabled(
+                    any(host.get('http_live') for host in hosts)
+                )
 
             def _on_stdout():
                 proc = state['proc']
@@ -6385,13 +6718,13 @@ def main() -> None:
 
             def _on_finished(code=0, status=None):
                 run_btn.setEnabled(True); stop_btn.setEnabled(False)
-                findings = []
+                report = recon_report_parts(None)
                 tmp = state['tmp']
                 if tmp and os.path.exists(tmp):
                     try:
                         with open(tmp, 'r', encoding='utf-8') as f:
                             data = json.load(f)
-                        findings = data if isinstance(data, list) else []
+                        report = recon_report_parts(data)
                     except Exception as e:
                         _append(f"\n[!] could not parse recon output: {e}\n")
                     finally:
@@ -6399,10 +6732,19 @@ def main() -> None:
                             os.unlink(tmp)
                         except Exception:
                             pass
-                state['findings'] = findings
-                _populate(findings)
-                _set_outputs_enabled(bool(findings))
-                _append(f"\n[recon] finished (exit {code}) — {len(findings)} finding(s)\n")
+                state['findings'] = report['findings']
+                _populate(report)
+                _set_outputs_enabled(bool(report['findings']))
+                host_count = len(report.get('stages', {}).get('hosts') or [])
+                _append(
+                    f"\n[recon] finished (exit {code}) — {host_count} host(s), "
+                    f"{len(report['findings'])} finding(s)\n"
+                )
+                if code and not report['findings']:
+                    _append(
+                        '[!] Discovery worker failed before producing a report. '
+                        'Review the log above for the failing tool.\n'
+                    )
 
             def _run():
                 import shutil
@@ -6415,8 +6757,7 @@ def main() -> None:
                 # them instead of leaving the user at a dead end.
                 try:
                     from .recon import preflight, format_preflight_error, STAGE_TOOL
-                    missing = [t for t in preflight()
-                               if not (t[0] == 'nmap' and not opts.get('do_ports', True))]
+                    missing = preflight()
                     if missing:
                         _append(format_preflight_error(missing) + '\n')
                         self._show_recon_tools_dialog(missing)
@@ -6441,12 +6782,36 @@ def main() -> None:
                             self._download_tools_dialog(
                                 want, 'Installing tools for the enabled recon stages…',
                                 title='Install recon tools')
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _append(f'[!] Tool preflight failed: {exc}\n')
+                    return
+                if opts.get('do_ports'):
+                    ret = QMessageBox.question(
+                        dlg,
+                        'Run active Nmap scan?',
+                        'Nmap is an active network scan and may trigger macOS, '
+                        'EDR, IDS, or provider alerts.\n\n'
+                        'Blackthorn will use an unprivileged TCP connect scan, '
+                        'light version detection, no NSE scripts, and at most '
+                        '10 resolved IPs.\n\n'
+                        'Continue only if this activity is authorized.',
+                        QMessageBox.Yes | QMessageBox.No,
+                        QMessageBox.No,
+                    )
+                    if ret != QMessageBox.Yes:
+                        return
                 tmpf = tempfile.NamedTemporaryFile(delete=False, suffix='.json')
                 tmpf.close()
                 state['tmp'] = tmpf.name
-                log.clear(); tree.clear(); _set_outputs_enabled(False)
+                state['report'] = recon_report_parts(None)
+                state['findings'] = []
+                log.clear()
+                host_tree.clear()
+                findings_tree.clear()
+                for key, widget in summary_labels.items():
+                    widget.setText(f'{widget.accessibleName()}: 0')
+                inventory_title.setText('Discovered hosts')
+                _set_outputs_enabled(False)
                 cmd = self._recon_worker_cmd(
                     target, state['tmp'], timeout_spin.value(),
                     ports_spin.value(), opts=opts)
@@ -6458,6 +6823,12 @@ def main() -> None:
                 proc.setProcessEnvironment(env)
                 proc.readyReadStandardOutput.connect(_on_stdout)
                 proc.finished.connect(_on_finished)
+                proc.errorOccurred.connect(
+                    lambda _error: _append(
+                        f'\n[!] Could not run discovery worker: '
+                        f'{proc.errorString()}\n'
+                    )
+                )
                 state['proc'] = proc
                 _append('[recon] $ ' + ' '.join(cmd) + '\n\n')
                 run_btn.setEnabled(False); stop_btn.setEnabled(True)
@@ -6482,14 +6853,45 @@ def main() -> None:
 
             def _save():
                 path, _ = QFileDialog.getSaveFileName(
-                    dlg, 'Save recon findings', 'recon.json', 'JSON files (*.json)')
+                    dlg, 'Export discovery report', 'discovery.json',
+                    'JSON files (*.json)')
                 if path:
                     try:
                         with open(path, 'w', encoding='utf-8') as f:
-                            json.dump(state['findings'], f, indent=2, default=str)
-                        _append(f"\n[recon] saved {len(state['findings'])} finding(s) to {path}\n")
+                            json.dump(
+                                state['report'], f, indent=2, default=str
+                            )
+                        hosts = state['report'].get('stages', {}).get('hosts') or []
+                        _append(
+                            f"\n[recon] exported {len(hosts)} host(s) and "
+                            f"{len(state['findings'])} finding(s) to {path}\n"
+                        )
                     except Exception as e:
                         QMessageBox.warning(dlg, 'Save failed', str(e))
+
+            def _copy_inventory(live_only=False):
+                hosts = state['report'].get('stages', {}).get('hosts') or []
+                if live_only:
+                    values = [
+                        str(host.get('http_url') or '')
+                        for host in hosts if host.get('http_live')
+                    ]
+                else:
+                    values = [
+                        str(host.get('hostname') or '')
+                        for host in hosts if not host.get('is_apex')
+                    ]
+                values = [value for value in dict.fromkeys(values) if value]
+                if not values and not live_only:
+                    values = [
+                        str(host.get('hostname') or '')
+                        for host in hosts if host.get('hostname')
+                    ]
+                QApplication.clipboard().setText('\n'.join(values))
+                _append(
+                    f"\n[recon] copied {len(values)} "
+                    f"{'live URL(s)' if live_only else 'subdomain(s)'}\n"
+                )
 
             def _run_handoff(cmd, env_extra, label):
                 """Run an msf/caido CLI subcommand against the recon findings."""
@@ -6554,8 +6956,20 @@ def main() -> None:
             stop_btn.clicked.connect(_stop)
             merge_btn.clicked.connect(_merge)
             save_btn.clicked.connect(_save)
+            copy_hosts_btn.clicked.connect(
+                lambda: _copy_inventory(False)
+            )
+            copy_live_btn.clicked.connect(
+                lambda: _copy_inventory(True)
+            )
             msf_btn.clicked.connect(_send_msf)
             caido_btn.clicked.connect(_send_caido)
+            inventory_filter.currentIndexChanged.connect(
+                lambda: _populate_host_inventory()
+            )
+            inventory_search.textChanged.connect(
+                lambda: _populate_host_inventory()
+            )
 
             # Keep a handle so other code (e.g. abort on quit) can reach the proc.
             self._recon_state = state
@@ -7790,7 +8204,8 @@ def main() -> None:
                             data = _json.load(f)
                     except Exception:
                         data = []
-                for f in (data if isinstance(data, list) else []):
+                report = recon_report_parts(data)
+                for f in report['findings']:
                     _add_finding(f.get('technique', '?'), f.get('target', ''),
                                  f.get('severity', 'INFO'), f.get('reason', ''))
                     if f.get('technique') == 'HTTP Service':
@@ -9540,11 +9955,18 @@ def main() -> None:
             subtitle.setWordWrap(True)
             outer_layout.addWidget(title)
             outer_layout.addWidget(subtitle)
-            main_layout = QHBoxLayout()
-            outer_layout.addLayout(main_layout, 1)
-            
+            workspace_splitter = QtWidgets.QSplitter(
+                QtCore.Qt.Orientation.Horizontal
+            )
+            workspace_splitter.setObjectName('ResultsWorkspaceSplitter')
+            workspace_splitter.setChildrenCollapsible(False)
+            outer_layout.addWidget(workspace_splitter, 1)
+
             # === LEFT PANEL: Site List ===
-            left_panel = QVBoxLayout()
+            left_widget = QWidget()
+            left_widget.setMinimumWidth(145)
+            left_panel = QVBoxLayout(left_widget)
+            left_panel.setContentsMargins(0, 0, 0, 0)
             left_panel.setSpacing(10)
             
             # Header
@@ -9555,8 +9977,6 @@ def main() -> None:
             # "All Sites" option
             site_list = QtWidgets.QListWidget()
             site_list.setAccessibleName('Result targets')
-            site_list.setMinimumWidth(190)
-            site_list.setMaximumWidth(240)
             
             # Add "All Sites" first
             all_item = QtWidgets.QListWidgetItem(f'{_t("all_sites", self._lang)} ({len(self._results)} {_t("findings", self._lang)})')
@@ -9602,14 +10022,17 @@ def main() -> None:
             stats_label.setStyleSheet('color: #808080; padding: 5px;')
             left_panel.addWidget(stats_label)
             
-            main_layout.addLayout(left_panel)
-            
+            workspace_splitter.addWidget(left_widget)
+
             # === RIGHT PANEL: Results View ===
-            right_panel = QVBoxLayout()
+            results_widget = QWidget()
+            results_widget.setMinimumWidth(280)
+            right_panel = QVBoxLayout(results_widget)
+            right_panel.setContentsMargins(8, 0, 8, 0)
             right_panel.setSpacing(10)
             
             # Controls bar
-            controls = QHBoxLayout()
+            controls = QtWidgets.QGridLayout()
             
             # Sort options
             sort_label = QLabel(_t('sort_by', self._lang))
@@ -9622,11 +10045,9 @@ def main() -> None:
                 _t('category', self._lang),
                 _t('bypass_status', self._lang)
             ])
-            sort_combo.setFixedWidth(200)
-            controls.addWidget(sort_label)
-            controls.addWidget(sort_combo)
-            
-            controls.addSpacing(20)
+            sort_combo.setMinimumContentsLength(12)
+            controls.addWidget(sort_label, 0, 0)
+            controls.addWidget(sort_combo, 0, 1)
             
             # Filter options
             filter_label = QLabel(_t('filter', self._lang))
@@ -9645,14 +10066,15 @@ def main() -> None:
                 ('Fixed', 'workflow:fixed'),
             ):
                 filter_combo.addItem(label, key)
-            filter_combo.setFixedWidth(180)
-            controls.addWidget(filter_label)
-            controls.addWidget(filter_combo)
+            filter_combo.setMinimumContentsLength(11)
+            controls.addWidget(filter_label, 1, 0)
+            controls.addWidget(filter_combo, 1, 1)
+            controls.setColumnStretch(1, 1)
             
             right_panel.addLayout(controls)
             
             # Search bar row
-            search_row = QHBoxLayout()
+            search_row = QtWidgets.QGridLayout()
             search_label = QLabel(_t('search', self._lang))
             search_edit = QLineEdit()
             search_edit.setAccessibleName('Search findings')
@@ -9660,13 +10082,12 @@ def main() -> None:
             search_clear_btn = style_button(
                 QPushButton(), 'quiet', text='Clear'
             )
-            search_clear_btn.setFixedWidth(56)
+            search_clear_btn.setMinimumWidth(52)
             search_clear_btn.clicked.connect(lambda: search_edit.clear())
             
-            search_row.addWidget(search_label)
-            search_row.addWidget(search_edit, 1)
-            search_row.addWidget(search_clear_btn)
-            search_row.addSpacing(20)
+            search_row.addWidget(search_label, 0, 0)
+            search_row.addWidget(search_edit, 0, 1, 1, 2)
+            search_row.addWidget(search_clear_btn, 0, 3)
             
             # Expand/Collapse buttons
             expand_btn = style_button(
@@ -9675,8 +10096,10 @@ def main() -> None:
             collapse_btn = style_button(
                 QPushButton(), 'quiet', text=_t('collapse_all', self._lang)
             )
-            search_row.addWidget(expand_btn)
-            search_row.addWidget(collapse_btn)
+            search_row.addWidget(expand_btn, 1, 1)
+            search_row.addWidget(collapse_btn, 1, 2)
+            search_row.setColumnStretch(1, 1)
+            search_row.setColumnStretch(2, 1)
             
             right_panel.addLayout(search_row)
             
@@ -9699,12 +10122,12 @@ def main() -> None:
             
             right_panel.addWidget(results_tree, 1)
 
-            main_layout.addLayout(right_panel, 2)
+            workspace_splitter.addWidget(results_widget)
 
             # === EVIDENCE + ACTIONS PANEL ===
             details_panel = QtWidgets.QFrame()
             details_panel.setObjectName('Card')
-            details_panel.setMinimumWidth(360)
+            details_panel.setMinimumWidth(260)
             details_layout = QVBoxLayout(details_panel)
             details_title = QLabel('Evidence')
             details_title.setObjectName('PageTitle')
@@ -9719,7 +10142,7 @@ def main() -> None:
             details_text.setAccessibleName('Finding evidence')
             details_layout.addWidget(details_text, 1)
 
-            request_actions = QHBoxLayout()
+            request_actions = QtWidgets.QGridLayout()
             copy_curl_btn = style_button(
                 QPushButton(), 'quiet', text='Copy cURL'
             )
@@ -9732,11 +10155,12 @@ def main() -> None:
             retest_btn = style_button(
                 QPushButton(), 'primary', text='Re-test request'
             )
-            for button in (
+            for index, button in enumerate((
                 copy_curl_btn, copy_python_btn, repeater_btn, retest_btn,
-            ):
+            )):
                 button.setEnabled(False)
-                request_actions.addWidget(button)
+                request_actions.addWidget(button, index // 2, index % 2)
+                request_actions.setColumnStretch(index % 2, 1)
             details_layout.addLayout(request_actions)
 
             workflow_row = QHBoxLayout()
@@ -9761,7 +10185,11 @@ def main() -> None:
             action_status.setObjectName('FieldLabel')
             action_status.setWordWrap(True)
             details_layout.addWidget(action_status)
-            main_layout.addWidget(details_panel, 2)
+            workspace_splitter.addWidget(details_panel)
+            workspace_splitter.setStretchFactor(0, 1)
+            workspace_splitter.setStretchFactor(1, 3)
+            workspace_splitter.setStretchFactor(2, 2)
+            workspace_splitter.setSizes([190, 560, 380])
 
             try:
                 QWidget.setTabOrder(site_list, filter_combo)
@@ -11509,10 +11937,14 @@ def main() -> None:
 
                 header_row = QHBoxLayout()
                 title_box = QVBoxLayout()
-                title = QLabel('Dashboard')
+                title = QLabel('Report')
                 title.setObjectName('PageTitle')
-                subtitle = QLabel('Scan history, finding mix, and workflow pressure.')
+                subtitle = QLabel(
+                    'A compact workspace summary. Drag the divider below to '
+                    'give either table more room.'
+                )
                 subtitle.setObjectName('FieldLabel')
+                subtitle.setWordWrap(True)
                 title_box.addWidget(title)
                 title_box.addWidget(subtitle)
                 header_row.addLayout(title_box)
@@ -11533,26 +11965,26 @@ def main() -> None:
                     ('Bypasses', stats.get('total_bypasses', 0)),
                     ('Targets', len(stats.get('top_targets', []) or [])),
                 ]
-                for col, (label, value) in enumerate(metric_values):
+                for index, (label, value) in enumerate(metric_values):
+                    row, col = divmod(index, 2)
                     val = QLabel(str(value))
                     val.setFont(QFont('', 22, QFont.Bold))
                     name = QLabel(label)
                     name.setObjectName('FieldLabel')
                     val.setAlignment(Qt.AlignmentFlag.AlignCenter)
                     name.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                    metrics_layout.addWidget(val, 0, col)
-                    metrics_layout.addWidget(name, 1, col)
+                    metrics_layout.addWidget(val, row * 2, col)
+                    metrics_layout.addWidget(name, row * 2 + 1, col)
                     metrics_layout.setColumnStretch(col, 1)
-                layout.addWidget(metrics)
-
                 sev_dist = stats.get('severity_distribution', {})
                 sev_colors = {'CRITICAL': '#dc2626', 'HIGH': '#ea580c', 'MEDIUM': '#ca8a04', 'LOW': '#2563eb', 'INFO': '#6b7280'}
                 severity_frame = QtWidgets.QFrame()
                 severity_frame.setObjectName('Card')
-                severity_layout = QHBoxLayout(severity_frame)
+                severity_layout = QtWidgets.QGridLayout(severity_frame)
                 severity_layout.setContentsMargins(12, 10, 12, 10)
                 severity_layout.setSpacing(8)
-                for sev in ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO']:
+                for index, sev in enumerate(
+                        ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO']):
                     item = QtWidgets.QFrame()
                     item.setObjectName('DashboardPill')
                     item_layout = QHBoxLayout(item)
@@ -11563,14 +11995,29 @@ def main() -> None:
                     item_layout.addWidget(dot)
                     item_layout.addWidget(txt)
                     item_layout.addStretch()
-                    severity_layout.addWidget(item)
-                layout.addWidget(severity_frame)
+                    row, col = divmod(index, 3)
+                    severity_layout.addWidget(item, row, col)
+                    severity_layout.setColumnStretch(col, 1)
+                summary_splitter = QtWidgets.QSplitter(
+                    Qt.Orientation.Horizontal
+                )
+                summary_splitter.setObjectName('ReportSummarySplitter')
+                summary_splitter.setChildrenCollapsible(False)
+                summary_splitter.addWidget(metrics)
+                summary_splitter.addWidget(severity_frame)
+                summary_splitter.setStretchFactor(0, 2)
+                summary_splitter.setStretchFactor(1, 3)
+                summary_splitter.setSizes([380, 620])
+                layout.addWidget(summary_splitter)
 
                 tables = QtWidgets.QSplitter()
+                tables.setObjectName('ReportTablesSplitter')
                 tables.setOrientation(Qt.Orientation.Horizontal)
+                tables.setChildrenCollapsible(False)
                 layout.addWidget(tables, 1)
 
                 tech_box = QtWidgets.QWidget()
+                tech_box.setMinimumWidth(220)
                 tech_layout = QVBoxLayout(tech_box)
                 tech_layout.setContentsMargins(0, 0, 8, 0)
                 tech_title = QLabel('Top Techniques')
@@ -11594,6 +12041,7 @@ def main() -> None:
                 tables.addWidget(tech_box)
 
                 activity_box = QtWidgets.QWidget()
+                activity_box.setMinimumWidth(280)
                 activity_layout = QVBoxLayout(activity_box)
                 activity_layout.setContentsMargins(8, 0, 0, 0)
                 activity_title = QLabel('Recent Activity')
@@ -11616,7 +12064,9 @@ def main() -> None:
                     activity_table.setItem(r, 3, QtWidgets.QTableWidgetItem(str(item.get('bypasses', 0))))
                 activity_layout.addWidget(activity_table)
                 tables.addWidget(activity_box)
-                tables.setSizes([520, 520])
+                tables.setStretchFactor(0, 2)
+                tables.setStretchFactor(1, 3)
+                tables.setSizes([420, 620])
 
                 if not (stats.get('top_techniques') or stats.get('recent_activity')):
                     empty = QLabel('No scan history yet.')
@@ -13145,14 +13595,17 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                     if os.path.exists(tmpf.name):
                         with open(tmpf.name, 'r', encoding='utf-8') as f:
                             data = json.load(f)
-                        if isinstance(data, list):
-                            self._results.extend(data)
+                        report = recon_report_parts(data)
+                        findings = report['findings']
+                        if findings:
+                            self._results.extend(findings)
                             try:
                                 self._live_refresh()
                             except Exception:
                                 pass
                             self.append_log(
-                                f"[scheduler] recon finished: {len(data)} finding(s) for {target}\n")
+                                f"[scheduler] recon finished: "
+                                f"{len(findings)} finding(s) for {target}\n")
                         os.unlink(tmpf.name)
                 except Exception as e:
                     self.append_log(f"[scheduler] recon parse failed: {e}\n")

@@ -9,8 +9,8 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 def test_results_workspace_builds_with_evidence_actions(monkeypatch):
     from PySide6.QtWidgets import (
-        QApplication, QLineEdit, QListWidget, QPushButton, QTextBrowser,
-        QTreeWidget,
+        QApplication, QCheckBox, QLabel, QLineEdit, QListWidget, QPushButton,
+        QSplitter, QTextBrowser, QTreeWidget,
     )
 
     import wafpierce.database as database
@@ -29,6 +29,26 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
         def get_scan_queue(self):
             return []
 
+        def get_dashboard_stats(self):
+            return {
+                'total_scans': 2,
+                'total_findings': 5,
+                'total_bypasses': 1,
+                'severity_distribution': {'HIGH': 1, 'INFO': 4},
+                'top_techniques': [
+                    {'technique': 'Discovered Host', 'count': 4},
+                ],
+                'recent_activity': [
+                    {
+                        'date': '2026-07-28',
+                        'scans': 1,
+                        'findings': 5,
+                        'bypasses': 1,
+                    },
+                ],
+                'top_targets': ['example.test'],
+            }
+
     monkeypatch.setattr(database, 'WAFPierceDB', _DB)
     monkeypatch.setattr(gui, '_show_disclaimer_qt', lambda _app: True)
     monkeypatch.setattr(gui, '_load_prefs', lambda: {
@@ -46,6 +66,14 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
             widget for widget in QApplication.topLevelWidgets()
             if hasattr(widget, '_build_results_page')
         )
+        window.resize(760, 560)
+        QApplication.processEvents()
+        assert window.width() == 760
+        assert window.height() == 560
+        window.resize(1400, 900)
+        QApplication.processEvents()
+        assert window.width() == 1400
+        assert window.height() == 900
         target_input = next(
             field for field in window.findChildren(QLineEdit)
             if field.accessibleName() == 'Target URL'
@@ -66,6 +94,7 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
             'evidence': [{'type': 'execution_marker', 'matched': '49'}],
         }]
         page = window._build_results_page()
+        page.resize(880, 620)
         page.show()
         QApplication.processEvents()
 
@@ -82,6 +111,11 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
         )
         assert page.findChild(QListWidget).accessibleName() == 'Result targets'
         assert page.findChild(QTextBrowser).accessibleName() == 'Finding evidence'
+        results_splitter = page.findChild(
+            QSplitter, 'ResultsWorkspaceSplitter'
+        )
+        assert results_splitter is not None
+        assert results_splitter.count() == 3
         tree = next(
             tree for tree in page.findChildren(QTreeWidget)
             if tree.columnCount() == 4
@@ -89,7 +123,46 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
         tree.setCurrentItem(tree.topLevelItem(0).child(0))
         QApplication.processEvents()
         assert buttons['Re-test request'].isEnabled()
+
+        recon_page = window._build_recon_page()
+        recon_page.resize(880, 720)
+        recon_page.show()
+        scope = next(
+            field for field in recon_page.findChildren(QLineEdit)
+            if field.accessibleName() == 'Discovery scope'
+        )
+        scope.setText('*.nubank.com.br')
+        QApplication.processEvents()
+        assert any(
+            'Enumeration root: nubank.com.br' in label.text()
+            for label in recon_page.findChildren(QLabel)
+        )
+        assert next(
+            checkbox for checkbox in recon_page.findChildren(QCheckBox)
+            if checkbox.text().startswith('Active ports')
+        ).isChecked() is False
+        assert next(
+            tree for tree in recon_page.findChildren(QTreeWidget)
+            if tree.accessibleName() == 'Discovered host inventory'
+        ).columnCount() == 6
+        assert recon_page.findChild(
+            QSplitter, 'DiscoveryVerticalSplitter'
+        ) is not None
+
+        report_page = window._build_dashboard_page()
+        report_page.resize(780, 620)
+        report_page.show()
+        QApplication.processEvents()
+        assert report_page.findChild(
+            QSplitter, 'ReportTablesSplitter'
+        ) is not None
+        assert report_page.findChild(
+            QSplitter, 'ReportSummarySplitter'
+        ) is not None
+
         inspected['ok'] = True
+        report_page.close()
+        recon_page.close()
         page.close()
         return 0
 

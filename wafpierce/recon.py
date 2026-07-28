@@ -30,12 +30,14 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
 import sys
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
+import urllib.request
 
 logger = logging.getLogger(__name__)
 
@@ -59,14 +61,14 @@ REQUIRED_TOOLS: List[Tuple[str, str, str, str]] = [
     ('httpx', 'httpx', 'HTTP probing / tech detection',
      'go install github.com/projectdiscovery/httpx/cmd/httpx@latest  '
      '(the ProjectDiscovery binary, not the Python httpx lib)'),
-    ('nmap', 'nmap', 'port + service/version scan',
-     'https://nmap.org/download  (apt install nmap / brew install nmap / choco install nmap)'),
 ]
 
 # Optional tools. Recon runs fine without them, but each one that is present adds
 # a richer stage. The in-app installer can fetch these too.
 # (binary, label, stage it powers, install hint).
 OPTIONAL_TOOLS: List[Tuple[str, str, str, str]] = [
+    ('nmap', 'nmap', 'active port + service/version scan (opt-in)',
+     'https://nmap.org/download  (apt install nmap / brew install nmap / choco install nmap)'),
     ('tlsx', 'tlsx', 'TLS certs + extra subdomains from SANs',
      'go install github.com/projectdiscovery/tlsx/cmd/tlsx@latest'),
     ('gau', 'gau', 'historical URLs (wayback/commoncrawl/otx)',
@@ -86,6 +88,7 @@ OPTIONAL_TOOLS: List[Tuple[str, str, str, str]] = [
 STAGE_TOOL = {
     'tls': 'tlsx',
     'historical': 'gau',
+    'ports': 'nmap',
     'naabu': 'naabu',
     'crawl': 'katana',
     'nuclei': 'nuclei',
@@ -108,7 +111,44 @@ def _emit(msg: str) -> None:
 # Preflight
 # --------------------------------------------------------------------------- #
 def _which(binary: str) -> Optional[str]:
-    return shutil.which(binary)
+    """Resolve a tool binary, rejecting the unrelated Python ``httpx`` CLI."""
+    if binary != 'httpx':
+        return shutil.which(binary)
+
+    candidates = []
+    first = shutil.which(binary)
+    if first:
+        candidates.append(first)
+    for directory in os.environ.get('PATH', '').split(os.pathsep):
+        if directory:
+            candidates.append(os.path.join(directory, binary))
+    candidates.extend([
+        os.path.expanduser('~/.local/bin/httpx'),
+        os.path.expanduser('~/go/bin/httpx'),
+    ])
+
+    seen = set()
+    for path in candidates:
+        path = os.path.abspath(path)
+        if path in seen or not (os.path.isfile(path) and os.access(path, os.X_OK)):
+            continue
+        seen.add(path)
+        try:
+            check = subprocess.run(
+                [path, '-version'],
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=4,
+            )
+        except Exception:
+            continue
+        output = f'{check.stdout}\n{check.stderr}'.lower()
+        if check.returncode == 0 and (
+                'projectdiscovery' in output or 'current version' in output):
+            return path
+    return None
 
 
 def preflight(tools: Sequence[Tuple[str, str, str, str]] = REQUIRED_TOOLS
@@ -197,14 +237,21 @@ def _extract_hosts(text: str, suffix: str) -> Set[str]:
 # Target normalization
 # --------------------------------------------------------------------------- #
 def normalize_domain(target: str) -> str:
-    """Reduce ``https://sub.example.com:8443/path`` to ``sub.example.com``."""
+    """Reduce URLs and wildcard scope notation to an enumeration root.
+
+    ``*.example.com`` is scope notation, not a literal DNS name. External
+    enumeration tools expect ``example.com``, so leading wildcard labels are
+    deliberately removed.
+    """
     target = (target or '').strip()
     if not target:
         return target
     if '://' not in target:
         target = 'http://' + target
-    host = urlparse(target).hostname or ''
-    return host.lower()
+    host = (urlparse(target).hostname or '').lower().rstrip('.')
+    while host.startswith('*.'):
+        host = host[2:]
+    return host
 
 
 # --------------------------------------------------------------------------- #
@@ -218,6 +265,8 @@ def _finding(technique: str, target: str, reason: str,
         'bypass': False,
         'category': 'recon',
         'recon': True,
+        'kind': 'observation',
+        'verification_status': 'informational',
         'technique': technique,
         'target': target,
         'reason': reason,
@@ -230,14 +279,60 @@ def _finding(technique: str, target: str, reason: str,
 # --------------------------------------------------------------------------- #
 # Stages
 # --------------------------------------------------------------------------- #
-def enum_subdomains(domain: str, timeout: float) -> List[str]:
-    """subfinder (passive) + amass (passive), merged and de-duplicated."""
-    found: Set[str] = {domain}
+def certificate_transparency_hosts(
+        domain: str, timeout: float, cap: int = 20000) -> Set[str]:
+    """Return in-scope DNS names from public Certificate Transparency logs."""
+    query = quote(f'%.{domain}', safe='')
+    url = f'https://crt.sh/?q={query}&output=json'
+    req = urllib.request.Request(
+        url,
+        headers={
+            'User-Agent': 'Blackthorn-recon',
+            'Accept': 'application/json',
+        },
+    )
+    try:
+        from .recon_install import _urlopen
 
-    _emit(f"[*] subfinder -d {domain}")
-    rc, out, err = _run(['subfinder', '-d', domain, '-silent'], timeout)
+        with _urlopen(req, timeout=min(timeout, 45.0)) as response:
+            raw = response.read(50 * 1024 * 1024 + 1)
+        if len(raw) > 50 * 1024 * 1024:
+            raise RuntimeError('Certificate Transparency response exceeded 50 MiB')
+        rows = json.loads(raw.decode('utf-8', 'replace'))
+    except Exception as exc:
+        _emit(f"[!] Certificate Transparency: unavailable ({_err_tail(str(exc))})")
+        return set()
+
+    hosts: Set[str] = set()
+    for row in rows if isinstance(rows, list) else []:
+        for value in str(row.get('name_value') or '').splitlines():
+            host = value.strip().lower().rstrip('.')
+            while host.startswith('*.'):
+                host = host[2:]
+            if host == domain or host.endswith('.' + domain):
+                hosts.add(host)
+                if len(hosts) >= cap:
+                    break
+        if len(hosts) >= cap:
+            break
+    _emit(f"[+] Certificate Transparency: {len(hosts)} host(s)")
+    return hosts
+
+
+def enum_subdomains(domain: str, timeout: float, include_sources: bool = False):
+    """Merge passive enumeration and CT results with per-host provenance."""
+    found: Set[str] = {domain}
+    sources: Dict[str, Set[str]] = {domain: {'scope root'}}
+
+    _emit(f"[*] subfinder -all -d {domain}")
+    rc, out, err = _run(
+        ['subfinder', '-d', domain, '-all', '-silent'],
+        timeout,
+    )
     subs = _extract_hosts(out, domain)
     found |= subs
+    for host in subs:
+        sources.setdefault(host, set()).add('subfinder')
     line = f"[+] subfinder: {len(subs)} host(s)"
     if rc:
         line += f"  (rc={rc})"
@@ -250,6 +345,8 @@ def enum_subdomains(domain: str, timeout: float) -> List[str]:
     amass_subs = _extract_hosts(out, domain)
     new = amass_subs - found
     found |= amass_subs
+    for host in amass_subs:
+        sources.setdefault(host, set()).add('amass')
     line = f"[+] amass: {len(amass_subs)} host(s), {len(new)} new"
     if rc:
         line += f"  (rc={rc})"
@@ -257,7 +354,19 @@ def enum_subdomains(domain: str, timeout: float) -> List[str]:
             line += f"\n    ! {_err_tail(err)}"
     _emit(line)
 
-    return sorted(found)
+    _emit(f"[*] Certificate Transparency: querying {domain}")
+    ct_hosts = certificate_transparency_hosts(domain, timeout)
+    found |= ct_hosts
+    for host in ct_hosts:
+        sources.setdefault(host, set()).add('certificate transparency')
+
+    ordered = sorted(found)
+    if include_sources:
+        return ordered, {
+            host: sorted(sources.get(host, {'unknown'}))
+            for host in ordered
+        }
+    return ordered
 
 
 def resolve_hosts(hosts: Sequence[str], timeout: float) -> Dict[str, List[str]]:
@@ -276,10 +385,14 @@ def resolve_hosts(hosts: Sequence[str], timeout: float) -> Dict[str, List[str]]:
             obj = json.loads(line)
         except Exception:
             continue
-        host = obj.get('host')
-        a = obj.get('a') or []
+        host = str(obj.get('host') or obj.get('input') or '').lower().rstrip('.')
+        a = obj.get('a') or obj.get('resp') or []
+        if isinstance(a, str):
+            a = [a]
         if host:
-            resolved[host] = list(a)
+            resolved[host] = sorted({
+                str(ip) for ip in a if str(ip).strip()
+            })
     msg = f"[+] dnsx: {len(resolved)} live host(s)"
     if rc and not resolved and _err_tail(err):
         msg += f"\n    ! {_err_tail(err)}"
@@ -288,24 +401,61 @@ def resolve_hosts(hosts: Sequence[str], timeout: float) -> Dict[str, List[str]]:
 
 
 def probe_http(hosts: Sequence[str], timeout: float) -> List[Dict[str, Any]]:
-    """httpx: which hosts speak HTTP(S), with status/title/server/tech."""
+    """Probe HTTP(S) and retain both responsive and non-responsive hosts."""
     if not hosts:
         return []
     _emit(f"[*] httpx: probing {len(hosts)} host(s)")
+    binary = _which('httpx') or 'httpx'
+    base_cmd = [
+        binary, '-silent', '-json', '-no-color', '-t', '50', '-timeout', '8',
+        '-retries', '1', '-status-code', '-title', '-tech-detect',
+        '-web-server', '-ip', '-cname', '-location',
+    ]
     rc, out, err = _run(
-        ['httpx', '-silent', '-json', '-no-color', '-t', '50', '-timeout', '8',
-         '-status-code', '-title', '-tech-detect', '-web-server'],
-        timeout, stdin_text='\n'.join(hosts))
+        base_cmd + ['-probe'],
+        timeout,
+        stdin_text='\n'.join(hosts),
+    )
+    if rc and not out and 'probe' in (err or '').lower():
+        _emit("[*] httpx: installed version lacks -probe; inferring unavailable hosts")
+        rc, out, err = _run(
+            base_cmd,
+            timeout,
+            stdin_text='\n'.join(hosts),
+        )
     rows: List[Dict[str, Any]] = []
     for line in out.splitlines():
         line = line.strip()
         if not line:
             continue
         try:
-            rows.append(json.loads(line))
+            row = json.loads(line)
         except Exception:
             continue
-    msg = f"[+] httpx: {len(rows)} live web service(s)"
+        if not isinstance(row, dict):
+            continue
+        status = row.get('status_code') or row.get('status-code')
+        failed = row.get('failed')
+        if isinstance(failed, str):
+            failed = failed.lower() in ('true', '1', 'yes')
+        row['live'] = bool(
+            not failed and (
+                status is not None
+                or str(row.get('url') or '').startswith(('http://', 'https://'))
+            )
+        )
+        rows.append(row)
+    live_inputs = {
+        _http_row_hostname(row)
+        for row in rows if row.get('live')
+    }
+    live_inputs.discard('')
+    live = len(live_inputs)
+    unavailable = max(0, len(set(hosts)) - live)
+    msg = (
+        f"[+] httpx: {live} live web service(s), "
+        f"{unavailable} host(s) without an HTTP response"
+    )
     if rc and not rows and _err_tail(err):
         msg += f"\n    ! {_err_tail(err)}"
     _emit(msg)
@@ -349,13 +499,16 @@ def _parse_nmap_xml(xml_text: str, target: str) -> List[Dict[str, Any]]:
 
 def scan_ports(ips: Sequence[str], timeout: float,
                top_ports: int = 100) -> List[Dict[str, Any]]:
-    """nmap -sV against each unique IP (top N ports)."""
+    """Opt-in, unprivileged Nmap connect scan with light version detection."""
     uniq = sorted({ip for ip in ips if ip})
     rows: List[Dict[str, Any]] = []
     for ip in uniq:
-        _emit(f"[*] nmap -sV --top-ports {top_ports} {ip}")
+        _emit(f"[*] nmap -sT -sV --version-light --top-ports {top_ports} {ip}")
         rc, out, err = _run(
-            ['nmap', '-Pn', '-T4', '--top-ports', str(top_ports), '-sV', '-oX', '-', ip],
+            [
+                'nmap', '-Pn', '-sT', '-T3', '--top-ports', str(top_ports),
+                '-sV', '--version-light', '-oX', '-', ip,
+            ],
             timeout)
         parsed = _parse_nmap_xml(out, ip)
         rows.extend(parsed)
@@ -541,6 +694,58 @@ def xss_scan(urls: Sequence[str], timeout: float) -> List[Dict[str, Any]]:
     return rows
 
 
+def _http_row_hostname(row: Dict[str, Any]) -> str:
+    """Best-effort source hostname for one ProjectDiscovery httpx JSON row."""
+    for key in ('input', 'host', 'url'):
+        value = str(row.get(key) or '').strip()
+        if not value:
+            continue
+        parsed = urlparse(value if '://' in value else '//' + value)
+        host = parsed.hostname or ''
+        if host:
+            return host.lower().rstrip('.')
+    return ''
+
+
+def build_host_inventory(
+        domain: str,
+        hosts: Sequence[str],
+        sources: Dict[str, List[str]],
+        resolved: Dict[str, List[str]],
+        http_rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Build a discovered/DNS/HTTP status matrix for the UI and exports."""
+    by_host: Dict[str, Dict[str, Any]] = {}
+    for row in http_rows:
+        host = _http_row_hostname(row)
+        if host and row.get('live') and host not in by_host:
+            by_host[host] = row
+
+    inventory = []
+    for host in sorted(set(hosts)):
+        row = by_host.get(host) or {}
+        status = row.get('status_code') or row.get('status-code')
+        dns_live = host in resolved
+        web_live = bool(row)
+        inventory.append({
+            'hostname': host,
+            'is_apex': host == domain,
+            'sources': list(sources.get(host, [])),
+            'dns_status': 'resolved' if dns_live else 'unresolved',
+            'dns_live': dns_live,
+            'ip_addresses': list(resolved.get(host, [])),
+            'http_status': status,
+            'http_url': str(row.get('url') or ''),
+            'http_live': web_live,
+            'http_state': 'live' if web_live else (
+                'no_response' if dns_live else 'not_tested'
+            ),
+            'title': str(row.get('title') or ''),
+            'server': str(row.get('webserver') or row.get('web-server') or ''),
+            'technologies': row.get('tech') or row.get('technologies') or [],
+        })
+    return inventory
+
+
 # --------------------------------------------------------------------------- #
 # Orchestration
 # --------------------------------------------------------------------------- #
@@ -549,7 +754,7 @@ def run_recon(target: str, *, timeout: float = 300.0, top_ports: int = 100,
               nuclei_severity: str = 'low,medium,high,critical', nuclei_tags: str = '',
               do_tls: bool = True, do_historical: bool = True, do_naabu: bool = False,
               do_crawl: bool = False, do_nuclei: bool = False, do_xss: bool = False,
-              do_ports: bool = True) -> Dict[str, Any]:
+              do_ports: bool = False) -> Dict[str, Any]:
     """Run the recon pipeline against ``target`` and return a structured report.
 
     Each optional stage is individually switchable (``do_*``). The ``findings``
@@ -570,7 +775,9 @@ def run_recon(target: str, *, timeout: float = 300.0, top_ports: int = 100,
     findings: List[Dict[str, Any]] = []
 
     # 1. Subdomains (subfinder + amass)
-    subdomains = enum_subdomains(domain, timeout)
+    subdomains, host_sources = enum_subdomains(
+        domain, timeout, include_sources=True
+    )
 
     # 2. Resolve
     resolved = resolve_hosts(subdomains, timeout)
@@ -582,6 +789,8 @@ def run_recon(target: str, *, timeout: float = 300.0, top_ports: int = 100,
         new_sans = sorted({s for s in sans
                            if s == domain or s.endswith('.' + domain)} - set(subdomains))
         if new_sans:
+            for host in new_sans:
+                host_sources.setdefault(host, []).append('TLS SAN')
             resolved.update(resolve_hosts(new_sans, timeout))
             subdomains = sorted(set(subdomains) | set(new_sans))
             findings.append(_finding(
@@ -589,10 +798,11 @@ def run_recon(target: str, *, timeout: float = 300.0, top_ports: int = 100,
                 f"{len(new_sans)} extra subdomain(s) discovered via TLS certificates",
                 subdomains=new_sans))
 
+    subdomain_count = sum(1 for host in subdomains if host != domain)
     findings.append(_finding(
         'Subdomain Enumeration', domain,
-        f"{len(subdomains)} subdomain(s) discovered for {domain}",
-        subdomains=subdomains))
+        f"{subdomain_count} subdomain(s) discovered plus the scope root",
+        subdomains=subdomains, sources=host_sources))
 
     for cert in tls_rows:
         host = cert.get('host') or domain
@@ -627,8 +837,9 @@ def run_recon(target: str, *, timeout: float = 300.0, top_ports: int = 100,
 
     # 3. HTTP probe (httpx)
     web = probe_http(active or subdomains, timeout)
+    live_web = [row for row in web if row.get('live')]
     live_urls: List[str] = []
-    for row in web:
+    for row in live_web:
         url = row.get('url') or row.get('input') or ''
         if url:
             live_urls.append(url)
@@ -642,6 +853,42 @@ def run_recon(target: str, *, timeout: float = 300.0, top_ports: int = 100,
             'HTTP Service', url or row.get('host', domain),
             f"{title or 'live'} — {' | '.join(bits)}" if bits else (title or 'live web service'),
             http_status=status, title=title, server=server, tech=tech))
+    live_urls = list(dict.fromkeys(live_urls))
+
+    inventory = build_host_inventory(
+        domain,
+        subdomains,
+        host_sources,
+        resolved,
+        live_web,
+    )
+    for host in inventory:
+        state_bits = [
+            (
+                'DNS: ' + ', '.join(host['ip_addresses'])
+                if host['dns_live'] else 'DNS: unresolved'
+            ),
+        ]
+        if host['http_live']:
+            status = host.get('http_status')
+            state_bits.append(
+                f"HTTP: live{f' ({status})' if status is not None else ''}"
+            )
+        elif host['dns_live']:
+            state_bits.append('HTTP: no response')
+        state_bits.append(
+            'Sources: ' + ', '.join(host.get('sources') or ['unknown'])
+        )
+        findings.append(_finding(
+            'Discovered Host',
+            host['hostname'],
+            ' · '.join(state_bits),
+            discovery=host,
+            dns_status=host['dns_status'],
+            http_status=host.get('http_status'),
+            http_live=host['http_live'],
+            sources=host.get('sources') or [],
+        ))
 
     # 3b. Historical URLs (gau, optional)
     historical: List[str] = []
@@ -709,7 +956,7 @@ def run_recon(target: str, *, timeout: float = 300.0, top_ports: int = 100,
     # 4. Ports / services (nmap) — cap IPs so a big resolve set doesn't run forever.
     ports: List[Dict[str, Any]] = []
     if do_ports:
-        nmap_ips = sorted(all_ips)[:min(50, max_hosts)]
+        nmap_ips = sorted(all_ips)[:min(10, max_hosts)]
         if len(all_ips) > len(nmap_ips):
             _emit(f"[!] {len(all_ips)} IP(s) resolved — port-scanning the first {len(nmap_ips)}")
         ports = scan_ports(nmap_ips, timeout, top_ports=top_ports)
@@ -723,8 +970,19 @@ def run_recon(target: str, *, timeout: float = 300.0, top_ports: int = 100,
                 severity='LOW', port=p.get('port'), service=p.get('service'),
                 product=p.get('product'), version=p.get('version')))
 
-    _emit(f"[+] Recon complete: {len(subdomains)} subdomains, {len(resolved)} resolved, "
-          f"{len(web)} web services, {len(historical)} historical URLs, "
+    summary = {
+        'subdomains': subdomain_count,
+        'hosts_total': len(subdomains),
+        'dns_live': len(resolved),
+        'web_live': sum(1 for host in inventory if host['http_live']),
+        'dns_without_http': sum(
+            1 for host in inventory
+            if host['dns_live'] and not host['http_live']
+        ),
+        'unresolved': sum(1 for host in inventory if not host['dns_live']),
+    }
+    _emit(f"[+] Recon complete: {subdomain_count} subdomains, {len(resolved)} resolved, "
+          f"{summary['web_live']} web hosts, {len(historical)} historical URLs, "
           f"{len(endpoints)} crawled, {len(naabu_rows)} fast-ports, {len(vulns)} vulns, "
           f"{len(xss)} XSS, {len(ports)} open ports")
 
@@ -733,7 +991,10 @@ def run_recon(target: str, *, timeout: float = 300.0, top_ports: int = 100,
         'findings': findings,
         'stages': {
             'subdomains': subdomains,
+            'sources': host_sources,
             'resolved': resolved,
+            'hosts': inventory,
+            'summary': summary,
             'tls': tls_rows,
             'http': web,
             'historical': historical,
@@ -755,6 +1016,10 @@ def _build_parser() -> argparse.ArgumentParser:
         description='External-tool reconnaissance (subfinder/amass/dnsx/httpx/nmap).')
     p.add_argument('target', help='domain or URL, e.g. example.com or https://example.com')
     p.add_argument('-o', '--output', help='write findings JSON to this file')
+    p.add_argument(
+        '--report-output',
+        help='write the full host inventory and findings report to this file',
+    )
     p.add_argument('--timeout', type=float, default=300.0,
                    help='per-tool timeout in seconds (default: 300)')
     p.add_argument('--top-ports', type=int, default=100,
@@ -767,8 +1032,17 @@ def _build_parser() -> argparse.ArgumentParser:
                    help='nuclei severities to report (default: low,medium,high,critical)')
     p.add_argument('--nuclei-tags', default='',
                    help='nuclei template tags, e.g. cve,xss,sqli,lfi,rce,exposure,takeover')
-    # Per-stage switches (on-by-default extras vs opt-in heavy stages)
-    p.add_argument('--no-ports', action='store_true', help='skip nmap port/service scan')
+    # Per-stage switches (on-by-default extras vs opt-in active/heavy stages)
+    p.add_argument(
+        '--ports',
+        action='store_true',
+        help='opt in to an active Nmap connect/service scan (disabled by default)',
+    )
+    p.add_argument(
+        '--no-ports',
+        action='store_true',
+        help=argparse.SUPPRESS,
+    )
     p.add_argument('--no-tls', action='store_true', help='skip tlsx TLS/SAN stage')
     p.add_argument('--no-historical', action='store_true', help='skip gau historical URLs')
     p.add_argument('--no-extras', action='store_true',
@@ -811,7 +1085,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             do_crawl=args.crawl or args.deep,
             do_nuclei=args.nuclei or args.deep,
             do_xss=args.xss or args.deep,
-            do_ports=not args.no_ports,
+            do_ports=args.ports and not args.no_ports,
         )
     except ValueError as e:
         print(f"[!] {e}", file=sys.stderr)
@@ -828,7 +1102,21 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"[!] Failed to write {args.output}: {e}", file=sys.stderr)
             return 1
 
-    if args.json or not args.output:
+    if args.report_output:
+        try:
+            with open(args.report_output, 'w', encoding='utf-8') as f:
+                json.dump(report, f, indent=2, default=str)
+            _emit(
+                f"[+] Wrote full discovery report to {args.report_output}"
+            )
+        except Exception as e:
+            print(
+                f"[!] Failed to write {args.report_output}: {e}",
+                file=sys.stderr,
+            )
+            return 1
+
+    if args.json or not (args.output or args.report_output):
         print(json.dumps(findings, indent=2, default=str))
 
     return 0
