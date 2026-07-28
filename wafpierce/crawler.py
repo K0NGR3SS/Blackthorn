@@ -104,8 +104,27 @@ class Crawler:
         if self.limiter is not None:
             self.limiter.acquire()
         try:
-            return self.session.get(url, timeout=self.timeout,
-                                    allow_redirects=True, verify=False)
+            current = url
+            for _ in range(6):
+                response = self.session.get(
+                    current, timeout=self.timeout,
+                    allow_redirects=False, verify=False,
+                )
+                if response.status_code not in (301, 302, 303, 307, 308):
+                    return response
+                location = response.headers.get('Location')
+                if not location:
+                    return response
+                following = urljoin(current, location)
+                # The crawler shares the authenticated scanner session. Never
+                # follow it across the target-origin boundary.
+                if not self._same_host(following):
+                    logger.debug(
+                        "Crawler stopped credentialed redirect at %s", following
+                    )
+                    return response
+                current = following
+            return response
         except Exception as e:
             logger.debug(f"Crawl GET failed {url}: {e}")
             return None

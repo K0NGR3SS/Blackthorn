@@ -15,7 +15,7 @@ Stdlib + requests session only; never raises (best-effort discovery).
 """
 import json
 import logging
-from urllib.parse import urlparse, urljoin
+from urllib.parse import quote, urlparse, urljoin
 from typing import Dict, List, Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -55,16 +55,41 @@ _SAMPLE_VALUES = {
 
 def _get(session, url, timeout):
     try:
-        return session.get(url, timeout=timeout, allow_redirects=True, verify=False)
+        # Schema discovery shares the authenticated scan session. Redirects are
+        # intentionally not followed here so credentials cannot cross origins.
+        return session.get(
+            url, timeout=timeout, allow_redirects=False, verify=False
+        )
     except Exception as e:
         logger.debug(f"Schema GET failed {url}: {e}")
         return None
 
 
-def _sample_for(schema: dict) -> str:
+def _sample_for(schema: dict) -> Any:
     if not isinstance(schema, dict):
         return 'test'
-    return _SAMPLE_VALUES.get(schema.get('type', 'string'), 'test')
+    if schema.get('example') is not None:
+        return schema['example']
+    if schema.get('default') is not None:
+        return schema['default']
+    if schema.get('enum'):
+        return schema['enum'][0]
+    schema_type = schema.get('type', 'string')
+    if schema_type == 'object' or schema.get('properties'):
+        return {
+            name: _sample_for(child)
+            for name, child in (schema.get('properties') or {}).items()
+        }
+    if schema_type == 'array':
+        return [_sample_for(schema.get('items') or {})]
+    value = _SAMPLE_VALUES.get(schema_type, 'test')
+    if schema_type == 'integer':
+        return 1
+    if schema_type == 'number':
+        return 1.0
+    if schema_type == 'boolean':
+        return True
+    return value
 
 
 def _parse_openapi(doc: dict) -> List[Dict[str, Any]]:
@@ -84,24 +109,78 @@ def _parse_openapi(doc: dict) -> List[Dict[str, Any]]:
         full_path = (base_path.rstrip('/') + '/' + raw_path.lstrip('/')) if base_path else raw_path
         if not full_path.startswith('/'):
             full_path = '/' + full_path
+        path_parameters = methods.get('parameters', []) if isinstance(
+            methods.get('parameters'), list
+        ) else []
         for method, op in methods.items():
             if method.lower() not in ('get', 'post', 'put', 'delete', 'patch'):
                 continue
             params = {}
+            path_values = {}
+            headers = {}
+            body = None
             if isinstance(op, dict):
-                for p in op.get('parameters', []) or []:
+                parameters = list(path_parameters) + list(op.get('parameters', []) or [])
+                form_fields = {}
+                for p in parameters:
                     if not isinstance(p, dict):
                         continue
                     name = p.get('name')
                     if not name:
                         continue
-                    # query/path params are the fuzzable ones
-                    if p.get('in') in ('query', 'path'):
-                        params[name] = _sample_for(p.get('schema', p))
+                    where = p.get('in')
+                    sample = _sample_for(p.get('schema', p))
+                    if where == 'query':
+                        params[name] = sample
+                    elif where == 'path':
+                        path_values[name] = sample
+                    elif where == 'header':
+                        headers[name] = str(sample)
+                    elif where == 'body':
+                        body = json.dumps(sample, separators=(',', ':'))
+                        headers['Content-Type'] = 'application/json'
+                    elif where == 'formData':
+                        form_fields[name] = sample
+                if form_fields:
+                    body = '&'.join(
+                        f'{quote(str(name))}={quote(str(value))}'
+                        for name, value in form_fields.items()
+                    )
+                    headers['Content-Type'] = 'application/x-www-form-urlencoded'
+
+                # OpenAPI 3 requestBody.
+                request_body = op.get('requestBody') or {}
+                content = request_body.get('content') if isinstance(
+                    request_body, dict
+                ) else {}
+                if isinstance(content, dict) and content:
+                    media_type = (
+                        'application/json' if 'application/json' in content
+                        else next(iter(content))
+                    )
+                    media = content.get(media_type) or {}
+                    sample = media.get('example')
+                    if sample is None:
+                        sample = _sample_for(media.get('schema') or {})
+                    if media_type == 'application/json' and isinstance(
+                        sample, (dict, list)
+                    ):
+                        body = json.dumps(sample, separators=(',', ':'))
+                    else:
+                        body = str(sample)
+                    headers['Content-Type'] = media_type
+            resolved_path = full_path
+            for name, value in path_values.items():
+                resolved_path = resolved_path.replace(
+                    '{' + name + '}', quote(str(value), safe='')
+                )
             endpoints.append({
-                'path': full_path,
+                'path': resolved_path,
                 'params': params,
                 'method': method.upper(),
+                'headers': headers,
+                'body': body,
+                'parameter_location': 'query',
             })
     return endpoints
 
@@ -138,8 +217,10 @@ def ingest_graphql(base_url: str, session, timeout: int = 5) -> List[Dict[str, A
     for loc in GRAPHQL_PATHS:
         url = urljoin(base_url + '/', loc.lstrip('/'))
         try:
-            resp = session.post(url, json=INTROSPECTION_QUERY, timeout=timeout,
-                                allow_redirects=True, verify=False)
+            resp = session.post(
+                url, json=INTROSPECTION_QUERY, timeout=timeout,
+                allow_redirects=False, verify=False,
+            )
         except Exception as e:
             logger.debug(f"GraphQL introspection failed {url}: {e}")
             continue
@@ -164,12 +245,19 @@ def ingest_graphql(base_url: str, session, timeout: int = 5) -> List[Dict[str, A
                     op_fields.append((f['name'], args))
         gpath = urlparse(url).path or '/graphql'
         # Endpoint with introspection enabled is itself a finding-worthy target.
-        endpoints.append({'path': gpath, 'params': {'query': '{__typename}'},
+        endpoints.append({'path': gpath, 'params': {},
                           'method': 'POST', 'graphql': True,
+                          'headers': {'Content-Type': 'application/json'},
+                          'body': json.dumps({'query': '{__typename}'}),
                           'introspection': True})
         for fname, args in op_fields[:30]:
-            endpoints.append({'path': gpath, 'params': args or {'query': f'{{{fname}}}'},
-                              'method': 'POST', 'graphql': True, 'field': fname})
+            query = f'{{{fname}}}'
+            endpoints.append({
+                'path': gpath, 'params': {},
+                'method': 'POST', 'graphql': True, 'field': fname,
+                'headers': {'Content-Type': 'application/json'},
+                'body': json.dumps({'query': query, 'variables': args}),
+            })
         break  # one working endpoint is enough
     return endpoints
 

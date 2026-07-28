@@ -135,3 +135,21 @@ def test_declared_scanner_guards_reference_registered_techniques():
     assert CloudFrontBypasser.INTRUSIVE_WORKFLOW_SKIP <= registered
     assert CloudFrontBypasser.DISABLED_TRANSPORT_TECHNIQUES <= registered
     assert CloudFrontBypasser.DISABLED_ACCURACY_TECHNIQUES <= registered
+
+
+def test_every_registered_technique_has_truthful_capability_metadata():
+    catalog = CloudFrontBypasser.capability_catalog()
+    registered = {
+        technique
+        for category in pierce.SCAN_CATEGORIES.values()
+        for technique in category['techniques']
+    }
+
+    assert set(catalog) == registered
+    assert {item['capability'] for item in catalog.values()} <= {
+        'proof', 'candidate', 'observation', 'disabled',
+    }
+    assert catalog['_test_sqli_bypass']['capability'] == 'proof'
+    assert catalog['_test_host_header_injection']['capability'] == 'candidate'
+    assert catalog['_test_http3_detection']['capability'] == 'observation'
+    assert catalog['_test_http_desync']['capability'] == 'disabled'
