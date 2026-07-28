@@ -54,8 +54,22 @@ from .scan_capabilities import build_capability_catalog
 
 logger = logging.getLogger(__name__)
 
+_PHASE_EVENT_PREFIX = '::blackthorn-phase::'
+
 
 _REAL_STDOUT = None
+
+
+def _emit_phase_event(phase_id: str, label: str, progress: int) -> None:
+    """Emit one machine-readable GUI progress event alongside human logs."""
+    print(
+        _PHASE_EVENT_PREFIX + json.dumps({
+            'id': phase_id,
+            'label': label,
+            'progress': max(0, min(100, int(progress))),
+        }, separators=(',', ':')),
+        flush=True,
+    )
 
 
 def _quiet_stdout() -> None:
@@ -1679,12 +1693,14 @@ class CloudFrontBypasser(ExtraTechniques):
             ScanInterruptedError: If scan is interrupted
         """
         logger.info(f"Starting scan of {self.target}")
+        _emit_phase_event('prepare', 'Preparing target', 2)
         print(f"[*] Scanning {self.target}")
 
         # Start the clock for the optional --max-time budget.
         self._scan_start = time.monotonic()
 
         # Establish baseline first
+        _emit_phase_event('baseline', 'Establishing baseline', 8)
         print("[*] Establishing baseline...")
         try:
             baseline = self._get_baseline()
@@ -1751,6 +1767,7 @@ class CloudFrontBypasser(ExtraTechniques):
         print(f"[*] Testing bypass techniques...\n")
         
         # Run WAF Detection first
+        _emit_phase_event('fingerprint', 'Fingerprinting edge controls', 20)
         print("[*] Phase 1: WAF Detection & Fingerprinting...")
         waf_results = self._detect_waf()
         if waf_results:
@@ -1766,6 +1783,7 @@ class CloudFrontBypasser(ExtraTechniques):
             self.results.extend(cdn_results)
         
         # Detect target operating system
+        _emit_phase_event('platform', 'Profiling the application', 28)
         print("\n[*] Phase 2: OS Detection...")
         detected_os, os_confidence, os_results = self._detect_target_os()
         if os_results:
@@ -1773,6 +1791,7 @@ class CloudFrontBypasser(ExtraTechniques):
 
         # Discover real endpoints + params so injection tests hit live inputs.
         if self.enable_crawl or self.enable_schema or self.seed_targets:
+            _emit_phase_event('discovery', 'Discovering request surfaces', 36)
             print("\n[*] Phase 2.5: Endpoint & Parameter Discovery...")
             try:
                 self._run_discovery()
@@ -1789,6 +1808,7 @@ class CloudFrontBypasser(ExtraTechniques):
         elif self.oob and self.safe_mode:
             print("[*] Safe mode: skipped active out-of-band callback probes")
 
+        _emit_phase_event('testing', 'Testing selected techniques', 45)
         print("\n[*] Phase 3: Testing bypass techniques...")
         
         # Build technique list based on selected categories
@@ -2110,12 +2130,14 @@ class CloudFrontBypasser(ExtraTechniques):
         # demoted rather than shipped as findings.
         if self.reconfirm:
             try:
+                _emit_phase_event('verification', 'Re-confirming candidates', 88)
                 self._reconfirm_bypasses(samples=self.reconfirm_samples)
             except Exception as e:
                 logger.debug(f"Re-confirmation phase error: {e}")
 
         # Bring direct/legacy scanner records onto the same explicit state model
         # as the evidence-aware request path before they reach GUI/export/CI.
+        _emit_phase_event('finalize', 'Normalizing evidence', 96)
         self._normalize_result_records()
 
         # Backfill reproduction commands for any results built outside the
@@ -2146,6 +2168,7 @@ class CloudFrontBypasser(ExtraTechniques):
         actionable_count = sum(1 for r in self.results if _is_actionable_result(r))
         logger.info(f"Scan complete: {actionable_count} actionable findings, "
                     f"{len(self.results) - actionable_count} observations")
+        _emit_phase_event('complete', 'Scan complete', 100)
         return self.results
 
     @staticmethod

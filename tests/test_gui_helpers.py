@@ -12,6 +12,9 @@ from wafpierce.gui import (
     profile_from_prefs, merge_profile, PROFILE_KEYS,
     _load_prefs, _normalize_language, _save_prefs,
     BANNER_PATH, LOGO_PATH, SIDEBAR_LOGO_PATH,
+    LEGAL_ACCEPTANCE_VERSION, SCAN_CATEGORIES_GUI, SCAN_PROFILE_DEFINITIONS,
+    legal_acceptance_is_current, parse_scan_phase_event,
+    scan_preflight_summary, scan_profile_settings,
 )
 
 
@@ -119,6 +122,56 @@ def test_gui_engagement_scope_is_fail_closed_and_honors_exclusions():
         ['https://app.example.test/api/logout'],
     )
     assert not _engagement_authorizes('https://app.example.test/api', [])
+
+
+def test_task_profiles_only_reference_registered_categories():
+    registered = set(SCAN_CATEGORIES_GUI)
+    for definition in SCAN_PROFILE_DEFINITIONS.values():
+        assert set(definition['categories']) <= registered
+        assert definition['intrusive'] is False
+        assert definition['reconfirm'] is True
+
+    custom = scan_profile_settings('custom', ['jwt_auth'])
+    assert custom['categories'] == ('jwt_auth',)
+
+
+def test_preflight_summary_exposes_safety_verification_and_authorization():
+    summary = scan_preflight_summary(
+        ['https://app.example.test'],
+        'Authenticated app',
+        ['jwt_auth', 'business_logic'],
+        {
+            'safe_mode': True,
+            'no_reconfirm': False,
+            'engagement_id': 7,
+        },
+    )
+
+    assert '1 target' in summary
+    assert '2 categories' in summary
+    assert 'safe mode' in summary
+    assert 're-confirmation on' in summary
+    assert 'engagement scope linked' in summary
+
+
+def test_structured_scan_phase_events_are_strict_and_bounded():
+    assert parse_scan_phase_event(
+        '::blackthorn-phase::{"label":"Testing selected techniques","progress":45}'
+    ) == ('Testing selected techniques', 45)
+    assert parse_scan_phase_event(
+        '::blackthorn-phase::{"label":"Done","progress":800}'
+    ) == ('Done', 100)
+    assert parse_scan_phase_event('[*] Testing selected techniques') is None
+    assert parse_scan_phase_event('::blackthorn-phase::{broken') is None
+
+
+def test_legal_acceptance_is_versioned():
+    assert legal_acceptance_is_current({
+        'legal_accepted_version': LEGAL_ACCEPTANCE_VERSION,
+    })
+    assert not legal_acceptance_is_current({
+        'legal_accepted_version': 'older-copy',
+    })
 
 
 def test_finding_proof_html_renders_structured_evidence_and_escapes_values():

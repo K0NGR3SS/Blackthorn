@@ -1617,6 +1617,104 @@ SCAN_CATEGORIES_GUI = {
     },
 }
 
+SCAN_PROFILE_DEFINITIONS = {
+    'safe_recon': {
+        'label': 'Safe recon',
+        'description': 'Low-impact fingerprinting, exposure checks, and configuration review.',
+        'categories': (
+            'detection_recon', 'info_disclosure', 'security_misconfig',
+        ),
+        'safe_mode': True,
+        'intrusive': False,
+        'reconfirm': True,
+    },
+    'standard': {
+        'label': 'Standard evidence scan',
+        'description': 'Broad application coverage with noisy and destructive workflows held back.',
+        'categories': tuple(SCAN_CATEGORIES_GUI),
+        'safe_mode': True,
+        'intrusive': False,
+        'reconfirm': True,
+    },
+    'authenticated_app': {
+        'label': 'Authenticated app',
+        'description': 'Prioritizes request-rich application, API, auth, and business-logic checks.',
+        'categories': (
+            'injection_testing', 'security_misconfig', 'business_logic',
+            'jwt_auth', 'graphql_attacks', 'ssrf_advanced', 'cache_control',
+            'info_disclosure', 'detection_recon',
+        ),
+        'safe_mode': True,
+        'intrusive': False,
+        'reconfirm': True,
+    },
+}
+
+LEGAL_ACCEPTANCE_VERSION = '2026-07-28'
+_PHASE_EVENT_PREFIX = '::blackthorn-phase::'
+
+
+def scan_profile_settings(profile_key: str, custom_categories=None) -> dict:
+    """Return an isolated task profile; ``custom`` uses the supplied categories."""
+    if profile_key == 'custom':
+        return {
+            'label': 'Custom',
+            'description': 'Uses the category and safety controls under Advanced.',
+            'categories': tuple(custom_categories or ()),
+            'safe_mode': True,
+            'intrusive': False,
+            'reconfirm': True,
+        }
+    source = SCAN_PROFILE_DEFINITIONS.get(
+        profile_key, SCAN_PROFILE_DEFINITIONS['standard']
+    )
+    return {
+        **source,
+        'categories': tuple(source['categories']),
+    }
+
+
+def scan_preflight_summary(targets, profile_label: str, categories, opts: dict) -> str:
+    """Build the compact, plain-language preflight shown before execution."""
+    target_count = len(targets or [])
+    category_count = len(categories or [])
+    safety = 'safe mode' if opts.get('safe_mode') else 'full-impact mode'
+    verification = (
+        're-confirmation on' if not opts.get('no_reconfirm')
+        else 're-confirmation off'
+    )
+    if opts.get('dry_run'):
+        authorization = 'dry run'
+    elif opts.get('engagement_id'):
+        authorization = 'engagement scope linked'
+    elif opts.get('authorize'):
+        authorization = 'allowlist linked'
+    else:
+        authorization = 'authorization not linked'
+    noun = 'target' if target_count == 1 else 'targets'
+    return (
+        f'{profile_label} · {target_count} {noun} · {category_count} categories · '
+        f'{safety} · {verification} · {authorization}'
+    )
+
+
+def parse_scan_phase_event(line: str):
+    """Parse one scanner-emitted phase event into ``(label, progress)``."""
+    text = str(line or '').strip()
+    if not text.startswith(_PHASE_EVENT_PREFIX):
+        return None
+    try:
+        event = json.loads(text[len(_PHASE_EVENT_PREFIX):])
+        label = str(event.get('label') or '').strip()
+        progress = max(0, min(100, int(event.get('progress', 0))))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return (label, progress) if label else None
+
+
+def legal_acceptance_is_current(prefs: dict) -> bool:
+    return str((prefs or {}).get('legal_accepted_version') or '') == LEGAL_ACCEPTANCE_VERSION
+
 
 def _show_disclaimer_qt(app) -> bool:
     """Show legal disclaimer using PySide6/Qt. Returns True if user agrees, False otherwise."""
@@ -1625,8 +1723,11 @@ def _show_disclaimer_qt(app) -> bool:
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QFont, QFontDatabase, QPixmap
     
-    # Get current language from prefs
-    lang = _load_prefs().get('language', 'en')
+    # Show once per legal-copy version, not on every launch.
+    prefs = _load_prefs()
+    if legal_acceptance_is_current(prefs):
+        return True
+    lang = prefs.get('language', 'en')
     
     # Find a font that supports Unicode (Arabic, Cyrillic, etc.)
     try:
@@ -1684,12 +1785,14 @@ def _show_disclaimer_qt(app) -> bool:
     btn_layout = QHBoxLayout()
     btn_layout.addStretch()
     
-    agree_btn = QPushButton(_t('i_agree', lang))
-    agree_btn.setStyleSheet('background-color: #28a745; color: white;')
+    agree_btn = style_button(
+        QPushButton(), 'primary', text=_t('i_agree', lang)
+    )
     agree_btn.setCursor(Qt.PointingHandCursor)
     
-    decline_btn = QPushButton(_t('i_decline', lang))
-    decline_btn.setStyleSheet('background-color: #dc3545; color: white;')
+    decline_btn = style_button(
+        QPushButton(), 'danger', text=_t('i_decline', lang)
+    )
     decline_btn.setCursor(Qt.PointingHandCursor)
     
     agree_btn.clicked.connect(dialog.accept)
@@ -1700,8 +1803,14 @@ def _show_disclaimer_qt(app) -> bool:
     btn_layout.addStretch()
     layout.addLayout(btn_layout)
     
-    result = dialog.exec()
-    return result == QDialog.DialogCode.Accepted
+    accepted = dialog.exec() == QDialog.DialogCode.Accepted
+    if accepted:
+        try:
+            prefs['legal_accepted_version'] = LEGAL_ACCEPTANCE_VERSION
+            _save_prefs(prefs)
+        except Exception:
+            pass
+    return accepted
 
 
 def main() -> None:
@@ -1732,6 +1841,8 @@ def main() -> None:
         ssl_info_ready = Signal(object)
         # emit progress update: target, progress_percent (0-100)
         progress_update = Signal(str, int)
+        # explicit phase update emitted by the scanner engine
+        phase_update = Signal(str, str)
 
         def __init__(self, targets, threads, delay, concurrent=1, use_concurrent=True, retry_failed=0, selected_categories=None, proxy_config=None, enable_http_logging=False, enable_ssl_analysis=False, advanced_opts=None, parent=None):
             super().__init__(parent)
@@ -1800,57 +1911,19 @@ def main() -> None:
                 current_progress = 0
                 final_errors = []
                 
-                # Progress tracking based on phases
-                lines_processed = [0]  # Use list to allow modification in nested function
-                
                 def update_progress_from_line(line: str):
                     nonlocal current_progress
-                    lines_processed[0] += 1
-                    line_lower = line.lower()
-                    new_progress = current_progress
-                    
-                    # Phase 0: Scanning/Starting (0-5%)
-                    if 'scanning' in line_lower:
-                        new_progress = max(new_progress, 3)
-                    # Phase 1: Establishing baseline (5-10%)
-                    if 'establishing baseline' in line_lower or 'baseline' in line_lower:
-                        new_progress = max(new_progress, 8)
-                    if 'baseline:' in line_lower:
-                        new_progress = max(new_progress, 10)
-                    # Phase 2: WAF Detection (10-20%)
-                    if 'phase 1' in line_lower or 'waf detection' in line_lower or 'detecting waf' in line_lower:
-                        new_progress = max(new_progress, 15)
-                    if 'detected waf' in line_lower or 'no known waf' in line_lower:
-                        new_progress = max(new_progress, 20)
-                    # Phase 3: OS Detection (20-30%)
-                    if 'phase 2' in line_lower or 'os detection' in line_lower:
-                        new_progress = max(new_progress, 25)
-                    # Phase 4: Testing techniques (30-90%)
-                    if 'phase 3' in line_lower or 'testing bypass' in line_lower:
-                        new_progress = max(new_progress, 35)
-                    if 'loading category' in line_lower:
-                        new_progress = max(new_progress, 40)
-                    if 'running' in line_lower and 'techniques' in line_lower:
-                        new_progress = max(new_progress, 45)
-                    
-                    # Increment progress slowly for each output line during testing phase
-                    if new_progress >= 45:
-                        # Slow linear increment - add 0.3% per line, capped at 90%
-                        new_progress = min(90, new_progress + 0.3)
-                    
-                    # Completing
-                    if 'warning:' in line_lower and 'techniques encountered errors' in line_lower:
-                        new_progress = max(new_progress, 95)
-                    if 'scan complete' in line_lower or 'finished' in line_lower:
-                        new_progress = max(new_progress, 98)
-                    
-                    # Only update if progress increased (ensures linear progression)
-                    if new_progress > current_progress:
-                        current_progress = new_progress
-                        try:
-                            self.progress_update.emit(target, int(current_progress))
-                        except Exception as e:
-                            pass
+                    event = parse_scan_phase_event(line)
+                    if event is None:
+                        return False
+                    label, new_progress = event
+                    current_progress = max(current_progress, new_progress)
+                    try:
+                        self.phase_update.emit(target, label)
+                        self.progress_update.emit(target, int(current_progress))
+                    except Exception:
+                        pass
+                    return True
                 
                 for attempt in range(self.retry_failed + 1):
                     if self._abort:
@@ -1928,8 +2001,9 @@ def main() -> None:
                         if proc.stdout is not None:
                             for line in proc.stdout:
                                 log_lines.append(line)
-                                self.log_line.emit(line)
-                                update_progress_from_line(line)
+                                is_phase_event = update_progress_from_line(line)
+                                if not is_phase_event:
+                                    self.log_line.emit(line)
                                 if self._abort:
                                     try:
                                         from .tools_runtime import kill_proc_tree
@@ -3067,8 +3141,8 @@ def main() -> None:
                     pass
 
         def _build_scan_profile_panel(self):
-            """In-page scan profile controls replacing the fixed category dialog."""
-            panel = QtWidgets.QGroupBox('Scan Profile & Scope')
+            """Task-first scan setup with optional category-level controls."""
+            panel = QtWidgets.QGroupBox('Scan profile & scope')
             panel.setObjectName('ScanProfilePanel')
             layout = QtWidgets.QVBoxLayout(panel)
             layout.setSpacing(10)
@@ -3081,20 +3155,63 @@ def main() -> None:
             self._engagement_combo = QtWidgets.QComboBox()
             self._refresh_engagement_combo()
             top.addWidget(self._engagement_combo, 1)
-            manage_btn = QPushButton('Manage')
+            manage_btn = style_button(
+                QPushButton(), 'quiet', text='Manage engagements'
+            )
             manage_btn.clicked.connect(lambda: self._navigate('engagements'))
             top.addWidget(manage_btn)
             layout.addLayout(top)
 
+            adv = (self._prefs.get('advanced') or {}) if hasattr(self, '_prefs') else {}
+            profile_row = QHBoxLayout()
+            profile_label = QLabel('Profile:')
+            profile_label.setObjectName('FieldLabel')
+            profile_label.setFixedWidth(130)
+            profile_row.addWidget(profile_label)
+            self._scan_profile_combo = QtWidgets.QComboBox()
+            for key, definition in SCAN_PROFILE_DEFINITIONS.items():
+                self._scan_profile_combo.addItem(definition['label'], key)
+            self._scan_profile_combo.addItem('Custom', 'custom')
+            saved_profile = str(self._prefs.get('scan_profile') or 'standard')
+            profile_index = self._scan_profile_combo.findData(saved_profile)
+            self._scan_profile_combo.setCurrentIndex(
+                profile_index if profile_index >= 0 else 1
+            )
+            profile_row.addWidget(self._scan_profile_combo, 1)
+            layout.addLayout(profile_row)
+
+            self._scan_profile_summary = QLabel()
+            self._scan_profile_summary.setWordWrap(True)
+            self._scan_profile_summary.setObjectName('FieldLabel')
+            layout.addWidget(self._scan_profile_summary)
+
+            advanced_group = QtWidgets.QGroupBox('Advanced controls')
+            advanced_group.setCheckable(True)
+            advanced_group.setChecked(False)
+            advanced_layout = QtWidgets.QVBoxLayout(advanced_group)
+            advanced_body = QWidget()
+            advanced_body_layout = QtWidgets.QVBoxLayout(advanced_body)
+            advanced_body_layout.setContentsMargins(0, 4, 0, 0)
+            advanced_body_layout.setSpacing(10)
+
             auth = QtWidgets.QGridLayout()
             self._authorize_file_edit = QLineEdit()
-            self._authorize_file_edit.setPlaceholderText('optional allowlist file for --authorize')
-            browse_btn = QPushButton('Browse')
+            self._authorize_file_edit.setText(str(adv.get('authorize') or ''))
+            self._authorize_file_edit.setPlaceholderText('optional target allowlist file')
+            browse_btn = style_button(
+                QPushButton(), 'quiet', text='Browse'
+            )
             browse_btn.clicked.connect(self._browse_authorize_file)
             self._scope_include_edit = QLineEdit()
-            self._scope_include_edit.setPlaceholderText('optional regex, comma-separated')
+            self._scope_include_edit.setText(
+                ', '.join(adv.get('scope_include') or [])
+            )
+            self._scope_include_edit.setPlaceholderText('optional include patterns')
             self._scope_exclude_edit = QLineEdit()
-            self._scope_exclude_edit.setPlaceholderText('optional regex, comma-separated')
+            self._scope_exclude_edit.setText(
+                ', '.join(adv.get('scope_exclude') or [])
+            )
+            self._scope_exclude_edit.setPlaceholderText('optional exclusion patterns')
             auth.setColumnMinimumWidth(0, 130)
             auth.setColumnStretch(1, 1)
             for _row, _text in enumerate(('Authorization file:', 'Scope include:', 'Scope exclude:')):
@@ -3106,10 +3223,9 @@ def main() -> None:
             auth.addWidget(browse_btn, 0, 2)
             auth.addWidget(self._scope_include_edit, 1, 1, 1, 2)
             auth.addWidget(self._scope_exclude_edit, 2, 1, 1, 2)
-            layout.addLayout(auth)
+            advanced_body_layout.addLayout(auth)
 
-            adv = (self._prefs.get('advanced') or {}) if hasattr(self, '_prefs') else {}
-            controls = QHBoxLayout()
+            controls = QtWidgets.QGridLayout()
             self._safe_mode_chk = QCheckBox('Safe mode')
             self._safe_mode_chk.setChecked(bool(adv.get('safe_mode', True)))
             self._safe_mode_chk.setToolTip('Skip noisy and DoS-flavored techniques')
@@ -3132,22 +3248,26 @@ def main() -> None:
             self._oob_combo.addItem('Self-hosted', 'selfhosted')
             self._oob_combo.setCurrentIndex({'off': 0, 'interactsh': 1,
                                              'selfhosted': 2}.get(adv.get('oob', 'off'), 0))
-            for w in (self._safe_mode_chk, self._intrusive_chk, self._dry_run_chk,
-                      self._reconfirm_chk,
-                      self._impersonate_chk, self._ai_triage_chk):
-                controls.addWidget(w)
-            controls.addWidget(self._oob_combo)
-            controls.addStretch()
-            layout.addLayout(controls)
+            for index, control in enumerate((
+                self._safe_mode_chk, self._reconfirm_chk, self._dry_run_chk,
+                self._intrusive_chk, self._impersonate_chk, self._ai_triage_chk,
+            )):
+                controls.addWidget(control, index // 3, index % 3)
+            controls.addWidget(self._oob_combo, 2, 0)
+            advanced_body_layout.addLayout(controls)
 
             cat_header = QHBoxLayout()
             cat_header.addWidget(QLabel('Categories:'))
-            select_all = QPushButton('Select All')
-            deselect_all = QPushButton('Deselect All')
+            select_all = style_button(
+                QPushButton(), 'quiet', text='Select all'
+            )
+            deselect_all = style_button(
+                QPushButton(), 'quiet', text='Deselect all'
+            )
             cat_header.addStretch()
             cat_header.addWidget(select_all)
             cat_header.addWidget(deselect_all)
-            layout.addLayout(cat_header)
+            advanced_body_layout.addLayout(cat_header)
 
             cats = QtWidgets.QGridLayout()
             cats.setSpacing(4)
@@ -3159,11 +3279,89 @@ def main() -> None:
                 cb.setToolTip(cat_info['description'])
                 cb.setChecked(cat_key in saved_set)
                 self._scan_cat_checks[cat_key] = cb
-                cats.addWidget(cb, i // 4, i % 4)
-            layout.addLayout(cats)
+                cats.addWidget(cb, i // 3, i % 3)
+            advanced_body_layout.addLayout(cats)
+            advanced_layout.addWidget(advanced_body)
+            advanced_body.setVisible(False)
+            advanced_group.toggled.connect(advanced_body.setVisible)
+            layout.addWidget(advanced_group)
+
+            self._preflight_summary = QLabel()
+            self._preflight_summary.setObjectName('PreflightSummary')
+            self._preflight_summary.setWordWrap(True)
+            layout.addWidget(self._preflight_summary)
+
+            self._applying_scan_profile = False
+
+            def refresh_summary():
+                key = self._scan_profile_combo.currentData() or 'standard'
+                settings = scan_profile_settings(
+                    key,
+                    [
+                        category for category, check in self._scan_cat_checks.items()
+                        if check.isChecked()
+                    ],
+                )
+                selected = [
+                    category for category, check in self._scan_cat_checks.items()
+                    if check.isChecked()
+                ]
+                self._scan_profile_summary.setText(settings['description'])
+                opts = {
+                    'safe_mode': self._safe_mode_chk.isChecked(),
+                    'no_reconfirm': not self._reconfirm_chk.isChecked(),
+                    'dry_run': self._dry_run_chk.isChecked(),
+                    'engagement_id': self._engagement_combo.currentData(),
+                    'authorize': self._authorize_file_edit.text().strip(),
+                }
+                self._preflight_summary.setText(
+                    scan_preflight_summary(
+                        [],
+                        settings['label'],
+                        selected,
+                        opts,
+                    )
+                )
+
+            def apply_profile():
+                key = self._scan_profile_combo.currentData() or 'standard'
+                custom = list(saved_set) if key == 'custom' else None
+                settings = scan_profile_settings(key, custom)
+                self._applying_scan_profile = True
+                try:
+                    selected = set(settings['categories'])
+                    for category, check in self._scan_cat_checks.items():
+                        check.setChecked(category in selected)
+                    if key != 'custom':
+                        self._safe_mode_chk.setChecked(settings['safe_mode'])
+                        self._intrusive_chk.setChecked(settings['intrusive'])
+                        self._reconfirm_chk.setChecked(settings['reconfirm'])
+                finally:
+                    self._applying_scan_profile = False
+                refresh_summary()
+
+            def category_changed():
+                if self._applying_scan_profile:
+                    return
+                custom_index = self._scan_profile_combo.findData('custom')
+                if custom_index >= 0:
+                    self._scan_profile_combo.setCurrentIndex(custom_index)
+                refresh_summary()
 
             select_all.clicked.connect(lambda checked=False: [cb.setChecked(True) for cb in self._scan_cat_checks.values()])
             deselect_all.clicked.connect(lambda checked=False: [cb.setChecked(False) for cb in self._scan_cat_checks.values()])
+            self._scan_profile_combo.currentIndexChanged.connect(apply_profile)
+            self._engagement_combo.currentIndexChanged.connect(refresh_summary)
+            self._authorize_file_edit.textChanged.connect(refresh_summary)
+            for check in self._scan_cat_checks.values():
+                check.stateChanged.connect(category_changed)
+            for control in (
+                self._safe_mode_chk, self._reconfirm_chk, self._dry_run_chk,
+                self._intrusive_chk,
+            ):
+                control.stateChanged.connect(refresh_summary)
+            apply_profile()
+            self._refresh_scan_preflight = refresh_summary
             return panel
 
         def _refresh_engagement_combo(self):
@@ -3211,8 +3409,15 @@ def main() -> None:
             prefs = _load_prefs()
             ai_provider = prefs.get('ai_provider') or 'anthropic'
             ai_key = (prefs.get('ai_api_key') or prefs.get('anthropic_api_key') or None)
+            profile_key = (
+                self._scan_profile_combo.currentData()
+                if getattr(self, '_scan_profile_combo', None) else 'custom'
+            )
+            profile = scan_profile_settings(profile_key, selected)
             advanced = {
                 'categories': selected,
+                'profile_key': profile_key,
+                'profile_label': profile['label'],
                 'safe_mode': bool(self._safe_mode_chk.isChecked()),
                 'intrusive': bool(self._intrusive_chk.isChecked()),
                 'dry_run': bool(self._dry_run_chk.isChecked()),
@@ -3232,6 +3437,7 @@ def main() -> None:
             }
             try:
                 prefs['advanced'] = advanced
+                prefs['scan_profile'] = profile_key
                 prefs['current_engagement_id'] = advanced.get('engagement_id')
                 _save_prefs(prefs)
                 self._prefs = prefs
@@ -3524,6 +3730,18 @@ def main() -> None:
                 self._update_total_progress()
             except Exception as e:
                 pass
+
+        def _on_scan_phase(self, target, label):
+            """Show the engine's explicit phase label in the target queue."""
+            try:
+                for index in range(self.tree.topLevelItemCount()):
+                    item = self.tree.topLevelItem(index)
+                    actual = item.data(0, 256) or item.text(0)
+                    if actual == target:
+                        item.setText(1, str(label))
+                        break
+            except Exception:
+                pass
         
         def _update_total_progress(self):
             """Update the total progress bar based on all target progress bars."""
@@ -3720,9 +3938,68 @@ def main() -> None:
                 selected_categories, advanced_opts = scan_profile
             if selected_categories is None:
                 return
-            
+
+            # Validate linked authorization before the GUI's own WAF preflight
+            # request, so no network traffic precedes the scanner's CLI gate.
+            engagement_id = advanced_opts.get('engagement_id')
+            if engagement_id:
+                engagement = (
+                    self._db.get_engagement(int(engagement_id))
+                    if self._db else None
+                )
+                if not engagement or not engagement.get('scope'):
+                    QMessageBox.warning(
+                        self,
+                        'Scope required',
+                        'The selected engagement has no active scope entries.',
+                    )
+                    return
+                outside = [
+                    target for target in targets
+                    if not _engagement_authorizes(
+                        target,
+                        engagement.get('scope') or [],
+                        engagement.get('exclusions') or [],
+                    )
+                ]
+                if outside:
+                    QMessageBox.warning(
+                        self,
+                        'Target outside scope',
+                        f'{outside[0]} is not authorized by the selected engagement.',
+                    )
+                    return
+            authorize_path = advanced_opts.get('authorize')
+            if authorize_path:
+                from .authorization import is_authorized, load_allowlist
+
+                patterns = load_allowlist(authorize_path)
+                outside = [
+                    target for target in targets
+                    if not is_authorized(target, patterns)
+                ]
+                if outside:
+                    QMessageBox.warning(
+                        self,
+                        'Target outside allowlist',
+                        f'{outside[0]} is not authorized by the selected allowlist.',
+                    )
+                    return
+
+            preflight = scan_preflight_summary(
+                targets,
+                advanced_opts.get('profile_label') or 'Custom',
+                selected_categories,
+                advanced_opts,
+            )
+            try:
+                self._preflight_summary.setText(preflight)
+            except Exception:
+                pass
+
             # WAF Detection for first target
             self.log.clear()
+            self.append_log(f'[*] Preflight: {preflight}\n')
             # Reset total progress bar
             try:
                 self._total_progress_bar.setValue(0)
@@ -3808,6 +4085,7 @@ def main() -> None:
             self._worker.results_emitted.connect(self._on_results_emitted, QtCore.Qt.QueuedConnection)
             self._worker.target_summary.connect(self._on_target_summary, QtCore.Qt.QueuedConnection)
             self._worker.progress_update.connect(self._update_target_progress, QtCore.Qt.QueuedConnection)
+            self._worker.phase_update.connect(self._on_scan_phase, QtCore.Qt.QueuedConnection)
             self._worker.finished.connect(self._on_finished, QtCore.Qt.QueuedConnection)
             self._worker_thread.started.connect(self._worker.run)
 

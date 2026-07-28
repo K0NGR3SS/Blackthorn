@@ -336,6 +336,14 @@ QFrame#Card {{
 }}
 QLabel#PageTitle {{ font-size: 20px; font-weight: 800; color: {p['text']}; }}
 QLabel#FieldLabel {{ color: {p['text_muted']}; font-size: 12px; font-weight: 600; }}
+QLabel#PreflightSummary {{
+    color: {p['text_muted']};
+    background-color: {p['input']};
+    border: 1px solid {p['border_subtle']};
+    border-left: 3px solid {p['accent']};
+    border-radius: 4px;
+    padding: 9px 11px;
+}}
 QFrame#DashboardPill {{
     background-color: {p['input']};
     border: 1px solid {p['border_subtle']};
