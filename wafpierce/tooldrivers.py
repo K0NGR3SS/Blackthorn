@@ -48,6 +48,14 @@ def zap_alert_to_finding(alert: Dict, target: str = '') -> Dict:
         'cwe_id': cwe_id,
         'reference_url': (alert.get('reference', '') or '').split('\n')[0],
         'confidence': _CONFIDENCE.get(str(alert.get('confidence', '')).lower(), 'medium'),
+        'kind': 'suspected',
+        'verification_status': 'candidate',
+        'result_type': 'tool_candidate',
+        'evidence': [{
+            'type': 'external_tool_alert',
+            'description': 'ZAP reported an alert that requires Blackthorn re-test',
+            'matched': alert.get('url', ''),
+        }],
         'source': 'external:zap',
         '_external_source': 'ZAP',
     }
@@ -75,6 +83,14 @@ def burp_issue_to_finding(issue: Dict, target: str = '') -> Dict:
         'cwe_id': cwe_id,
         'reference_url': '',
         'confidence': _CONFIDENCE.get(str(issue.get('confidence', '')).lower(), 'medium'),
+        'kind': 'suspected',
+        'verification_status': 'candidate',
+        'result_type': 'tool_candidate',
+        'evidence': [{
+            'type': 'external_tool_alert',
+            'description': 'Burp reported an issue that requires Blackthorn re-test',
+            'matched': url,
+        }],
         'source': 'external:burp',
         '_external_source': 'Burp',
     }

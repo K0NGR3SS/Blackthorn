@@ -8,6 +8,7 @@ import os
 from wafpierce.gui import (
     _finding_url, _finding_to_curl, _finding_to_python, _finding_proof_html,
     _advanced_cli_flags, _finding_status_label, _is_candidate_result,
+    _engagement_authorizes,
     profile_from_prefs, merge_profile, PROFILE_KEYS,
     _load_prefs, _normalize_language, _save_prefs,
     BANNER_PATH, LOGO_PATH, SIDEBAR_LOGO_PATH,
@@ -102,6 +103,22 @@ def test_gui_advanced_flags_forward_intrusive_opt_in():
     assert '--intrusive' in flags
     assert flags[flags.index('--scope-include') + 1] == '/api'
     assert '--oob' not in flags
+
+
+def test_gui_engagement_scope_is_fail_closed_and_honors_exclusions():
+    scope = ['https://app.example.test/api']
+    assert _engagement_authorizes(
+        'https://app.example.test/api/users', scope
+    )
+    assert not _engagement_authorizes(
+        'https://app.example.test/admin', scope
+    )
+    assert not _engagement_authorizes(
+        'https://app.example.test/api/logout',
+        scope,
+        ['https://app.example.test/api/logout'],
+    )
+    assert not _engagement_authorizes('https://app.example.test/api', [])
 
 
 def test_finding_proof_html_renders_structured_evidence_and_escapes_values():

@@ -12,6 +12,8 @@ def test_zap_alert_mapping():
     assert f['cwe_id'] == 'CWE-79'
     assert f['technique'] == '[ZAP] Reflected XSS'
     assert f['source'] == 'external:zap' and f['bypass'] is False
+    assert f['verification_status'] == 'candidate'
+    assert f['kind'] == 'suspected'
     assert f['reference_url'] == 'https://ref'
 
 
@@ -27,6 +29,7 @@ def test_burp_issue_mapping():
     assert f['severity'] == 'HIGH' and f['cwe_id'] == 'CWE-89'
     assert f['technique'] == '[Burp] SQLi' and f['url'] == 'https://e/p'
     assert f['confidence'] == 'high'
+    assert f['verification_status'] == 'candidate'
 
 
 def test_from_burp_issues(tmp_path):

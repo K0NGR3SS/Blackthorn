@@ -20,10 +20,13 @@ single ``abort()`` reliably terminates interpreter-based tools and their childre
 from __future__ import annotations
 
 import os
+import queue
 import re
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
 from urllib.parse import urlparse
@@ -236,6 +239,82 @@ def build_argv(spec: ToolSpec, path: str, ctx: Dict[str, str],
     return argv
 
 
+def _redact_argv(argv: List[str], secrets: Optional[List[str]] = None) -> List[str]:
+    """Return a log-safe command line without changing the executed argv."""
+    secret_values = [str(value) for value in (secrets or []) if value]
+    safe = []
+    for part in argv:
+        text = str(part)
+        for secret in secret_values:
+            text = text.replace(secret, '<redacted>')
+        safe.append(text)
+    return safe
+
+
+def _stream_process(
+    proc: subprocess.Popen,
+    *,
+    on_line: Optional[Callable[[str], None]] = None,
+    timeout: Optional[int] = None,
+    redact_values: Optional[List[str]] = None,
+) -> tuple:
+    """Stream a process without letting a blocking stdout read defeat timeout."""
+    output_queue: queue.Queue = queue.Queue()
+    done = object()
+
+    def reader():
+        try:
+            if proc.stdout is not None:
+                for raw in proc.stdout:
+                    line = raw.rstrip('\r\n')
+                    for secret in (redact_values or []):
+                        if secret:
+                            line = line.replace(str(secret), '<redacted>')
+                    output_queue.put(line)
+        finally:
+            output_queue.put(done)
+
+    thread = threading.Thread(target=reader, daemon=True)
+    thread.start()
+    started = time.monotonic()
+    lines: List[str] = []
+    reader_done = False
+    timed_out = False
+
+    while True:
+        if timeout and time.monotonic() - started >= timeout:
+            timed_out = True
+            kill_proc_tree(proc)
+            break
+        try:
+            item = output_queue.get(timeout=0.1)
+            if item is done:
+                reader_done = True
+            else:
+                lines.append(item)
+                if on_line and item:
+                    on_line(item)
+        except queue.Empty:
+            pass
+        if reader_done and proc.poll() is not None:
+            break
+
+    thread.join(timeout=1)
+    while True:
+        try:
+            item = output_queue.get_nowait()
+        except queue.Empty:
+            break
+        if item is done:
+            continue
+        lines.append(item)
+        if on_line and item:
+            on_line(item)
+    if proc.poll() is None:
+        proc.wait(timeout=5)
+    return lines, proc.returncode, timed_out
+
+
 # --------------------------------------------------------------------------- #
 # Runner
 # --------------------------------------------------------------------------- #
@@ -246,7 +325,8 @@ def run_tool(spec_or_key, target: str, *,
              api_key: Optional[str] = None,
              on_line: Optional[Callable[[str], None]] = None,
              register_proc: Optional[Callable[[subprocess.Popen], None]] = None,
-             timeout: Optional[int] = None) -> Dict:
+             timeout: Optional[int] = None,
+             authorize_target: Optional[Callable[[str], bool]] = None) -> Dict:
     """Detect, run, and parse one tool against ``target``.
 
     Returns ``{ok, state, returncode, findings, raw_lines, error, argv}``.
@@ -255,6 +335,22 @@ def run_tool(spec_or_key, target: str, *,
     """
     from . import tools_parsers
     spec = spec_or_key if isinstance(spec_or_key, ToolSpec) else get_spec(spec_or_key)
+
+    if authorize_target is not None:
+        try:
+            allowed = bool(authorize_target(target))
+        except Exception as exc:
+            return {
+                'ok': False, 'state': 'scope_error',
+                'error': f'Target authorization check failed: {exc}',
+                'findings': [], 'raw_lines': [], 'argv': [],
+            }
+        if not allowed:
+            return {
+                'ok': False, 'state': 'scope_blocked',
+                'error': 'Target is outside the active engagement scope.',
+                'findings': [], 'raw_lines': [], 'argv': [],
+            }
 
     status = detect(spec, custom_path)
     if not status.found:
@@ -270,45 +366,74 @@ def run_tool(spec_or_key, target: str, *,
     try:
         argv = build_argv(spec, status.path, ctx, extra)
     except Exception as e:
+        _rmtree(tmp_dir)
         return {'ok': False, 'state': 'error', 'error': f'argv build failed: {e}',
                 'findings': [], 'raw_lines': [], 'argv': []}
 
+    safe_argv = _redact_argv(argv, [api_key] if api_key else [])
     raw_lines: List[str] = []
     try:
         if on_line:
-            on_line(f'[*] {spec.name}: {" ".join(argv)}')
+            on_line(f'[*] {spec.name}: {" ".join(safe_argv)}')
         proc = popen_killable(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                               text=True, bufsize=1, errors='replace')
         if register_proc:
             register_proc(proc)
-        if proc.stdout is not None:
-            for line in proc.stdout:
-                line = line.rstrip('\r\n')
-                raw_lines.append(line)
-                if on_line and line:
-                    on_line(line)
-        proc.wait(timeout=timeout)
-        returncode = proc.returncode
+        raw_lines, returncode, timed_out = _stream_process(
+            proc,
+            on_line=on_line,
+            timeout=timeout,
+            redact_values=[api_key] if api_key else [],
+        )
     except FileNotFoundError as e:
         _rmtree(tmp_dir)
         return {'ok': False, 'state': 'not_installed', 'error': str(e),
-                'findings': [], 'raw_lines': raw_lines, 'argv': argv}
+                'findings': [], 'raw_lines': raw_lines, 'argv': safe_argv}
     except Exception as e:
         _rmtree(tmp_dir)
         return {'ok': False, 'state': 'error', 'error': str(e),
-                'findings': [], 'raw_lines': raw_lines, 'argv': argv}
+                'findings': [], 'raw_lines': raw_lines, 'argv': safe_argv}
+
+    if timed_out:
+        _rmtree(tmp_dir)
+        return {
+            'ok': False, 'state': 'timeout', 'returncode': returncode,
+            'error': f'{spec.name} exceeded the {timeout}s execution limit.',
+            'findings': [], 'raw_lines': raw_lines, 'argv': safe_argv,
+            'tool': {'key': spec.key, 'name': spec.name,
+                     'version': status.version or '', 'path': status.path or ''},
+        }
 
     # Parse output into canonical findings (defensive: never raise to caller).
     parser = getattr(tools_parsers, spec.parser, tools_parsers.generic_lines)
+    parse_error = ''
     try:
         findings = parser(spec, target, '\n'.join(raw_lines), ctx) or []
     except Exception as e:
-        findings = [tools_parsers.make_finding(
-            spec, target, technique=f'{spec.name} (raw)', severity='INFO',
-            reason=f'Parser error ({e}); {len(raw_lines)} output line(s) captured.')]
+        findings = []
+        parse_error = f'Parser error: {e}'
+    for finding in findings:
+        if isinstance(finding, dict):
+            finding.setdefault('tool_version', status.version or '')
+            finding.setdefault('tool_path', status.path or '')
     _rmtree(tmp_dir)
-    return {'ok': True, 'state': 'ok', 'returncode': returncode,
-            'findings': findings, 'raw_lines': raw_lines, 'argv': argv}
+    ok = returncode == 0 and not parse_error
+    error = parse_error or (
+        f'{spec.name} exited with status {returncode}' if returncode else ''
+    )
+    return {
+        'ok': ok,
+        'state': 'ok' if ok else ('parse_error' if parse_error else 'failed'),
+        'returncode': returncode,
+        'error': error,
+        'findings': findings,
+        'raw_lines': raw_lines,
+        'argv': safe_argv,
+        'tool': {
+            'key': spec.key, 'name': spec.name,
+            'version': status.version or '', 'path': status.path or '',
+        },
+    }
 
 
 def _rmtree(path: str) -> None:

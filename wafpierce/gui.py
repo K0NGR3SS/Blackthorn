@@ -53,6 +53,15 @@ def _is_candidate_result(finding: dict) -> bool:
     return _result_state(finding if isinstance(finding, dict) else {}) == 'candidate'
 
 
+def _engagement_authorizes(target: str, scope: list, exclusions=None) -> bool:
+    """Apply the same strict URL/host rules to GUI tools and pipelines."""
+    from .authorization import is_authorized
+
+    if not is_authorized(target, list(scope or [])):
+        return False
+    return not is_authorized(target, list(exclusions or []))
+
+
 def _finding_status_label(finding: dict) -> str:
     state = _result_state(finding if isinstance(finding, dict) else {})
     if state == 'confirmed':
@@ -2019,8 +2028,19 @@ def main() -> None:
         status = Signal(str)
         finished = Signal(object)   # list[finding dict]
 
-        def __init__(self, tool_key, target, custom_path=None, extra_args=None,
-                     api_key=None, wordlist=None, parent=None):
+        def __init__(
+            self,
+            tool_key,
+            target,
+            custom_path=None,
+            extra_args=None,
+            api_key=None,
+            wordlist=None,
+            authorization_patterns=None,
+            authorization_exclusions=None,
+            timeout=900,
+            parent=None,
+        ):
             super().__init__(parent)
             self.tool_key = tool_key
             self.target = target
@@ -2028,6 +2048,9 @@ def main() -> None:
             self.extra_args = extra_args or None
             self.api_key = api_key or None
             self.wordlist = wordlist or None
+            self.authorization_patterns = list(authorization_patterns or [])
+            self.authorization_exclusions = list(authorization_exclusions or [])
+            self.timeout = timeout
             self._proc = None
             self._abort = False
 
@@ -2051,6 +2074,12 @@ def main() -> None:
                     api_key=self.api_key,
                     on_line=lambda ln: self.log_line.emit(ln),
                     register_proc=lambda p: setattr(self, '_proc', p),
+                    timeout=self.timeout,
+                    authorize_target=lambda target: _engagement_authorizes(
+                        target,
+                        self.authorization_patterns,
+                        self.authorization_exclusions,
+                    ),
                 )
                 if res.get('ok'):
                     findings = res.get('findings', []) or []
@@ -2073,10 +2102,19 @@ def main() -> None:
         findings = Signal(object)
         finished = Signal()
 
-        def __init__(self, pdef, target, parent=None):
+        def __init__(
+            self,
+            pdef,
+            target,
+            authorization_patterns=None,
+            authorization_exclusions=None,
+            parent=None,
+        ):
             super().__init__(parent)
             self.pdef = pdef
             self.target = target
+            self.authorization_patterns = list(authorization_patterns or [])
+            self.authorization_exclusions = list(authorization_exclusions or [])
             self._proc = None
             self._abort = False
 
@@ -2098,7 +2136,17 @@ def main() -> None:
                     register_proc=lambda p: setattr(self, '_proc', p),
                     is_aborted=lambda: self._abort,
                 )
-                PipelineRunner(self.pdef, self.target, hooks=hooks, frozen=IS_FROZEN).run()
+                PipelineRunner(
+                    self.pdef,
+                    self.target,
+                    hooks=hooks,
+                    frozen=IS_FROZEN,
+                    authorize_target=lambda target: _engagement_authorizes(
+                        target,
+                        self.authorization_patterns,
+                        self.authorization_exclusions,
+                    ),
+                ).run()
             except Exception as e:
                 self.log_line.emit(f'[!] Pipeline error: {e}')
             self.finished.emit()
@@ -4459,6 +4507,21 @@ def main() -> None:
                 it = tree.currentItem()
                 return it.data(0, 256) if it else None
 
+            def active_engagement():
+                engagement_id = (
+                    getattr(self, '_current_engagement_id', None)
+                    or self._prefs.get('current_engagement_id')
+                )
+                if not engagement_id or not self._db:
+                    return None
+                try:
+                    engagement = self._db.get_engagement(int(engagement_id))
+                except Exception:
+                    engagement = None
+                if not engagement or engagement.get('status') == 'archived':
+                    return None
+                return engagement
+
             def run_selected():
                 key = selected_key()
                 if not key:
@@ -4468,13 +4531,35 @@ def main() -> None:
                 if not tgt:
                     QMessageBox.information(dlg, 'Tools', 'Enter a target.')
                     return
+                engagement = active_engagement()
+                if not engagement or not engagement.get('scope'):
+                    QMessageBox.warning(
+                        dlg,
+                        'Scope required',
+                        'Select an active engagement with at least one scope entry '
+                        'before running an external tool.',
+                    )
+                    return
+                if not _engagement_authorizes(
+                    tgt,
+                    engagement.get('scope') or [],
+                    engagement.get('exclusions') or [],
+                ):
+                    QMessageBox.warning(
+                        dlg,
+                        'Target outside scope',
+                        'The target is not authorized by the selected engagement.',
+                    )
+                    return
                 cfg = (self._db.get_tool_config(key) if self._db else None) or {}
                 extra = (cfg.get('extra_args') or '').split() or None
                 wl = wordlist_edit.text().strip() or None
                 self._tool_thread = QtCore.QThread()
                 self._tool_worker = ToolRunWorker(key, tgt, custom_path=cfg.get('custom_path'),
                                                   extra_args=extra, api_key=cfg.get('api_key'),
-                                                  wordlist=wl)
+                                                  wordlist=wl,
+                                                  authorization_patterns=engagement.get('scope'),
+                                                  authorization_exclusions=engagement.get('exclusions'))
                 self._tool_worker.moveToThread(self._tool_thread)
                 self._tool_thread.started.connect(self._tool_worker.run)
                 self._tool_worker.log_line.connect(append)
@@ -4770,8 +4855,40 @@ def main() -> None:
                 errs = validate_pipeline(pdef)
                 if errs:
                     QMessageBox.warning(dlg, 'Pipeline', 'Invalid:\n' + '\n'.join(errs)); return
+                engagement_id = (
+                    getattr(self, '_current_engagement_id', None)
+                    or self._prefs.get('current_engagement_id')
+                )
+                engagement = (
+                    self._db.get_engagement(int(engagement_id))
+                    if self._db and engagement_id else None
+                )
+                if not engagement or not engagement.get('scope'):
+                    QMessageBox.warning(
+                        dlg,
+                        'Scope required',
+                        'Select an active engagement with at least one scope entry '
+                        'before running a pipeline.',
+                    )
+                    return
+                if not _engagement_authorizes(
+                    tgt,
+                    engagement.get('scope') or [],
+                    engagement.get('exclusions') or [],
+                ):
+                    QMessageBox.warning(
+                        dlg,
+                        'Target outside scope',
+                        'The target is not authorized by the selected engagement.',
+                    )
+                    return
                 self._pipe_thread = QtCore.QThread()
-                self._pipe_worker = PipelineWorker(pdef, tgt)
+                self._pipe_worker = PipelineWorker(
+                    pdef,
+                    tgt,
+                    authorization_patterns=engagement.get('scope'),
+                    authorization_exclusions=engagement.get('exclusions'),
+                )
                 self._pipe_worker.moveToThread(self._pipe_thread)
                 self._pipe_thread.started.connect(self._pipe_worker.run)
                 self._pipe_worker.log_line.connect(lambda m: log.append(str(m).rstrip()))

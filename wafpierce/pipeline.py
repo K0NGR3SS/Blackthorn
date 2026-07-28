@@ -156,12 +156,21 @@ class PipelineHooks:
 class PipelineRunner:
     """Headless sequential executor. Usable from the GUI worker, a CLI, and tests."""
 
-    def __init__(self, pdef: Dict, target: str, hooks: Optional[PipelineHooks] = None,
-                 frozen: bool = False):
+    def __init__(
+        self,
+        pdef: Dict,
+        target: str,
+        hooks: Optional[PipelineHooks] = None,
+        frozen: bool = False,
+        authorize_target: Optional[Callable[[str], bool]] = None,
+        tool_timeout: Optional[int] = 900,
+    ):
         self.pdef = pdef
         self.target = target
         self.hooks = hooks or PipelineHooks()
         self.frozen = frozen
+        self.authorize_target = authorize_target
+        self.tool_timeout = tool_timeout
         self.all_findings: List[Dict] = []
 
     def run(self) -> Dict:
@@ -169,6 +178,32 @@ class PipelineRunner:
         if errs:
             self.hooks.log('[!] Pipeline invalid: ' + '; '.join(errs))
             return {'ok': False, 'errors': errs, 'findings': []}
+
+        has_active_stage = any(
+            stage.type in {'wafpierce_scan', 'external_tool'}
+            for stage in stages_from_def(self.pdef)
+        )
+        if has_active_stage and self.authorize_target is not None:
+            try:
+                authorized = bool(self.authorize_target(self.target))
+            except Exception as exc:
+                message = f'Target authorization check failed: {exc}'
+                self.hooks.log(f'[!] {message}')
+                return {
+                    'ok': False,
+                    'state': 'scope_error',
+                    'errors': [message],
+                    'findings': [],
+                }
+            if not authorized:
+                message = 'Target is outside the active engagement scope.'
+                self.hooks.log(f'[!] {message}')
+                return {
+                    'ok': False,
+                    'state': 'scope_blocked',
+                    'errors': [message],
+                    'findings': [],
+                }
 
         for stage in stages_from_def(self.pdef):
             if self.hooks.aborted():
@@ -238,7 +273,9 @@ class PipelineRunner:
                        wordlist=stage.config.get('wordlist'),
                        api_key=stage.config.get('api_key'),
                        on_line=self.hooks.log,
-                       register_proc=self.hooks.register_proc)
+                       register_proc=self.hooks.register_proc,
+                       timeout=self.tool_timeout,
+                       authorize_target=self.authorize_target)
         if not res.get('ok'):
             self.hooks.log(f"[!] {tool}: {res.get('error') or res.get('state')}")
             return
