@@ -8,7 +8,10 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 
 def test_results_workspace_builds_with_evidence_actions(monkeypatch):
-    from PySide6.QtWidgets import QApplication, QPushButton, QTreeWidget
+    from PySide6.QtWidgets import (
+        QApplication, QLineEdit, QListWidget, QPushButton, QTextBrowser,
+        QTreeWidget,
+    )
 
     import wafpierce.database as database
     import wafpierce.gui as gui
@@ -43,6 +46,11 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
             widget for widget in QApplication.topLevelWidgets()
             if hasattr(widget, '_build_results_page')
         )
+        target_input = next(
+            field for field in window.findChildren(QLineEdit)
+            if field.accessibleName() == 'Target URL'
+        )
+        assert target_input.accessibleDescription()
         window._results = [{
             'target': 'https://app.example.test',
             'technique': 'Paired SSTI canary',
@@ -65,6 +73,15 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
         buttons = {button.text(): button for button in page.findChildren(QPushButton)}
         assert {'Copy cURL', 'Copy Python', 'Send to Repeater',
                 'Re-test request', 'Save state'} <= set(buttons)
+        assert all(
+            buttons[label].accessibleName()
+            for label in (
+                'Copy cURL', 'Copy Python', 'Send to Repeater',
+                'Re-test request', 'Save state',
+            )
+        )
+        assert page.findChild(QListWidget).accessibleName() == 'Result targets'
+        assert page.findChild(QTextBrowser).accessibleName() == 'Finding evidence'
         tree = next(
             tree for tree in page.findChildren(QTreeWidget)
             if tree.columnCount() == 4

@@ -12,7 +12,7 @@
   </p>
 </div>
 
-> **Formerly WAFPierce:** Blackthorn is the project’s current name. The GitHub repository, Python module, and legacy command still use `WAFPierce`/`wafpierce` for compatibility.
+> **Naming note (ex-WAFPierce):** Blackthorn is the current product name. The repository URL, Python package, and some legacy commands still use `WAFPierce`/`wafpierce` for compatibility.
 
 > Use Blackthorn only on systems you own or are explicitly authorized to test. Use `--authorize`, `--safe-mode`, and scope rules when testing production-like targets.
 
@@ -76,6 +76,9 @@ The counts below come from the version 1.7 registered scanner and tool catalogs.
 | Capability | Current coverage |
 | --- | ---: |
 | Catalogued web-security technique groups | **128** |
+| Proof-capable groups with vulnerability-specific confirmation | **18** |
+| Candidate-only differential groups requiring analyst verification | **79** |
+| Observation-only inventory/configuration groups | **23** |
 | Runnable in a normal non-intrusive scan | **101** |
 | Additional runnable groups requiring `--intrusive` | **19** |
 | Raw-transport groups disabled until a faithful engine exists | **7** |
@@ -87,6 +90,11 @@ The counts below come from the version 1.7 registered scanner and tool catalogs.
 | Recorded-traffic import formats | **3** |
 | AI provider types | **3** |
 | Desktop workspace sections | **22** |
+
+Catalog coverage is not a claim that every group can prove a vulnerability.
+Blackthorn exposes each registered group as proof-capable, candidate-only,
+observation-only, or unavailable. Candidate and external-tool alerts stay
+separate from confirmed findings until they are verified.
 
 To verify the current scanner catalog from the installed version:
 
@@ -355,20 +363,20 @@ change answers and capture proof; a Host-header size difference is insufficient.
 
 ## Desktop GUI workspace
 
-The PySide6 desktop application exposes the following sections from one persistent workspace:
+The PySide6 desktop application keeps five primary workflow destinations visible
+and moves specialist surfaces into one Workbench chooser:
 
 | Area | Sections and tools |
 | --- | --- |
-| Operate | Scan, Pipeline, AI / Automation, Recon, Browser, Proxy |
-| Analyze | Results, Dashboard, Timeline, Live Logs |
-| Tools | External Tools, Repeater, Fuzzer, SQLi, Secrets, Payloads, ZAP/Burp, AD / Internal |
-| Manage | Engagements, Schedule, Plugins, Settings |
+| Workflow | Scope & scan, Discover, Test plan, Analyze, Report |
+| Workbench | External Tools, Browser, Proxy, Repeater, Fuzzer, SQLi, Secrets, Payloads, ZAP/Burp, AD / Internal, AI assistance, Live Logs, Timeline, Schedule, Plugins |
+| Utilities | Engagements, Settings |
 
 GUI functionality includes:
 
-- Multi-target queue with configurable concurrent targets, thread count, delay, and category selection.
+- Multi-target queue with task-based profiles, optional advanced categories, configurable concurrency, threads, and delay.
 - Engagement selection, authorization file, include/exclude scope rules, safe mode, dry run, re-confirmation, impersonation, AI triage, and OOB settings.
-- Results Explorer with target grouping, search, category/severity filtering, sorting, finding details, and export.
+- Evidence-led results workspace with target grouping, verification/workflow filters, exact-request reproduction, authorized re-test, Repeater handoff, analyst notes, and export.
 - Dashboard statistics, scan comparison, historical timeline, and live logs.
 - Built-in intercepting proxy, local CA management, traffic history, and Repeater.
 - Browser workspace and ZAP/Burp handoff.
@@ -386,6 +394,11 @@ Blackthorn does not silently install these tools. When already available on the 
 | Content discovery | ffuf, Feroxbuster, Gobuster, dirsearch |
 | Vulnerability testing | Nuclei, Nikto, WPScan, Dalfox, SSLyze, sqlmap |
 | Secrets and cloud | TruffleHog, Gitleaks, ScoutSuite, Prowler |
+
+The table describes supported adapters, not tools bundled with Blackthorn.
+Availability, binary path, and version are detected at runtime. Empty output is
+reported as an empty run—not fabricated as a finding—and tool alerts enter the
+candidate workflow until Blackthorn verifies them independently.
 
 The dedicated `blackthorn recon` workflow expects Subfinder, Amass, dnsx, ProjectDiscovery httpx, and Nmap. Check readiness with:
 
@@ -503,7 +516,9 @@ python3 -m pytest
 ruff check .
 ```
 
-The Python package retains its existing internal module path during the rebrand so existing imports, plugins, and stored configuration remain compatible. User-facing commands and product copy use Blackthorn.
+The Python package retains its ex-WAFPierce internal module path during the
+rebrand so existing imports, plugins, and stored configuration remain
+compatible. User-facing commands and product copy use Blackthorn.
 
 The UI and enhancement plan lives in [docs/BLACKTHORN_PRODUCT_PLAN.md](docs/BLACKTHORN_PRODUCT_PLAN.md).
 

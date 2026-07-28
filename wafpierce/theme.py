@@ -66,6 +66,31 @@ UI_FONT = '"Segoe UI", "Inter", -apple-system, "Helvetica Neue", Arial, sans-ser
 MONO_FONT = '"JetBrains Mono", "Cascadia Code", "Fira Code", Consolas, "DejaVu Sans Mono", monospace'
 
 
+def _relative_luminance(hex_color: str) -> float:
+    value = str(hex_color).lstrip('#')
+    if len(value) != 6:
+        raise ValueError('Expected a six-digit hex color')
+    channels = [int(value[index:index + 2], 16) / 255 for index in (0, 2, 4)]
+
+    def linear(channel):
+        return (
+            channel / 12.92
+            if channel <= 0.04045
+            else ((channel + 0.055) / 1.055) ** 2.4
+        )
+
+    red, green, blue = (linear(channel) for channel in channels)
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+
+
+def contrast_ratio(foreground: str, background: str) -> float:
+    """Return the WCAG contrast ratio for two six-digit hex colors."""
+    first = _relative_luminance(foreground)
+    second = _relative_luminance(background)
+    lighter, darker = max(first, second), min(first, second)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
 def stylesheet() -> str:
     """Return the global application stylesheet."""
     p = PALETTE
@@ -139,6 +164,10 @@ QPushButton {{
 QPushButton:hover {{ background-color: {p['input_alt']}; border-color: {p['accent']}; }}
 QPushButton:pressed {{ background-color: {p['elevated']}; }}
 QPushButton:disabled {{ background-color: {p['surface']}; color: {p['text_faint']}; border-color: {p['border_subtle']}; }}
+QPushButton:focus {{
+    border: 2px solid {p['accent']};
+    padding: 7px 13px;
+}}
 
 /* Primary (accent) button: set objectName('PrimaryButton') */
 QPushButton#PrimaryButton {{
@@ -186,6 +215,7 @@ QCheckBox::indicator {{
     background-color: {p['input']};
 }}
 QCheckBox::indicator:hover {{ border-color: {p['accent']}; }}
+QCheckBox:focus {{ color: {p['text']}; }}
 QCheckBox::indicator:checked {{
     background-color: {p['accent']};
     border-color: {p['accent']};
@@ -208,6 +238,9 @@ QTreeWidget::item:hover, QListWidget::item:hover {{ background-color: {p['accent
 QTreeWidget::item:selected, QListWidget::item:selected {{
     background-color: {p['accent_soft']};
     color: {p['text']};
+}}
+QTreeWidget:focus, QListWidget:focus, QTableWidget:focus, QTableView:focus {{
+    border: 2px solid {p['accent']};
 }}
 QHeaderView::section {{
     background-color: {p['card']};

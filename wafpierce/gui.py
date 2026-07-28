@@ -525,6 +525,7 @@ def _load_prefs() -> dict:
         'remember_targets': True,
         'retry_failed': 0,
         'ui_density': 'comfortable',
+        'reduce_motion': True,
         'last_targets': [],
         'language': 'en',
     }
@@ -2652,6 +2653,7 @@ def main() -> None:
             brand = QHBoxLayout()
             brand.setSpacing(10)
             logo = QLabel()
+            logo.setAccessibleName('Blackthorn')
             try:
                 if os.path.exists(SIDEBAR_LOGO_PATH):
                     pm = QPixmap(SIDEBAR_LOGO_PATH)
@@ -2804,6 +2806,10 @@ def main() -> None:
             self.target_edit = QLineEdit()
             try:
                 self.target_edit.setPlaceholderText('https://example.com')
+                self.target_edit.setAccessibleName('Target URL')
+                self.target_edit.setAccessibleDescription(
+                    'Authorized HTTP or HTTPS target to add to the scan queue'
+                )
                 # Easter egg: special target commands
                 self.target_edit.textChanged.connect(self._check_easter_egg_input)
             except Exception:
@@ -2855,12 +2861,14 @@ def main() -> None:
             opts = QHBoxLayout()
             self._layout_opts = opts
             self.threads_spin = QSpinBox()
+            self.threads_spin.setAccessibleName('Scanner threads')
             self.threads_spin.setRange(1, 200)
             try:
                 self.threads_spin.setValue(int(self._prefs.get('threads', 5)))
             except Exception:
                 self.threads_spin.setValue(5)
             self.delay_spin = QDoubleSpinBox()
+            self.delay_spin.setAccessibleName('Delay between requests')
             self.delay_spin.setRange(0.0, 5.0)
             self.delay_spin.setSingleStep(0.05)
             try:
@@ -2868,6 +2876,7 @@ def main() -> None:
             except Exception:
                 self.delay_spin.setValue(0.2)
             self.concurrent_spin = QSpinBox()
+            self.concurrent_spin.setAccessibleName('Concurrent targets')
             self.concurrent_spin.setRange(1, 200)
             try:
                 self.concurrent_spin.setValue(int(self._prefs.get('concurrent', 2)))
@@ -2875,6 +2884,9 @@ def main() -> None:
                 self.concurrent_spin.setValue(2)
             # default to sequential execution (one target at a time)
             self.use_concurrent_chk = QCheckBox(_t('use_concurrent', self._lang))
+            self.use_concurrent_chk.setAccessibleDescription(
+                'Run more than one queued target at the same time'
+            )
             try:
                 self.use_concurrent_chk.setChecked(bool(self._prefs.get('use_concurrent', False)))
             except Exception:
@@ -2909,11 +2921,14 @@ def main() -> None:
                 self._legend_labels = {}
                 def _legend_label(key, text, color):
                     lbl = QLabel(f"{text} (0)")
-                    lbl.setStyleSheet(f'background:{color}; padding:4px; color: white; border-radius:3px')
+                    lbl.setStyleSheet(
+                        f'border-left:3px solid {color}; padding:4px 7px;'
+                    )
+                    lbl.setAccessibleName(f'{text} target count')
                     self._legend_labels[key] = lbl
                     return lbl
                 legend_h.addWidget(_legend_label('queued', _t('queued', self._lang), '#2a3340'))
-                legend_h.addWidget(_legend_label('running', _t('running', self._lang), '#6366f1'))
+                legend_h.addWidget(_legend_label('running', _t('running', self._lang), '#c99a45'))
                 legend_h.addWidget(_legend_label('done', _t('done', self._lang), '#15331f'))
                 legend_h.addWidget(_legend_label('error', _t('error', self._lang), '#ef4444'))
                 v.addLayout(legend_h)
@@ -2924,6 +2939,7 @@ def main() -> None:
             middle = QHBoxLayout()
             self._layout_middle = middle
             self.tree = QTreeWidget()
+            self.tree.setAccessibleName('Queued scan targets')
             self.tree.setColumnCount(3)
             self.tree.setHeaderLabels([_t('target', self._lang), _t('status', self._lang), _t('progress', self._lang) if 'progress' in TRANSLATIONS.get(self._lang, {}) else 'Progress'])
             try:
@@ -2951,6 +2967,7 @@ def main() -> None:
             self._layout_right = right_v
             self.log = QTextEdit()
             self.log.setReadOnly(True)
+            self.log.setAccessibleName('Scan activity log')
             # Prefer modern fonts for Qt widgets when available
             try:
                 mono_candidates = ["JetBrains Mono", "Fira Code", "Consolas", "DejaVu Sans Mono", "Courier New"]
@@ -3048,6 +3065,26 @@ def main() -> None:
             bottom.addWidget(self.save_btn)
             bottom.addWidget(self.clean_btn)
             v.addLayout(bottom)
+
+            # Stable keyboard order through the normal (collapsed) scan path.
+            try:
+                QWidget.setTabOrder(self.target_edit, add_btn)
+                QWidget.setTabOrder(add_btn, remove_btn)
+                QWidget.setTabOrder(remove_btn, self.threads_spin)
+                QWidget.setTabOrder(self.threads_spin, self.concurrent_spin)
+                QWidget.setTabOrder(self.concurrent_spin, self.delay_spin)
+                QWidget.setTabOrder(
+                    self.delay_spin, self._engagement_combo
+                )
+                QWidget.setTabOrder(
+                    self._engagement_combo, self._scan_profile_combo
+                )
+                QWidget.setTabOrder(self._scan_profile_combo, self.tree)
+                QWidget.setTabOrder(self.tree, self.start_btn)
+                QWidget.setTabOrder(self.start_btn, self.stop_btn)
+                QWidget.setTabOrder(self.stop_btn, self.results_btn)
+            except Exception:
+                pass
 
             # Scheduler: poll once a minute for due scheduled jobs (scan or recon).
             try:
@@ -3204,6 +3241,7 @@ def main() -> None:
             engagement_lbl.setFixedWidth(130)
             top.addWidget(engagement_lbl)
             self._engagement_combo = QtWidgets.QComboBox()
+            self._engagement_combo.setAccessibleName('Active engagement')
             self._refresh_engagement_combo()
             top.addWidget(self._engagement_combo, 1)
             manage_btn = style_button(
@@ -3220,6 +3258,10 @@ def main() -> None:
             profile_label.setFixedWidth(130)
             profile_row.addWidget(profile_label)
             self._scan_profile_combo = QtWidgets.QComboBox()
+            self._scan_profile_combo.setAccessibleName('Scan profile')
+            self._scan_profile_combo.setAccessibleDescription(
+                'Task-based selection of scanner categories and safety defaults'
+            )
             for key, definition in SCAN_PROFILE_DEFINITIONS.items():
                 self._scan_profile_combo.addItem(definition['label'], key)
             self._scan_profile_combo.addItem('Custom', 'custom')
@@ -3237,6 +3279,7 @@ def main() -> None:
             layout.addWidget(self._scan_profile_summary)
 
             advanced_group = QtWidgets.QGroupBox('Advanced controls')
+            advanced_group.setAccessibleName('Advanced scan controls')
             advanced_group.setCheckable(True)
             advanced_group.setChecked(False)
             advanced_layout = QtWidgets.QVBoxLayout(advanced_group)
@@ -8804,6 +8847,15 @@ def main() -> None:
                 density_layout.addStretch()
                 layout.addLayout(density_layout)
 
+                reduce_motion_chk = QCheckBox('Reduce motion')
+                reduce_motion_chk.setChecked(
+                    bool(prefs.get('reduce_motion', True))
+                )
+                reduce_motion_chk.setToolTip(
+                    'Use stable state changes instead of attention animations'
+                )
+                layout.addWidget(reduce_motion_chk)
+
                 # Language selection
                 lang_layout = QtWidgets.QHBoxLayout()
                 lang_layout.addWidget(form_label(_t('language')))
@@ -9114,6 +9166,9 @@ def main() -> None:
                         # Map density index back to key
                         density_keys = ['compact', 'comfortable', 'spacious']
                         prefs['ui_density'] = density_keys[density_combo.currentIndex()]
+                        prefs['reduce_motion'] = bool(
+                            reduce_motion_chk.isChecked()
+                        )
                         prefs['language'] = new_lang
                         
                         # Save proxy settings
@@ -9499,7 +9554,9 @@ def main() -> None:
             
             # "All Sites" option
             site_list = QtWidgets.QListWidget()
-            site_list.setFixedWidth(220)
+            site_list.setAccessibleName('Result targets')
+            site_list.setMinimumWidth(190)
+            site_list.setMaximumWidth(240)
             
             # Add "All Sites" first
             all_item = QtWidgets.QListWidgetItem(f'{_t("all_sites", self._lang)} ({len(self._results)} {_t("findings", self._lang)})')
@@ -9574,6 +9631,7 @@ def main() -> None:
             # Filter options
             filter_label = QLabel(_t('filter', self._lang))
             filter_combo = QtWidgets.QComboBox()
+            filter_combo.setAccessibleName('Result filter')
             for label, key in (
                 ('All results', 'all'),
                 ('Confirmed findings', 'confirmed'),
@@ -9597,6 +9655,7 @@ def main() -> None:
             search_row = QHBoxLayout()
             search_label = QLabel(_t('search', self._lang))
             search_edit = QLineEdit()
+            search_edit.setAccessibleName('Search findings')
             search_edit.setPlaceholderText(_t('search_placeholder', self._lang))
             search_clear_btn = style_button(
                 QPushButton(), 'quiet', text='Clear'
@@ -9623,6 +9682,7 @@ def main() -> None:
             
             # Results tree
             results_tree = QTreeWidget()
+            results_tree.setAccessibleName('Findings')
             results_tree.setColumnCount(4)
             results_tree.setHeaderLabels([_t('technique', self._lang), _t('severity', self._lang), _t('category', self._lang), _t('reason', self._lang)])
             results_tree.setAlternatingRowColors(True)
@@ -9656,6 +9716,7 @@ def main() -> None:
             details_text = QtWidgets.QTextBrowser()
             details_text.setReadOnly(True)
             details_text.setOpenExternalLinks(True)
+            details_text.setAccessibleName('Finding evidence')
             details_layout.addWidget(details_text, 1)
 
             request_actions = QHBoxLayout()
@@ -9681,6 +9742,7 @@ def main() -> None:
             workflow_row = QHBoxLayout()
             workflow_row.addWidget(QLabel('Workflow:'))
             workflow_combo = QtWidgets.QComboBox()
+            workflow_combo.setAccessibleName('Finding workflow state')
             for state, label in WORKFLOW_STATE_LABELS.items():
                 workflow_combo.addItem(label, state)
             workflow_row.addWidget(workflow_combo, 1)
@@ -9692,6 +9754,7 @@ def main() -> None:
             details_layout.addLayout(workflow_row)
             evidence_notes = QLineEdit()
             evidence_notes.setPlaceholderText('Optional analyst note')
+            evidence_notes.setAccessibleName('Analyst evidence note')
             evidence_notes.setEnabled(False)
             details_layout.addWidget(evidence_notes)
             action_status = QLabel('')
@@ -9699,6 +9762,21 @@ def main() -> None:
             action_status.setWordWrap(True)
             details_layout.addWidget(action_status)
             main_layout.addWidget(details_panel, 2)
+
+            try:
+                QWidget.setTabOrder(site_list, filter_combo)
+                QWidget.setTabOrder(filter_combo, search_edit)
+                QWidget.setTabOrder(search_edit, results_tree)
+                QWidget.setTabOrder(results_tree, details_text)
+                QWidget.setTabOrder(details_text, copy_curl_btn)
+                QWidget.setTabOrder(copy_curl_btn, copy_python_btn)
+                QWidget.setTabOrder(copy_python_btn, repeater_btn)
+                QWidget.setTabOrder(repeater_btn, retest_btn)
+                QWidget.setTabOrder(retest_btn, workflow_combo)
+                QWidget.setTabOrder(workflow_combo, evidence_notes)
+                QWidget.setTabOrder(evidence_notes, save_state_btn)
+            except Exception:
+                pass
 
             # === LOGIC FUNCTIONS ===
             selected_result = {'value': None}

@@ -1,5 +1,5 @@
 from wafpierce.ui_components import BUTTON_OBJECT_NAMES, style_button
-from wafpierce.theme import PALETTE, stylesheet
+from wafpierce.theme import PALETTE, contrast_ratio, stylesheet
 from wafpierce.gui import PRIMARY_NAV_ITEMS, WORKBENCH_ITEMS
 
 
@@ -48,6 +48,12 @@ def test_theme_uses_restrained_brass_without_decorative_gradients():
     assert 'qlineargradient' not in css
     assert 'QPushButton#QuietButton' in css
     assert 'QPushButton#ResultsButton[hasResults="true"]' in css
+
+
+def test_core_theme_contrast_meets_wcag_aa():
+    assert contrast_ratio(PALETTE['text'], PALETTE['window']) >= 4.5
+    assert contrast_ratio(PALETTE['text_muted'], PALETTE['surface']) >= 4.5
+    assert contrast_ratio(PALETTE['text_inverse'], PALETTE['accent']) >= 4.5
 
 
 def test_primary_navigation_tracks_the_five_step_workflow():
