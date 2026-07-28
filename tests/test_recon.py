@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 from types import SimpleNamespace
 
 from wafpierce import recon
@@ -76,7 +77,40 @@ def test_enumeration_merges_sources_and_certificate_transparency(monkeypatch):
     assert set(sources['shared.example.com']) == {
         'amass', 'certificate transparency', 'subfinder'
     }
-    assert '-all' in calls[0][0]
+    assert any(
+        call[0][0] == 'subfinder' and '-all' in call[0]
+        for call in calls
+    )
+
+
+def test_passive_enumeration_sources_run_concurrently(monkeypatch):
+    rendezvous = threading.Barrier(3, timeout=3)
+    worker_ids = set()
+
+    def run(cmd, _timeout, stdin_text=None):
+        worker_ids.add(threading.get_ident())
+        rendezvous.wait()
+        return 0, f'{cmd[0]}.example.com\n', ''
+
+    def ct(_domain, _timeout):
+        worker_ids.add(threading.get_ident())
+        rendezvous.wait()
+        return {'ct.example.com'}
+
+    monkeypatch.setattr(recon, '_run', run)
+    monkeypatch.setattr(recon, 'certificate_transparency_hosts', ct)
+
+    hosts, sources = recon.enum_subdomains(
+        'example.com', 30, include_sources=True
+    )
+
+    assert len(worker_ids) == 3
+    assert {
+        'subfinder.example.com',
+        'amass.example.com',
+        'ct.example.com',
+    } <= set(hosts)
+    assert sources['ct.example.com'] == ['certificate transparency']
 
 
 def test_certificate_transparency_filters_wildcards_and_out_of_scope(

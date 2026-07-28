@@ -4,7 +4,7 @@
   <p><strong>Threat hunting and bug bounty web security toolkit</strong></p>
   <p>Discover attack surface, test web applications, validate findings, reproduce evidence, and build reports from a desktop workspace or CLI.</p>
   <p>
-    <img src="https://img.shields.io/badge/version-1.7-1f2937" alt="Version 1.7" />
+    <img src="https://img.shields.io/badge/version-1.8-1f2937" alt="Version 1.8" />
     <img src="https://img.shields.io/badge/catalogued_techniques-128-1f2937" alt="128 catalogued technique groups" />
     <img src="https://img.shields.io/badge/categories-16-1f2937" alt="16 categories" />
     <img src="https://img.shields.io/badge/python-3.8%2B-1f2937" alt="Python 3.8+" />
@@ -71,7 +71,7 @@ The Docker entrypoint is the headless CLI.
 
 ## Capability summary
 
-The counts below come from the version 1.7 registered scanner and tool catalogs. A technique group is a distinct test implementation; many groups send multiple payloads, encodings, headers, paths, methods, or confirmation requests.
+The counts below come from the version 1.8 registered scanner and tool catalogs. A technique group is a distinct test implementation; many groups send multiple payloads, encodings, headers, paths, methods, or confirmation requests.
 
 | Capability | Current coverage |
 | --- | ---: |
@@ -115,6 +115,7 @@ blackthorn scan --list-techniques
 - Fingerprint frameworks, servers, CMS platforms, cloud providers, edge controls, and known vulnerable software versions.
 - Detect subdomain takeover conditions across supported provider signatures.
 - Run a dedicated discovery workflow with Subfinder, Amass, Certificate Transparency, dnsx, and ProjectDiscovery httpx; Nmap is a separately confirmed active option.
+- Filter the finished host inventory by DNS state, HTTP availability, response class, or exact status code, and copy one URL directly from its row.
 
 ### Active web-security testing
 
@@ -404,6 +405,8 @@ The dedicated `blackthorn recon` workflow expects Subfinder, Amass, dnsx, and
 the ProjectDiscovery httpx binary (not the Python package with the same command
 name). It merges those sources with public Certificate Transparency names and
 keeps DNS-resolved, HTTP-live, DNS-only, and unresolved hosts distinct.
+Independent passive sources run concurrently and their complete results are
+merged with source attribution, reducing wait time without dropping a source.
 Wildcard scope notation is accepted and normalized:
 
 ```bash

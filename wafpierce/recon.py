@@ -28,6 +28,7 @@ or via the unified CLI::
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import logging
 import os
@@ -320,15 +321,38 @@ def certificate_transparency_hosts(
 
 
 def enum_subdomains(domain: str, timeout: float, include_sources: bool = False):
-    """Merge passive enumeration and CT results with per-host provenance."""
+    """Merge passive enumeration and CT results with per-host provenance.
+
+    The independent passive sources run concurrently.  Their complete outputs
+    are merged only after every source finishes, so the shorter wall-clock time
+    does not trade away coverage or source attribution.
+    """
     found: Set[str] = {domain}
     sources: Dict[str, Set[str]] = {domain: {'scope root'}}
 
     _emit(f"[*] subfinder -all -d {domain}")
-    rc, out, err = _run(
-        ['subfinder', '-d', domain, '-all', '-silent'],
-        timeout,
-    )
+    _emit(f"[*] amass enum -passive -d {domain}")
+    _emit(f"[*] Certificate Transparency: querying {domain}")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        subfinder_future = executor.submit(
+            _run,
+            ['subfinder', '-d', domain, '-all', '-silent'],
+            timeout,
+        )
+        amass_future = executor.submit(
+            _run,
+            ['amass', 'enum', '-passive', '-nocolor', '-d', domain],
+            timeout,
+        )
+        ct_future = executor.submit(
+            certificate_transparency_hosts, domain, timeout
+        )
+
+        rc, out, err = subfinder_future.result()
+        amass_rc, amass_out, amass_err = amass_future.result()
+        ct_hosts = ct_future.result()
+
     subs = _extract_hosts(out, domain)
     found |= subs
     for host in subs:
@@ -340,22 +364,18 @@ def enum_subdomains(domain: str, timeout: float, include_sources: bool = False):
             line += f"\n    ! {_err_tail(err)}"
     _emit(line)
 
-    _emit(f"[*] amass enum -passive -d {domain}")
-    rc, out, err = _run(['amass', 'enum', '-passive', '-nocolor', '-d', domain], timeout)
-    amass_subs = _extract_hosts(out, domain)
+    amass_subs = _extract_hosts(amass_out, domain)
     new = amass_subs - found
     found |= amass_subs
     for host in amass_subs:
         sources.setdefault(host, set()).add('amass')
     line = f"[+] amass: {len(amass_subs)} host(s), {len(new)} new"
-    if rc:
-        line += f"  (rc={rc})"
-        if _err_tail(err):
-            line += f"\n    ! {_err_tail(err)}"
+    if amass_rc:
+        line += f"  (rc={amass_rc})"
+        if _err_tail(amass_err):
+            line += f"\n    ! {_err_tail(amass_err)}"
     _emit(line)
 
-    _emit(f"[*] Certificate Transparency: querying {domain}")
-    ct_hosts = certificate_transparency_hosts(domain, timeout)
     found |= ct_hosts
     for host in ct_hosts:
         sources.setdefault(host, set()).add('certificate transparency')

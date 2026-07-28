@@ -156,6 +156,37 @@ def recon_report_parts(data):
     return {'target': '', 'findings': [], 'stages': {}}
 
 
+RECON_HOST_FILTER_OPTIONS = (
+    ('All', 'all'),
+    ('Resolved only', 'resolved'),
+    ('Web live', 'web_live'),
+    ('Resolved · no HTTP', 'dns_no_http'),
+    ('Unresolved', 'unresolved'),
+    ('HTTP 2xx', 'http_2xx'),
+    ('HTTP 3xx', 'http_3xx'),
+    ('HTTP 4xx', 'http_4xx'),
+    ('HTTP 5xx', 'http_5xx'),
+)
+
+
+def recon_host_filter_options(hosts):
+    """Return base inventory filters plus exact HTTP statuses in the report."""
+    statuses = set()
+    for host in hosts or []:
+        if not isinstance(host, dict):
+            continue
+        try:
+            status = int(host.get('http_status'))
+        except (TypeError, ValueError):
+            continue
+        if 100 <= status <= 599:
+            statuses.add(status)
+    return list(RECON_HOST_FILTER_OPTIONS) + [
+        (f'HTTP {status} only', f'http_status:{status}')
+        for status in sorted(statuses)
+    ]
+
+
 def filter_recon_hosts(hosts, filter_key='all', query=''):
     """Filter the Discover inventory without changing the report data."""
     key = str(filter_key or 'all')
@@ -166,7 +197,12 @@ def filter_recon_hosts(hosts, filter_key='all', query=''):
             continue
         dns_live = bool(host.get('dns_live'))
         http_live = bool(host.get('http_live'))
-        if key == 'dns_live' and not dns_live:
+        raw_status = host.get('http_status')
+        try:
+            http_status = int(raw_status)
+        except (TypeError, ValueError):
+            http_status = None
+        if key in {'dns_live', 'resolved'} and not dns_live:
             continue
         if key == 'web_live' and not http_live:
             continue
@@ -174,13 +210,35 @@ def filter_recon_hosts(hosts, filter_key='all', query=''):
             continue
         if key == 'unresolved' and dns_live:
             continue
+        if key.startswith('http_status:'):
+            try:
+                wanted_status = int(key.split(':', 1)[1])
+            except (TypeError, ValueError):
+                wanted_status = None
+            if http_status != wanted_status:
+                continue
+        if (
+                key.startswith('http_')
+                and key.endswith('xx')
+                and len(key) == 8):
+            try:
+                wanted_class = int(key[5])
+            except (TypeError, ValueError):
+                wanted_class = None
+            if http_status is None or http_status // 100 != wanted_class:
+                continue
         if needle:
             haystack = ' '.join([
                 str(host.get('hostname') or ''),
                 ' '.join(str(x) for x in host.get('ip_addresses') or []),
                 ' '.join(str(x) for x in host.get('sources') or []),
+                str(host.get('http_url') or ''),
+                str(raw_status or ''),
                 str(host.get('title') or ''),
                 str(host.get('server') or ''),
+                ' '.join(
+                    str(x) for x in host.get('technologies') or []
+                ),
             ]).lower()
             if needle not in haystack:
                 continue
@@ -6239,7 +6297,8 @@ def main() -> None:
                 QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QSpinBox,
                 QCheckBox, QPushButton, QPlainTextEdit, QTreeWidget,
                 QTreeWidgetItem, QSplitter, QMessageBox, QFileDialog,
-                QGridLayout, QGroupBox, QComboBox, QTabWidget, QHeaderView)
+                QGridLayout, QGroupBox, QComboBox, QTabWidget, QHeaderView,
+                QMenu)
             from PySide6.QtCore import Qt, QProcess, QProcessEnvironment
             from PySide6.QtGui import QTextCursor
             import tempfile
@@ -6497,26 +6556,22 @@ def main() -> None:
             inventory_bar.addStretch()
             inventory_filter = QComboBox()
             inventory_filter.setAccessibleName('Discovery status filter')
-            for label, key in (
-                ('All', 'all'),
-                ('DNS live', 'dns_live'),
-                ('Web live', 'web_live'),
-                ('DNS live · no HTTP', 'dns_no_http'),
-                ('Unresolved', 'unresolved'),
-            ):
+            for label, key in recon_host_filter_options([]):
                 inventory_filter.addItem(label, key)
             inventory_search = QLineEdit()
             inventory_search.setAccessibleName('Search discovered hosts')
-            inventory_search.setPlaceholderText('Search host, IP, title, or source')
+            inventory_search.setPlaceholderText('Search host, URL, IP, or status')
+            inventory_search.setMaximumWidth(440)
+            inventory_search.setClearButtonEnabled(True)
             inventory_bar.addWidget(inventory_filter)
-            inventory_bar.addWidget(inventory_search, 1)
+            inventory_bar.addWidget(inventory_search)
             lay.addLayout(inventory_bar)
 
             summary_row = QHBoxLayout()
             summary_labels = {}
             for key, label in (
                 ('subdomains', 'Subdomains'),
-                ('dns_live', 'DNS live'),
+                ('dns_live', 'Resolved'),
                 ('web_live', 'Web live'),
                 ('dns_without_http', 'No HTTP'),
                 ('unresolved', 'Unresolved'),
@@ -6528,6 +6583,14 @@ def main() -> None:
                 summary_row.addWidget(widget)
             summary_row.addStretch()
             lay.addLayout(summary_row)
+
+            inventory_action_hint = QLabel(
+                'Double-click a row to copy its URL. Right-click or press and '
+                'hold for URL, hostname, and IP copy options.'
+            )
+            inventory_action_hint.setObjectName('FieldLabel')
+            inventory_action_hint.setWordWrap(True)
+            lay.addWidget(inventory_action_hint)
 
             split = QSplitter(Qt.Vertical)
             split.setObjectName('DiscoveryVerticalSplitter')
@@ -6542,6 +6605,11 @@ def main() -> None:
                 'Sources',
             ])
             host_tree.setAlternatingRowColors(True)
+            host_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+            host_tree.setToolTip(
+                'Double-click a row to copy its URL. Right-click or press and '
+                'hold for more copy options.'
+            )
             try:
                 header = host_tree.header()
                 header.setSectionResizeMode(0, QHeaderView.Interactive)
@@ -6597,6 +6665,70 @@ def main() -> None:
                 log.moveCursor(QTextCursor.End)
                 log.insertPlainText(text)
                 log.moveCursor(QTextCursor.End)
+
+            def _sync_status_filters(hosts):
+                """Add exact HTTP response codes observed in this report."""
+                selected = inventory_filter.currentData() or 'all'
+                inventory_filter.blockSignals(True)
+                inventory_filter.clear()
+                for label, key in recon_host_filter_options(hosts):
+                    inventory_filter.addItem(label, key)
+                selected_index = inventory_filter.findData(selected)
+                inventory_filter.setCurrentIndex(
+                    selected_index if selected_index >= 0 else 0
+                )
+                inventory_filter.blockSignals(False)
+
+            def _host_for_item(item):
+                if item is None:
+                    return {}
+                host = item.data(0, 257)
+                return host if isinstance(host, dict) else {}
+
+            def _copy_host_value(value, label):
+                value = str(value or '').strip()
+                if not value:
+                    return
+                QApplication.clipboard().setText(value)
+                inventory_action_hint.setText(f'Copied {label}: {value}')
+                _append(f'\n[recon] copied {label}: {value}\n')
+
+            def _copy_host_row(item, _column=0):
+                host = _host_for_item(item)
+                if not host:
+                    return
+                url = str(host.get('http_url') or '').strip()
+                if url:
+                    _copy_host_value(url, 'URL')
+                else:
+                    _copy_host_value(host.get('hostname'), 'hostname')
+
+            def _show_host_copy_menu(point):
+                item = host_tree.itemAt(point)
+                host = _host_for_item(item)
+                if not host:
+                    return
+                menu = QMenu(host_tree)
+                url = str(host.get('http_url') or '').strip()
+                hostname = str(host.get('hostname') or '').strip()
+                ips = ', '.join(
+                    str(value) for value in host.get('ip_addresses') or []
+                )
+                copy_url = menu.addAction('Copy URL')
+                copy_url.setEnabled(bool(url))
+                copy_hostname = menu.addAction('Copy hostname')
+                copy_hostname.setEnabled(bool(hostname))
+                copy_ips = menu.addAction('Copy IP address(es)')
+                copy_ips.setEnabled(bool(ips))
+                selected = menu.exec(
+                    host_tree.viewport().mapToGlobal(point)
+                )
+                if selected == copy_url:
+                    _copy_host_value(url, 'URL')
+                elif selected == copy_hostname:
+                    _copy_host_value(hostname, 'hostname')
+                elif selected == copy_ips:
+                    _copy_host_value(ips, 'IP address(es)')
 
             def _populate_host_inventory():
                 host_tree.clear()
@@ -6674,6 +6806,7 @@ def main() -> None:
                     findings_tree.addTopLevelItem(it)
 
                 hosts = report.get('stages', {}).get('hosts') or []
+                _sync_status_filters(hosts)
                 summary = dict(
                     report.get('stages', {}).get('summary') or {}
                 )
@@ -6969,6 +7102,10 @@ def main() -> None:
             )
             inventory_search.textChanged.connect(
                 lambda: _populate_host_inventory()
+            )
+            host_tree.itemDoubleClicked.connect(_copy_host_row)
+            host_tree.customContextMenuRequested.connect(
+                _show_host_copy_menu
             )
 
             # Keep a handle so other code (e.g. abort on quit) can reach the proc.

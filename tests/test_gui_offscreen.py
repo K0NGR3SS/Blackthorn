@@ -9,9 +9,10 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 def test_results_workspace_builds_with_evidence_actions(monkeypatch):
     from PySide6.QtWidgets import (
-        QApplication, QCheckBox, QLabel, QLineEdit, QListWidget, QPushButton,
-        QSplitter, QTextBrowser, QTreeWidget,
+        QApplication, QCheckBox, QComboBox, QLabel, QLineEdit, QListWidget,
+        QPushButton, QSplitter, QTextBrowser, QTreeWidget, QTreeWidgetItem,
     )
+    from PySide6.QtCore import Qt
 
     import wafpierce.database as database
     import wafpierce.gui as gui
@@ -141,10 +142,36 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
             checkbox for checkbox in recon_page.findChildren(QCheckBox)
             if checkbox.text().startswith('Active ports')
         ).isChecked() is False
-        assert next(
+        host_inventory = next(
             tree for tree in recon_page.findChildren(QTreeWidget)
             if tree.accessibleName() == 'Discovered host inventory'
-        ).columnCount() == 6
+        )
+        assert host_inventory.columnCount() == 6
+        assert host_inventory.contextMenuPolicy() == Qt.CustomContextMenu
+        status_filter = next(
+            combo for combo in recon_page.findChildren(QComboBox)
+            if combo.accessibleName() == 'Discovery status filter'
+        )
+        filter_labels = {
+            status_filter.itemText(index)
+            for index in range(status_filter.count())
+        }
+        assert {
+            'Resolved only', 'HTTP 2xx', 'HTTP 3xx', 'HTTP 4xx', 'HTTP 5xx'
+        } <= filter_labels
+        live_item = QTreeWidgetItem([
+            'api.example.test', 'Resolved', 'Live · 200',
+            'https://api.example.test', '192.0.2.1', 'subfinder',
+        ])
+        live_item.setData(0, 257, {
+            'hostname': 'api.example.test',
+            'http_url': 'https://api.example.test',
+            'ip_addresses': ['192.0.2.1'],
+        })
+        host_inventory.addTopLevelItem(live_item)
+        host_inventory.itemDoubleClicked.emit(live_item, 3)
+        QApplication.processEvents()
+        assert QApplication.clipboard().text() == 'https://api.example.test'
         assert recon_page.findChild(
             QSplitter, 'DiscoveryVerticalSplitter'
         ) is not None

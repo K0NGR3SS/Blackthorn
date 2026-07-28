@@ -16,7 +16,7 @@ from wafpierce.gui import (
     legal_acceptance_is_current, parse_scan_phase_event,
     scan_preflight_summary, scan_profile_settings,
     finding_request_spec, result_matches_filter,
-    filter_recon_hosts, recon_report_parts,
+    filter_recon_hosts, recon_host_filter_options, recon_report_parts,
 )
 
 
@@ -142,8 +142,11 @@ def test_recon_host_filters_separate_dns_and_http_liveness():
             'hostname': 'web.example.com',
             'dns_live': True,
             'http_live': True,
+            'http_status': 200,
+            'http_url': 'https://web.example.com',
             'ip_addresses': ['192.0.2.1'],
             'sources': ['subfinder'],
+            'technologies': ['nginx'],
         },
         {
             'hostname': 'mail.example.com',
@@ -158,17 +161,57 @@ def test_recon_host_filters_separate_dns_and_http_liveness():
             'http_live': False,
             'sources': ['certificate transparency'],
         },
+        {
+            'hostname': 'redirect.example.com',
+            'dns_live': True,
+            'http_live': True,
+            'http_status': 301,
+            'http_url': 'https://redirect.example.com',
+            'sources': ['certificate transparency'],
+        },
+        {
+            'hostname': 'denied.example.com',
+            'dns_live': True,
+            'http_live': True,
+            'http_status': '403',
+            'http_url': 'https://denied.example.com',
+            'sources': ['amass'],
+        },
     ]
 
     assert [h['hostname'] for h in filter_recon_hosts(
         hosts, 'web_live'
-    )] == ['web.example.com']
+    )] == [
+        'web.example.com', 'redirect.example.com', 'denied.example.com'
+    ]
+    assert [h['hostname'] for h in filter_recon_hosts(
+        hosts, 'resolved'
+    )] == [
+        'web.example.com', 'mail.example.com', 'redirect.example.com',
+        'denied.example.com',
+    ]
     assert [h['hostname'] for h in filter_recon_hosts(
         hosts, 'dns_no_http'
     )] == ['mail.example.com']
     assert [h['hostname'] for h in filter_recon_hosts(
+        hosts, 'http_status:200'
+    )] == ['web.example.com']
+    assert [h['hostname'] for h in filter_recon_hosts(
+        hosts, 'http_3xx'
+    )] == ['redirect.example.com']
+    assert [h['hostname'] for h in filter_recon_hosts(
+        hosts, 'http_4xx'
+    )] == ['denied.example.com']
+    assert [h['hostname'] for h in filter_recon_hosts(
         hosts, query='certificate'
-    )] == ['old.example.com']
+    )] == ['old.example.com', 'redirect.example.com']
+    assert [h['hostname'] for h in filter_recon_hosts(
+        hosts, query='403'
+    )] == ['denied.example.com']
+    options = recon_host_filter_options(hosts)
+    assert ('HTTP 200 only', 'http_status:200') in options
+    assert ('HTTP 301 only', 'http_status:301') in options
+    assert ('HTTP 403 only', 'http_status:403') in options
 
 
 def test_finding_request_spec_requires_an_exact_absolute_request():
