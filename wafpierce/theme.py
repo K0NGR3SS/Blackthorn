@@ -344,6 +344,14 @@ QLabel#PreflightSummary {{
     border-radius: 4px;
     padding: 9px 11px;
 }}
+QLabel#FindingState {{
+    color: {p['text']};
+    background-color: {p['input']};
+    border: 1px solid {p['border_subtle']};
+    border-radius: 4px;
+    padding: 8px 10px;
+    font-weight: 600;
+}}
 QFrame#DashboardPill {{
     background-color: {p['input']};
     border: 1px solid {p['border_subtle']};

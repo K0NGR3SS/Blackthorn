@@ -15,6 +15,7 @@ from wafpierce.gui import (
     LEGAL_ACCEPTANCE_VERSION, SCAN_CATEGORIES_GUI, SCAN_PROFILE_DEFINITIONS,
     legal_acceptance_is_current, parse_scan_phase_event,
     scan_preflight_summary, scan_profile_settings,
+    finding_request_spec, result_matches_filter,
 )
 
 
@@ -94,7 +95,47 @@ def test_gui_status_distinguishes_candidate_from_confirmed():
     assert _is_candidate_result(candidate)
     assert 'CANDIDATE' in _finding_status_label(candidate)
     assert 'CONFIRMED' in _finding_status_label(confirmed)
-    assert 'Observation' in _finding_status_label(observation)
+    assert 'OBSERVATION' in _finding_status_label(observation)
+
+
+def test_results_filters_separate_evidence_state_from_workflow_state():
+    confirmed = {
+        'verification_status': 'confirmed',
+        'kind': 'finding',
+        'severity': 'HIGH',
+        'workflow_state': 'validated',
+    }
+    candidate = {
+        'verification_status': 'candidate',
+        'kind': 'suspected',
+        'severity': 'LOW',
+    }
+
+    assert result_matches_filter(confirmed, 'confirmed')
+    assert result_matches_filter(confirmed, 'high')
+    assert result_matches_filter(confirmed, 'workflow:validated')
+    assert not result_matches_filter(confirmed, 'needs_review')
+    assert result_matches_filter(candidate, 'candidate')
+    assert result_matches_filter(candidate, 'needs_review')
+
+
+def test_finding_request_spec_requires_an_exact_absolute_request():
+    spec = finding_request_spec({
+        'request': {
+            'method': 'POST',
+            'url': 'https://app.example.test/api',
+            'headers': {'Content-Type': 'application/json'},
+            'body': {'probe': 'bt'},
+        },
+    })
+
+    assert spec['method'] == 'POST'
+    assert spec['body'] == {'probe': 'bt'}
+    assert finding_request_spec({
+        'url': 'https://app.example.test',
+        'request': {'available': False},
+    }) is None
+    assert finding_request_spec({'path': '/relative'}) is None
 
 
 def test_gui_advanced_flags_forward_intrusive_opt_in():

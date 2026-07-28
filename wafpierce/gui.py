@@ -92,10 +92,61 @@ def _engagement_authorizes(target: str, scope: list, exclusions=None) -> bool:
 def _finding_status_label(finding: dict) -> str:
     state = _result_state(finding if isinstance(finding, dict) else {})
     if state == 'confirmed':
-        return '✅ CONFIRMED FINDING'
+        return 'CONFIRMED FINDING'
     if state == 'candidate':
-        return '⚠️ CANDIDATE — verification required'
-    return 'ℹ️ Observation'
+        return 'CANDIDATE — verification required'
+    return 'OBSERVATION'
+
+
+WORKFLOW_STATE_LABELS = {
+    'candidate': 'Needs review',
+    'validated': 'Validated',
+    'reported': 'Reported',
+    'duplicate': 'Duplicate',
+    'accepted': 'Accepted risk',
+    'fixed': 'Fixed',
+    'informative': 'Informative',
+}
+
+
+def result_matches_filter(finding: dict, filter_key: str) -> bool:
+    """Apply the results workspace's state/severity/workflow filters."""
+    key = str(filter_key or 'all')
+    state = _result_state(finding if isinstance(finding, dict) else {})
+    severity = str((finding or {}).get('severity') or 'INFO').upper()
+    workflow = str((finding or {}).get('workflow_state') or 'candidate')
+    if key == 'all':
+        return True
+    if key in {'confirmed', 'candidate', 'observation'}:
+        return state == key
+    if key in {'critical', 'high', 'medium', 'low', 'info'}:
+        return severity == key.upper()
+    if key == 'needs_review':
+        return workflow == 'candidate'
+    if key.startswith('workflow:'):
+        return workflow == key.split(':', 1)[1]
+    return True
+
+
+def finding_request_spec(finding: dict):
+    """Return the exact replayable request fields, or ``None`` when unavailable."""
+    if not isinstance(finding, dict):
+        return None
+    request = finding.get('request')
+    if not isinstance(request, dict) or request.get('available') is False:
+        return None
+    url = _finding_url(finding)
+    if not url or not str(url).lower().startswith(('http://', 'https://')):
+        return None
+    body = request.get('body')
+    if body is None:
+        body = finding.get('data', finding.get('body'))
+    return {
+        'method': str(request.get('method') or finding.get('method') or 'GET').upper(),
+        'url': str(url),
+        'headers': dict(request.get('headers') or finding.get('headers') or {}),
+        'body': body,
+    }
 
 
 def _advanced_cli_flags(opts: dict) -> list:
@@ -4119,7 +4170,7 @@ def main() -> None:
             self._worker_thread.start()
             self.start_btn.setEnabled(False)
             self.stop_btn.setEnabled(True)
-            
+
             # disable controls while running
             try:
                 self.threads_spin.setEnabled(False)
@@ -4563,10 +4614,17 @@ def main() -> None:
                     if self._db and self._current_scan_id:
                         for result in data:
                             try:
+                                stored_result = result
                                 if getattr(self, '_current_engagement_id', None):
-                                    result = dict(result)
-                                    result.setdefault('engagement_id', self._current_engagement_id)
-                                self._db.add_result(self._current_scan_id, result)
+                                    result.setdefault(
+                                        'engagement_id',
+                                        self._current_engagement_id,
+                                    )
+                                result_id = self._db.add_result(
+                                    self._current_scan_id, stored_result
+                                )
+                                if result_id:
+                                    result['db_result_id'] = result_id
                             except Exception:
                                 pass
                     # Live findings window: refresh whenever it exists (per-target).
@@ -9379,10 +9437,10 @@ def main() -> None:
                 empty.setObjectName('ResultsPage')
                 ev = QVBoxLayout(empty)
                 ev.setContentsMargins(22, 20, 22, 20)
-                hdr = QLabel('◆  Results')
-                hdr.setStyleSheet('font-size:18px; font-weight:bold; color:#58a6ff;')
+                hdr = QLabel('Analyze')
+                hdr.setObjectName('PageTitle')
                 msg = QLabel(_t('no_results_msg', self._lang))
-                msg.setStyleSheet('color:#8b949e;')
+                msg.setObjectName('FieldLabel')
                 ev.addWidget(hdr)
                 ev.addWidget(msg)
                 ev.addStretch()
@@ -9416,27 +9474,19 @@ def main() -> None:
             
             dlg = QtWidgets.QWidget()
             dlg.setObjectName('ResultsPage')
-            dlg.setStyleSheet("""
-                QWidget#ResultsPage { background-color: #0f1112; }
-                QLabel { color: #d7e1ea; }
-                QListWidget { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; }
-                QListWidget::item { padding: 8px; border-bottom: 1px solid #2b2f33; }
-                QListWidget::item:selected { background-color: #3b82f6; }
-                QListWidget::item:hover { background-color: #2b2f33; }
-                QTreeWidget { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; }
-                QTreeWidget::item { padding: 4px; }
-                QTreeWidget::item:selected { background-color: #3b82f6; }
-                QComboBox { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; padding: 5px; }
-                QComboBox::drop-down { border: none; }
-                QComboBox QAbstractItemView { background-color: #16181a; color: #d7e1ea; selection-background-color: #3b82f6; }
-                QPushButton { background-color: #2b2f33; color: #d7e1ea; border: none; padding: 8px 16px; border-radius: 4px; }
-                QPushButton:hover { background-color: #3b3f43; }
-                QCheckBox { color: #d7e1ea; }
-                QGroupBox { color: #d7e1ea; border: 1px solid #2b2f33; margin-top: 10px; padding-top: 10px; }
-                QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }
-            """)
-            
-            main_layout = QHBoxLayout(dlg)
+            outer_layout = QVBoxLayout(dlg)
+            title = QLabel('Analyze')
+            title.setObjectName('PageTitle')
+            subtitle = QLabel(
+                'Triage by verification state, inspect the evidence, then move '
+                'the finding through your reporting workflow.'
+            )
+            subtitle.setObjectName('FieldLabel')
+            subtitle.setWordWrap(True)
+            outer_layout.addWidget(title)
+            outer_layout.addWidget(subtitle)
+            main_layout = QHBoxLayout()
+            outer_layout.addLayout(main_layout, 1)
             
             # === LEFT PANEL: Site List ===
             left_panel = QVBoxLayout()
@@ -9444,13 +9494,12 @@ def main() -> None:
             
             # Header
             sites_header = QLabel(_t('sites', self._lang))
-            sites_header.setFont(QFont('', 12, QFont.Bold))
-            sites_header.setStyleSheet('color: #d7e1ea; padding: 5px;')
+            sites_header.setObjectName('FieldLabel')
             left_panel.addWidget(sites_header)
             
             # "All Sites" option
             site_list = QtWidgets.QListWidget()
-            site_list.setFixedWidth(280)
+            site_list.setFixedWidth(220)
             
             # Add "All Sites" first
             all_item = QtWidgets.QListWidgetItem(f'{_t("all_sites", self._lang)} ({len(self._results)} {_t("findings", self._lang)})')
@@ -9525,16 +9574,19 @@ def main() -> None:
             # Filter options
             filter_label = QLabel(_t('filter', self._lang))
             filter_combo = QtWidgets.QComboBox()
-            filter_combo.addItems([
-                _t('all_results', self._lang),
-                _t('critical_only', self._lang),
-                _t('high_only', self._lang),
-                _t('medium_only', self._lang),
-                _t('low_only', self._lang),
-                _t('info_only', self._lang),
-                _t('bypasses_only', self._lang),
-                _t('non_bypasses_only', self._lang)
-            ])
+            for label, key in (
+                ('All results', 'all'),
+                ('Confirmed findings', 'confirmed'),
+                ('Candidates', 'candidate'),
+                ('Observations', 'observation'),
+                ('Critical severity', 'critical'),
+                ('High severity', 'high'),
+                ('Needs review', 'needs_review'),
+                ('Validated', 'workflow:validated'),
+                ('Reported', 'workflow:reported'),
+                ('Fixed', 'workflow:fixed'),
+            ):
+                filter_combo.addItem(label, key)
             filter_combo.setFixedWidth(180)
             controls.addWidget(filter_label)
             controls.addWidget(filter_combo)
@@ -9543,24 +9595,13 @@ def main() -> None:
             
             # Search bar row
             search_row = QHBoxLayout()
-            search_label = QLabel('🔍 ' + _t('search', self._lang))
+            search_label = QLabel(_t('search', self._lang))
             search_edit = QLineEdit()
             search_edit.setPlaceholderText(_t('search_placeholder', self._lang))
-            search_edit.setStyleSheet('''
-                QLineEdit {
-                    background-color: #16181a;
-                    color: #d7e1ea;
-                    border: 1px solid #2b2f33;
-                    border-radius: 4px;
-                    padding: 6px 10px;
-                }
-                QLineEdit:focus {
-                    border: 1px solid #3b82f6;
-                }
-            ''')
-            search_clear_btn = QPushButton('✕')
-            search_clear_btn.setFixedWidth(30)
-            search_clear_btn.setStyleSheet('QPushButton { padding: 4px; }')
+            search_clear_btn = style_button(
+                QPushButton(), 'quiet', text='Clear'
+            )
+            search_clear_btn.setFixedWidth(56)
             search_clear_btn.clicked.connect(lambda: search_edit.clear())
             
             search_row.addWidget(search_label)
@@ -9569,8 +9610,12 @@ def main() -> None:
             search_row.addSpacing(20)
             
             # Expand/Collapse buttons
-            expand_btn = QPushButton(_t('expand_all', self._lang))
-            collapse_btn = QPushButton(_t('collapse_all', self._lang))
+            expand_btn = style_button(
+                QPushButton(), 'quiet', text=_t('expand_all', self._lang)
+            )
+            collapse_btn = style_button(
+                QPushButton(), 'quiet', text=_t('collapse_all', self._lang)
+            )
             search_row.addWidget(expand_btn)
             search_row.addWidget(collapse_btn)
             
@@ -9593,21 +9638,72 @@ def main() -> None:
                 pass
             
             right_panel.addWidget(results_tree, 1)
-            
-            # Details section
-            details_group = QtWidgets.QGroupBox(_t('details', self._lang))
-            details_layout = QVBoxLayout(details_group)
-            details_text = QTextEdit()
+
+            main_layout.addLayout(right_panel, 2)
+
+            # === EVIDENCE + ACTIONS PANEL ===
+            details_panel = QtWidgets.QFrame()
+            details_panel.setObjectName('Card')
+            details_panel.setMinimumWidth(360)
+            details_layout = QVBoxLayout(details_panel)
+            details_title = QLabel('Evidence')
+            details_title.setObjectName('PageTitle')
+            details_layout.addWidget(details_title)
+            finding_state_label = QLabel('Select a finding to inspect its proof.')
+            finding_state_label.setObjectName('FindingState')
+            finding_state_label.setWordWrap(True)
+            details_layout.addWidget(finding_state_label)
+            details_text = QtWidgets.QTextBrowser()
             details_text.setReadOnly(True)
-            details_text.setMaximumHeight(200)
-            details_text.setStyleSheet('background-color: #16181a; border: none;')
-            details_layout.addWidget(details_text)
-            right_panel.addWidget(details_group)
-            
-            main_layout.addLayout(right_panel, 1)
-            
+            details_text.setOpenExternalLinks(True)
+            details_layout.addWidget(details_text, 1)
+
+            request_actions = QHBoxLayout()
+            copy_curl_btn = style_button(
+                QPushButton(), 'quiet', text='Copy cURL'
+            )
+            copy_python_btn = style_button(
+                QPushButton(), 'quiet', text='Copy Python'
+            )
+            repeater_btn = style_button(
+                QPushButton(), 'secondary', text='Send to Repeater'
+            )
+            retest_btn = style_button(
+                QPushButton(), 'primary', text='Re-test request'
+            )
+            for button in (
+                copy_curl_btn, copy_python_btn, repeater_btn, retest_btn,
+            ):
+                button.setEnabled(False)
+                request_actions.addWidget(button)
+            details_layout.addLayout(request_actions)
+
+            workflow_row = QHBoxLayout()
+            workflow_row.addWidget(QLabel('Workflow:'))
+            workflow_combo = QtWidgets.QComboBox()
+            for state, label in WORKFLOW_STATE_LABELS.items():
+                workflow_combo.addItem(label, state)
+            workflow_row.addWidget(workflow_combo, 1)
+            save_state_btn = style_button(
+                QPushButton(), 'secondary', text='Save state'
+            )
+            save_state_btn.setEnabled(False)
+            workflow_row.addWidget(save_state_btn)
+            details_layout.addLayout(workflow_row)
+            evidence_notes = QLineEdit()
+            evidence_notes.setPlaceholderText('Optional analyst note')
+            evidence_notes.setEnabled(False)
+            details_layout.addWidget(evidence_notes)
+            action_status = QLabel('')
+            action_status.setObjectName('FieldLabel')
+            action_status.setWordWrap(True)
+            details_layout.addWidget(action_status)
+            main_layout.addWidget(details_panel, 2)
+
             # === LOGIC FUNCTIONS ===
-            def get_filtered_sorted_results(target_key, sort_idx, filter_idx, search_text=''):
+            selected_result = {'value': None}
+
+            def get_filtered_sorted_results(target_key, sort_idx, filter_key, search_text=''):
                 """Get results for a target with sorting, filtering, and search applied."""
                 if target_key == '__ALL__':
                     results = list(self._results)
@@ -9625,21 +9721,10 @@ def main() -> None:
                         search_lower in r.get('severity', '').lower()
                     ]
                 
-                # Apply filter
-                if filter_idx == 1:  # CRITICAL only
-                    results = [r for r in results if r.get('severity') == 'CRITICAL']
-                elif filter_idx == 2:  # HIGH only
-                    results = [r for r in results if r.get('severity') == 'HIGH']
-                elif filter_idx == 3:  # MEDIUM only
-                    results = [r for r in results if r.get('severity') == 'MEDIUM']
-                elif filter_idx == 4:  # LOW only
-                    results = [r for r in results if r.get('severity') == 'LOW']
-                elif filter_idx == 5:  # INFO only
-                    results = [r for r in results if r.get('severity') == 'INFO']
-                elif filter_idx == 6:  # Confirmed only
-                    results = [r for r in results if _is_confirmed_result(r)]
-                elif filter_idx == 7:  # Candidates / observations
-                    results = [r for r in results if not _is_confirmed_result(r)]
+                results = [
+                    result for result in results
+                    if result_matches_filter(result, filter_key)
+                ]
                 
                 # Apply sort
                 if sort_idx == 0:  # Severity High to Low
@@ -9755,9 +9840,188 @@ def main() -> None:
                 </div>
                 """
 
+            def set_selected_result(result):
+                selected_result['value'] = result if isinstance(result, dict) else None
+                has_result = isinstance(result, dict)
+                request_spec = finding_request_spec(result) if has_result else None
+                for button in (
+                    copy_curl_btn, copy_python_btn, repeater_btn, retest_btn,
+                ):
+                    button.setEnabled(request_spec is not None)
+                save_state_btn.setEnabled(has_result)
+                workflow_combo.setEnabled(has_result)
+                evidence_notes.setEnabled(has_result)
+                if not has_result:
+                    details_text.clear()
+                    finding_state_label.setText(
+                        'Select a finding to inspect its proof.'
+                    )
+                    evidence_notes.clear()
+                    action_status.clear()
+                    return
+
+                details_text.setHtml(build_finding_detail_html(result))
+                workflow = str(result.get('workflow_state') or 'candidate')
+                workflow_index = workflow_combo.findData(workflow)
+                workflow_combo.setCurrentIndex(
+                    workflow_index if workflow_index >= 0 else 0
+                )
+                evidence_notes.setText(str(result.get('evidence_notes') or ''))
+                finding_state_label.setText(
+                    f'{_finding_status_label(result)} · '
+                    f'{WORKFLOW_STATE_LABELS.get(workflow, workflow.title())}'
+                )
+                action_status.setText(
+                    '' if request_spec is not None
+                    else 'This result does not include an exact replayable request.'
+                )
+
+            def copy_selected(format_name):
+                result = selected_result['value']
+                if not isinstance(result, dict):
+                    return
+                text = (
+                    _finding_to_curl(result)
+                    if format_name == 'curl'
+                    else _finding_to_python(result)
+                )
+                try:
+                    QApplication.clipboard().setText(text)
+                    action_status.setText(
+                        f'Copied {format_name} reproduction to the clipboard.'
+                    )
+                except Exception as exc:
+                    action_status.setText(f'Copy failed: {exc}')
+
+            def send_selected_to_repeater():
+                result = selected_result['value']
+                if finding_request_spec(result) is None:
+                    return
+                self._repeater_load(result)
+
+            def target_authorized_for_retest(url):
+                engagement_id = (
+                    getattr(self, '_current_engagement_id', None)
+                    or self._prefs.get('current_engagement_id')
+                )
+                if engagement_id and self._db:
+                    engagement = self._db.get_engagement(int(engagement_id))
+                    if engagement:
+                        return _engagement_authorizes(
+                            url,
+                            engagement.get('scope') or [],
+                            engagement.get('exclusions') or [],
+                        )
+                authorize_path = (
+                    (self._prefs.get('advanced') or {}).get('authorize')
+                )
+                if authorize_path:
+                    from .authorization import is_authorized, load_allowlist
+                    return is_authorized(url, load_allowlist(authorize_path))
+                return False
+
+            def retest_selected():
+                result = selected_result['value']
+                spec = finding_request_spec(result)
+                if spec is None:
+                    return
+                if not target_authorized_for_retest(spec['url']):
+                    QMessageBox.warning(
+                        dlg,
+                        'Authorization required',
+                        'Select an engagement or allowlist that authorizes this '
+                        'request before re-testing it.',
+                    )
+                    return
+
+                retest_btn.setEnabled(False)
+                action_status.setText('Re-testing the exact recorded request…')
+                pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
+                def send_request():
+                    import requests
+
+                    kwargs = {
+                        'method': spec['method'],
+                        'url': spec['url'],
+                        'headers': spec['headers'] or None,
+                        'timeout': 20,
+                        'verify': False,
+                        'allow_redirects': False,
+                    }
+                    body = spec.get('body')
+                    content_type = next(
+                        (
+                            str(value).lower()
+                            for key, value in spec['headers'].items()
+                            if str(key).lower() == 'content-type'
+                        ),
+                        '',
+                    )
+                    if isinstance(body, dict) and 'json' in content_type:
+                        kwargs['json'] = body
+                    elif body is not None:
+                        kwargs['data'] = body
+                    started = time.monotonic()
+                    response = requests.request(**kwargs)
+                    return (
+                        response.status_code,
+                        len(response.content),
+                        int((time.monotonic() - started) * 1000),
+                    )
+
+                future = pool.submit(send_request)
+                timer = QTimer(dlg)
+
+                def poll_retest():
+                    if not future.done():
+                        return
+                    timer.stop()
+                    pool.shutdown(wait=False)
+                    retest_btn.setEnabled(True)
+                    try:
+                        status, size, elapsed = future.result()
+                        action_status.setText(
+                            f'Re-test returned HTTP {status}, {size} bytes in '
+                            f'{elapsed} ms. Compare the evidence before validating.'
+                        )
+                    except Exception as exc:
+                        action_status.setText(f'Re-test failed: {exc}')
+
+                timer.timeout.connect(poll_retest)
+                timer.start(100)
+
+            def save_workflow_state():
+                result = selected_result['value']
+                if not isinstance(result, dict):
+                    return
+                state = str(workflow_combo.currentData() or 'candidate')
+                notes = evidence_notes.text().strip()
+                result['workflow_state'] = state
+                result['evidence_notes'] = notes
+                result_id = result.get('db_result_id') or result.get('id')
+                persisted = False
+                if self._db and result_id:
+                    try:
+                        persisted = self._db.update_finding_state(
+                            int(result_id), state, notes
+                        )
+                    except Exception:
+                        persisted = False
+                finding_state_label.setText(
+                    f'{_finding_status_label(result)} · '
+                    f'{WORKFLOW_STATE_LABELS.get(state, state.title())}'
+                )
+                action_status.setText(
+                    'Workflow state saved.'
+                    if persisted else
+                    'Workflow state updated for this workspace session.'
+                )
+
             def update_results_tree():
                 """Update the results tree based on current selection, filters, and search."""
                 results_tree.clear()
+                set_selected_result(None)
                 
                 # Get selected site
                 sel = site_list.currentItem()
@@ -9766,10 +10030,12 @@ def main() -> None:
                 target_key = sel.data(256)  # Qt.UserRole
                 
                 sort_idx = sort_combo.currentIndex()
-                filter_idx = filter_combo.currentIndex()
+                filter_key = filter_combo.currentData() or 'all'
                 search_text = search_edit.text().strip()
                 
-                results = get_filtered_sorted_results(target_key, sort_idx, filter_idx, search_text)
+                results = get_filtered_sorted_results(
+                    target_key, sort_idx, filter_key, search_text
+                )
                 
                 # Group by category for better organization
                 by_category = {}
@@ -9794,11 +10060,11 @@ def main() -> None:
 
                         # Keep candidates visually distinct from confirmed findings.
                         if state == 'confirmed':
-                            technique = f'\u2705 {technique}'
+                            technique = f'Confirmed · {technique}'
                         elif state == 'candidate':
-                            technique = f'⚠️ {technique}'
-                        
-                        child = QTreeWidgetItem([technique, f'{severity_icons.get(sev, "")} {sev}', category, reason])
+                            technique = f'Candidate · {technique}'
+
+                        child = QTreeWidgetItem([technique, sev, category, reason])
                         try:
                             child.setForeground(1, QBrush(QColor(severity_colors.get(sev, '#ffffff'))))
                         except Exception:
@@ -9807,80 +10073,21 @@ def main() -> None:
                         # Store full result data for details view
                         child.setData(0, 257, r)  # Qt.UserRole + 1
                         parent.addChild(child)
-                        # Inline accordion: one hidden detail sub-row, rendered lazily
-                        # the first time the finding is expanded (see on_finding_expanded).
-                        detail = QTreeWidgetItem(['', '', '', ''])
-                        detail.setData(0, 259, '__detail__')
-                        child.addChild(detail)
-                        try:
-                            detail.setFirstColumnSpanned(True)
-                        except Exception:
-                            pass
 
                     parent.setExpanded(True)
             
             def on_site_selected():
                 """Handle site selection change."""
                 update_results_tree()
-                details_text.clear()
-            
+
             def on_result_selected():
                 """Show details for selected result."""
                 sel = results_tree.currentItem()
                 r = sel.data(0, 257) if sel else None  # Qt.UserRole + 1
-                # Findings carry a result dict; category parents and the inline
-                # detail sub-rows do not, so they just clear the panel.
-                if not isinstance(r, dict):
-                    details_text.clear()
-                    return
-
-                # The bottom panel and inline accordion intentionally share one
-                # renderer, so verification/evidence cannot silently diverge.
-                details_text.setHtml(build_finding_detail_html(r))
+                set_selected_result(r)
             
-            def on_finding_expanded(item):
-                """Lazily render a finding's inline detail the first time it is
-                expanded, so hundreds of findings stay cheap (only expanded rows pay
-                the HTML/widget cost). No-op for category parents and detail rows."""
-                r = item.data(0, 257)
-                if not isinstance(r, dict) or item.childCount() < 1:
-                    return
-                if item.data(0, 258):  # already built
-                    return
-                detail = item.child(0)
-                try:
-                    browser = QtWidgets.QTextBrowser()
-                    browser.setOpenExternalLinks(True)
-                    browser.setStyleSheet('QTextBrowser { background-color: #16181a; color: #d7e1ea; border: none; }')
-                    browser.setHtml(build_finding_detail_html(r))
-                    try:
-                        vw = results_tree.viewport().width() - 48
-                    except Exception:
-                        vw = 800
-                    if vw < 200:
-                        vw = 800
-                    doc = browser.document()
-                    doc.setTextWidth(vw)
-                    h = max(60, min(int(doc.size().height()) + 16, 460))
-                    browser.setFixedHeight(h)
-                    detail.setSizeHint(0, QtCore.QSize(0, h))
-                    try:
-                        detail.setFirstColumnSpanned(True)
-                    except Exception:
-                        pass
-                    results_tree.setItemWidget(detail, 0, browser)
-                    item.setData(0, 258, True)
-                except Exception:
-                    pass
-
-            def on_finding_clicked(item, _col):
-                """Expand-on-click: clicking a finding row toggles its inline detail."""
-                r = item.data(0, 257)
-                if isinstance(r, dict) and item.childCount() >= 1:
-                    item.setExpanded(not item.isExpanded())
-
             def expand_all():
-                # Expand category groups only (cheap); finding accordions render on demand.
+                # Only category groups are expandable; evidence stays in one pane.
                 for i in range(results_tree.topLevelItemCount()):
                     results_tree.topLevelItem(i).setExpanded(True)
 
@@ -9893,10 +10100,13 @@ def main() -> None:
             filter_combo.currentIndexChanged.connect(lambda: update_results_tree())
             search_edit.textChanged.connect(lambda: update_results_tree())
             results_tree.currentItemChanged.connect(on_result_selected)
-            results_tree.itemExpanded.connect(on_finding_expanded)
-            results_tree.itemClicked.connect(on_finding_clicked)
             expand_btn.clicked.connect(expand_all)
             collapse_btn.clicked.connect(collapse_all)
+            copy_curl_btn.clicked.connect(lambda: copy_selected('curl'))
+            copy_python_btn.clicked.connect(lambda: copy_selected('python'))
+            repeater_btn.clicked.connect(send_selected_to_repeater)
+            retest_btn.clicked.connect(retest_selected)
+            save_state_btn.clicked.connect(save_workflow_state)
             
             # Select "All Sites" by default
             site_list.setCurrentRow(0)
@@ -9906,30 +10116,48 @@ def main() -> None:
             
             # HTTP Log button (only if data exists)
             if self._http_log:
-                http_log_btn = QPushButton(_t('view_http_log', self._lang) if 'view_http_log' in TRANSLATIONS.get(self._lang, {}) else '📝 View HTTP Log')
-                http_log_btn.setStyleSheet('QPushButton { background-color: #1f6feb; } QPushButton:hover { background-color: #388bfd; }')
+                http_log_btn = style_button(
+                    QPushButton(),
+                    'quiet',
+                    text=(
+                        _t('view_http_log', self._lang)
+                        if 'view_http_log' in TRANSLATIONS.get(self._lang, {})
+                        else 'View HTTP log'
+                    ),
+                )
                 http_log_btn.clicked.connect(self._show_http_log_dialog)
                 bottom_layout.addWidget(http_log_btn)
             
             # SSL Analysis button (only if data exists)
             if self._ssl_info and self._ssl_info.get('ssl_enabled'):
-                ssl_info_btn = QPushButton(_t('view_ssl_info', self._lang) if 'view_ssl_info' in TRANSLATIONS.get(self._lang, {}) else '🔐 View SSL/TLS Info')
-                ssl_info_btn.setStyleSheet('QPushButton { background-color: #238636; } QPushButton:hover { background-color: #2ea043; }')
+                ssl_info_btn = style_button(
+                    QPushButton(),
+                    'quiet',
+                    text=(
+                        _t('view_ssl_info', self._lang)
+                        if 'view_ssl_info' in TRANSLATIONS.get(self._lang, {})
+                        else 'View TLS details'
+                    ),
+                )
                 ssl_info_btn.clicked.connect(self._show_ssl_info_dialog)
                 bottom_layout.addWidget(ssl_info_btn)
             
             bottom_layout.addStretch()
             
-            export_btn = QPushButton(_t('export_view', self._lang))
+            export_btn = style_button(
+                QPushButton(), 'secondary', text='Export current view'
+            )
             export_btn.clicked.connect(lambda: self._export_results_view(get_filtered_sorted_results(
                 site_list.currentItem().data(256) if site_list.currentItem() else '__ALL__',
                 sort_combo.currentIndex(),
-                filter_combo.currentIndex(),
+                filter_combo.currentData() or 'all',
                 search_edit.text().strip()
             )))
             bottom_layout.addWidget(export_btn)
             
-            close_btn = QPushButton(_t('close', self._lang))
+            close_btn = style_button(
+                QPushButton(), 'quiet', text='Back to scan'
+            )
             close_btn.clicked.connect(lambda: self._navigate('scan'))
             bottom_layout.addWidget(close_btn)
 
