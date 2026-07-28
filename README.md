@@ -12,6 +12,8 @@
   </p>
 </div>
 
+> **Formerly WAFPierce:** Blackthorn is the project’s current name. The GitHub repository, Python module, and legacy command still use `WAFPierce`/`wafpierce` for compatibility.
+
 > Use Blackthorn only on systems you own or are explicitly authorized to test. Use `--authorize`, `--safe-mode`, and scope rules when testing production-like targets.
 
 ## Run it now
