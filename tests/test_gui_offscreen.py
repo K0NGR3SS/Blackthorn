@@ -10,8 +10,8 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 def test_results_workspace_builds_with_evidence_actions(monkeypatch):
     from PySide6.QtWidgets import (
         QApplication, QCheckBox, QComboBox, QLabel, QLineEdit, QListWidget,
-        QPlainTextEdit, QPushButton, QSplitter, QTextBrowser, QTreeWidget,
-        QTreeWidgetItem,
+        QPlainTextEdit, QPushButton, QSplitter, QTabWidget, QTextBrowser,
+        QTreeWidget, QTreeWidgetItem,
     )
     from PySide6.QtCore import Qt
 
@@ -32,6 +32,12 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
             return []
 
         def get_custom_payloads(self):
+            return []
+
+        def get_scan_history(self, limit=100):
+            return []
+
+        def get_scheduled_scans(self):
             return []
 
         def get_dashboard_stats(self):
@@ -92,6 +98,10 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
         assert workbench_labels['fuzzer'] == 'Content discovery'
         assert workbench_labels['sqli'] == 'SQLi automation'
         assert workbench_labels['tools'] == 'Tool manager'
+        assert {'live', 'timeline', 'schedule'}.isdisjoint(workbench_labels)
+        assert {'live', 'timeline', 'schedule'}.isdisjoint(
+            window._page_builders()
+        )
         group_rows = [
             index
             for index in range(window._workbench_combo.count())
@@ -152,6 +162,16 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
         QApplication.processEvents()
 
         assert page.objectName() == 'ResultsPage'
+        analyze_tabs = page.findChild(QTabWidget, 'ResultsPageTabs')
+        assert analyze_tabs is not None
+        assert [
+            analyze_tabs.tabText(index)
+            for index in range(analyze_tabs.count())
+        ] == ['Findings', 'Live findings']
+        assert next(
+            tree for tree in page.findChildren(QTreeWidget)
+            if tree.accessibleName() == 'Live findings stream'
+        )
         buttons = {button.text(): button for button in page.findChildren(QPushButton)}
         assert {'Copy cURL', 'Copy Python', 'Send to Repeater',
                 'Re-test request', 'Save state'} <= set(buttons)
@@ -169,10 +189,8 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
         )
         assert results_splitter is not None
         assert results_splitter.count() == 3
-        tree = next(
-            tree for tree in page.findChildren(QTreeWidget)
-            if tree.columnCount() == 4
-        )
+        tree = page.findChild(QTreeWidget, 'ResultsFindingsTree')
+        assert tree is not None
         tree.setCurrentItem(tree.topLevelItem(0).child(0))
         QApplication.processEvents()
         assert buttons['Re-test request'].isEnabled()
@@ -241,12 +259,29 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
         report_page.resize(780, 620)
         report_page.show()
         QApplication.processEvents()
+        report_tabs = report_page.findChild(QTabWidget, 'DashboardPageTabs')
+        assert report_tabs is not None
+        assert [
+            report_tabs.tabText(index)
+            for index in range(report_tabs.count())
+        ] == ['Summary', 'Timeline']
         assert report_page.findChild(
             QSplitter, 'ReportTablesSplitter'
         ) is not None
         assert report_page.findChild(
             QSplitter, 'ReportSummarySplitter'
         ) is not None
+
+        pipeline_page = window._build_pipeline_page()
+        pipeline_page.resize(900, 700)
+        pipeline_page.show()
+        QApplication.processEvents()
+        plan_tabs = pipeline_page.findChild(QTabWidget, 'PipelinePageTabs')
+        assert plan_tabs is not None
+        assert [
+            plan_tabs.tabText(index)
+            for index in range(plan_tabs.count())
+        ] == ['Run now', 'Schedule']
 
         payload_page = window._build_payloads_page()
         payload_page.resize(1180, 820)
@@ -365,6 +400,7 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
         inspected['ok'] = True
         repeater_page.close()
         payload_page.close()
+        pipeline_page.close()
         report_page.close()
         recon_page.close()
         page.close()

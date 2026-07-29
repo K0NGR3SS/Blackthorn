@@ -143,3 +143,4 @@ def test_workbench_navigation_is_grouped_and_uses_task_focused_names():
     assert labels['fuzzer'] == 'Content discovery'
     assert labels['sqli'] == 'SQLi automation'
     assert labels['tools'] == 'Tool manager'
+    assert {'live', 'timeline', 'schedule'}.isdisjoint(labels)

@@ -68,13 +68,10 @@ WORKBENCH_GROUPS = (
     ('INTEGRATIONS', (
         ('ZAP / Burp', 'zapburp'),
         ('AD / Internal', 'adint'),
-        ('Tool manager', 'tools'),
         ('AI assistance', 'ai'),
     )),
     ('OPERATIONS', (
-        ('Live findings', 'live'),
-        ('Timeline', 'timeline'),
-        ('Schedule', 'schedule'),
+        ('Tool manager', 'tools'),
         ('Plugins', 'plugins'),
     )),
 )
@@ -2704,7 +2701,13 @@ def main() -> None:
                 QShortcut(QKeySequence('F5'), self, self.start_scan)
                 
                 # Ctrl+L - Timeline
-                QShortcut(QKeySequence('Ctrl+L'), self, lambda: self._navigate('timeline'))
+                QShortcut(
+                    QKeySequence('Ctrl+L'),
+                    self,
+                    lambda: self._navigate_workflow_tab(
+                        'dashboard', 'DashboardPageTabs', 1
+                    ),
+                )
 
                 # Ctrl+M - Plugin Manager
                 QShortcut(QKeySequence('Ctrl+M'), self, lambda: self._navigate('plugins'))
@@ -3307,8 +3310,8 @@ def main() -> None:
             so any section without one falls back to its legacy dialog. This lets
             sections migrate to in-place pages one at a time without breakage."""
             keys = ['pipeline', 'recon', 'browser', 'fuzzer', 'secrets', 'sqli',
-                    'repeater', 'payloads', 'plugins', 'schedule', 'timeline',
-                    'dashboard', 'results', 'live', 'settings', 'ai',
+                    'repeater', 'payloads', 'plugins',
+                    'dashboard', 'results', 'settings', 'ai',
                     'tools', 'zapburp', 'adint', 'proxy', 'engagements']
             out = {}
             for k in keys:
@@ -3316,6 +3319,29 @@ def main() -> None:
                 if callable(fn):
                     out[k] = fn
             return out
+
+        def _tabbed_workflow_page(
+            self, object_name, accessible_name, entries
+        ):
+            """Compose existing workflow surfaces into one discoverable page."""
+            page = QWidget()
+            page.setObjectName(object_name)
+            layout = QVBoxLayout(page)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(0)
+            tabs = QtWidgets.QTabWidget()
+            tabs.setObjectName(f'{object_name}Tabs')
+            tabs.setAccessibleName(accessible_name)
+            tabs.setDocumentMode(True)
+            for label, child in entries:
+                if child is None:
+                    child = QWidget()
+                    empty_layout = QVBoxLayout(child)
+                    empty_layout.addWidget(QLabel(f'{label} is unavailable.'))
+                    empty_layout.addStretch()
+                tabs.addTab(child, label)
+            layout.addWidget(tabs)
+            return page
 
         def _legacy_actions(self):
             """Fallback dialog openers for any section without a page builder.
@@ -3348,8 +3374,10 @@ def main() -> None:
             # Data-driven sections rebuild fresh each visit so they never show
             # stale content; stateful sections (a running recon process, the live
             # feed, an in-progress repeater request, the settings form) persist.
-            dynamic = {'dashboard', 'results', 'timeline', 'plugins',
-                       'schedule', 'payloads', 'engagements', 'ai'}
+            dynamic = {
+                'dashboard', 'results', 'plugins',
+                'payloads', 'engagements', 'ai',
+            }
             page = self._pages.get(key)
             if page is not None and key in dynamic:
                 try:
@@ -3382,6 +3410,16 @@ def main() -> None:
                 fn = self._legacy_actions().get(key)
                 if fn is not None:
                     fn()
+
+        def _navigate_workflow_tab(self, page_key, tabs_name, index):
+            """Open a primary workflow page and focus one of its embedded tabs."""
+            self._navigate(page_key)
+            holder = self._pages.get(page_key)
+            if holder is None:
+                return
+            tabs = holder.findChild(QtWidgets.QTabWidget, tabs_name)
+            if tabs is not None and 0 <= index < tabs.count():
+                tabs.setCurrentIndex(index)
 
         def _wrap_scroll(self, widget):
             """Wrap a page in a frameless, resizable scroll area so content that is
@@ -8433,7 +8471,7 @@ def main() -> None:
                 pass
             return proc
 
-        def _build_pipeline_page(self):
+        def _build_pipeline_runner(self):
             """One-click chained pentest: Recon → content discovery → vuln scan →
             offensive (exploit-tag nuclei + commix), each phase auto-feeding the
             next. Offensive phases are gated and target only what you enter."""
@@ -8447,7 +8485,7 @@ def main() -> None:
             import os as _os
             import tempfile
 
-            page = QtWidgets.QWidget(); page.setObjectName('PipelinePage')
+            page = QtWidgets.QWidget(); page.setObjectName('PipelineRunnerPage')
             v = QVBoxLayout(page); v.setContentsMargins(22, 20, 22, 20)
             hdr = QLabel('Test pipeline')
             hdr.setObjectName('PageTitle')
@@ -8793,6 +8831,28 @@ def main() -> None:
             run_btn.clicked.connect(_run)
             stop_btn.clicked.connect(_stop)
             merge_btn.clicked.connect(_merge)
+            return page
+
+        def _build_pipeline_page(self):
+            """Test plan with immediate pipeline and scheduled-run tabs."""
+            page = self._tabbed_workflow_page(
+                'PipelinePage',
+                'Test plan workflows',
+                (
+                    ('Run now', self._build_pipeline_runner()),
+                    ('Schedule', self._build_schedule_page(embedded=True)),
+                ),
+            )
+            tabs = page.findChild(QtWidgets.QTabWidget, 'PipelinePageTabs')
+
+            def refresh_schedule(index):
+                if index == 1:
+                    refresh = getattr(self, '_schedule_refresh', None)
+                    if callable(refresh):
+                        refresh()
+
+            if tabs is not None:
+                tabs.currentChanged.connect(refresh_schedule)
             return page
 
         def _build_fuzzer_page(self):
@@ -10341,11 +10401,11 @@ def main() -> None:
             export_results(self._results, report_target, 'html', path, redact=True)
 
 
-        def _build_results_page(self):
+        def _build_results_explorer(self):
             """Results explorer as an in-place page (rebuilt fresh per visit)."""
             if not self._results:
                 empty = QWidget()
-                empty.setObjectName('ResultsPage')
+                empty.setObjectName('ResultsExplorerPage')
                 ev = QVBoxLayout(empty)
                 ev.setContentsMargins(22, 20, 22, 20)
                 hdr = QLabel('Analyze')
@@ -10384,7 +10444,7 @@ def main() -> None:
                 by_target[target].append(r)
             
             dlg = QtWidgets.QWidget()
-            dlg.setObjectName('ResultsPage')
+            dlg.setObjectName('ResultsExplorerPage')
             outer_layout = QVBoxLayout(dlg)
             title = QLabel('Analyze')
             title.setObjectName('PageTitle')
@@ -10546,6 +10606,7 @@ def main() -> None:
             
             # Results tree
             results_tree = QTreeWidget()
+            results_tree.setObjectName('ResultsFindingsTree')
             results_tree.setAccessibleName('Findings')
             results_tree.setColumnCount(4)
             results_tree.setHeaderLabels([_t('technique', self._lang), _t('severity', self._lang), _t('category', self._lang), _t('reason', self._lang)])
@@ -11113,6 +11174,17 @@ def main() -> None:
 
             return dlg
 
+        def _build_results_page(self):
+            """Analyze findings and the live stream in one workspace."""
+            return self._tabbed_workflow_page(
+                'ResultsPage',
+                'Analyze findings',
+                (
+                    ('Findings', self._build_results_explorer()),
+                    ('Live findings', self._build_live_page(embedded=True)),
+                ),
+            )
+
         def _export_results_view(self, results):
             """Export the current filtered/sorted view to JSON."""
             if not results:
@@ -11181,10 +11253,8 @@ def main() -> None:
                     f"{len(rows)} results  •  {confirmed} confirmed  •  "
                     f"{candidates} candidates  •  showing {len(shown)}")
 
-        def _build_live_page(self):
-            """Live, color-coded, filterable findings as an in-place page. The page
-            is cached and assigned to self._live_window, so the same background
-            code that pushes new findings keeps refreshing it while it's offscreen."""
+        def _build_live_page(self, embedded=False):
+            """Build the color-coded live stream used by Analyze."""
             from PySide6.QtWidgets import (QVBoxLayout, QHBoxLayout, QComboBox,
                                            QLabel, QTreeWidget, QHeaderView)
             from PySide6.QtCore import Qt
@@ -11201,9 +11271,10 @@ def main() -> None:
             """)
             v = QVBoxLayout(win)
             v.setContentsMargins(22, 20, 22, 20)
-            hdr = QLabel('◰  Live Findings')
-            hdr.setStyleSheet('font-size:18px; font-weight:bold; color:#58a6ff;')
-            v.addWidget(hdr)
+            if not embedded:
+                hdr = QLabel('Live findings')
+                hdr.setObjectName('PageTitle')
+                v.addWidget(hdr)
             top = QHBoxLayout()
             self._live_count_lbl = QLabel('0 findings')
             top.addWidget(self._live_count_lbl)
@@ -11216,6 +11287,7 @@ def main() -> None:
             top.addWidget(self._live_filter)
             v.addLayout(top)
             self._live_tree = QTreeWidget()
+            self._live_tree.setAccessibleName('Live findings stream')
             self._live_tree.setColumnCount(4)
             self._live_tree.setHeaderLabels(['Severity', 'Technique', 'Category', 'Reason'])
             self._live_tree.setAlternatingRowColors(True)
@@ -12481,7 +12553,7 @@ def main() -> None:
                 QMessageBox.critical(self, 'Import Error', str(e))
 
         # ==================== DASHBOARD ====================
-        def _build_dashboard_page(self):
+        def _build_report_summary(self):
             """Statistics dashboard as an in-place page (rebuilt fresh per visit)."""
             from PySide6.QtCore import Qt
 
@@ -12492,7 +12564,7 @@ def main() -> None:
                     stats = {'total_scans': 0, 'total_findings': 0, 'total_bypasses': 0, 'severity_distribution': {}, 'top_techniques': []}
 
                 page = QtWidgets.QWidget()
-                page.setObjectName('DashboardPage')
+                page.setObjectName('ReportSummaryPage')
                 layout = QVBoxLayout(page)
                 layout.setContentsMargins(22, 20, 22, 20)
                 layout.setSpacing(14)
@@ -12640,6 +12712,17 @@ def main() -> None:
                 QMessageBox.critical(self, 'Dashboard Error', str(e))
                 return None
 
+        def _build_dashboard_page(self):
+            """Report summary and scan history in one reporting workspace."""
+            return self._tabbed_workflow_page(
+                'DashboardPage',
+                'Reporting workspace',
+                (
+                    ('Summary', self._build_report_summary()),
+                    ('Timeline', self._build_timeline_page(embedded=True)),
+                ),
+            )
+
         def _show_compare_scans_dialog(self):
             """Show dialog to compare two scans."""
             try:
@@ -12762,7 +12845,7 @@ def main() -> None:
                 QMessageBox.critical(self, 'Compare Error', str(e))
 
         # ==================== TIMELINE VIEWER ====================
-        def _build_timeline_page(self):
+        def _build_timeline_page(self, embedded=False):
             """Scan history timeline as an in-place page (rebuilt fresh per visit)."""
             from PySide6.QtCore import Qt
             from PySide6.QtGui import QFontDatabase
@@ -12798,11 +12881,14 @@ def main() -> None:
                 
                 layout = QVBoxLayout(dlg)
                 
-                # Header
-                header = QLabel('📅 ' + (_t('timeline_viewer', self._lang) if 'timeline_viewer' in TRANSLATIONS.get(self._lang, {}) else 'Scan History Timeline'))
-                header.setFont(QFont('', 16, QFont.Bold))
-                header.setStyleSheet('color: #58a6ff;')
-                layout.addWidget(header)
+                if not embedded:
+                    header = QLabel(
+                        _t('timeline_viewer', self._lang)
+                        if 'timeline_viewer' in TRANSLATIONS.get(self._lang, {})
+                        else 'Scan history timeline'
+                    )
+                    header.setObjectName('PageTitle')
+                    layout.addWidget(header)
                 
                 # Filter controls
                 filter_layout = QHBoxLayout()
@@ -12982,10 +13068,10 @@ def main() -> None:
                 
                 layout.addWidget(compare_group)
                 
-                # Close button -> back to Scan
-                close_btn = QPushButton(_t('close', self._lang))
-                close_btn.clicked.connect(lambda: self._navigate('scan'))
-                layout.addWidget(close_btn)
+                if not embedded:
+                    close_btn = QPushButton(_t('close', self._lang))
+                    close_btn.clicked.connect(lambda: self._navigate('scan'))
+                    layout.addWidget(close_btn)
 
                 return dlg
             except Exception as e:
@@ -14564,12 +14650,17 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                 QMessageBox.critical(self, 'Engagements Error', str(e))
                 return None
 
-        def _build_schedule_page(self):
+        def _build_schedule_page(self, embedded=False):
             """Scheduled jobs (scan or recon) as an in-place page (rebuilt per visit)."""
             try:
                 if not self._db:
-                    QMessageBox.warning(self, 'Scheduled Scans', 'Database is not available.')
-                    return
+                    empty = QWidget()
+                    empty.setObjectName('SchedulePage')
+                    empty_layout = QVBoxLayout(empty)
+                    empty_layout.setContentsMargins(22, 20, 22, 20)
+                    empty_layout.addWidget(QLabel('Scheduling is unavailable.'))
+                    empty_layout.addStretch()
+                    return empty
 
                 from PySide6.QtWidgets import QTimeEdit, QDateTimeEdit, QGridLayout
                 from PySide6.QtCore import QDateTime, QTime
@@ -14605,10 +14696,14 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                 
                 layout = QVBoxLayout(dlg)
                 
-                header = QLabel('⏰ ' + (_t('scheduled_scans', self._lang) if 'scheduled_scans' in TRANSLATIONS.get(self._lang, {}) else 'Scheduled Scans'))
-                header.setFont(QFont('', 14, QFont.Bold))
-                header.setStyleSheet('color: #58a6ff;')
-                layout.addWidget(header)
+                if not embedded:
+                    header = QLabel(
+                        _t('scheduled_scans', self._lang)
+                        if 'scheduled_scans' in TRANSLATIONS.get(self._lang, {})
+                        else 'Scheduled scans'
+                    )
+                    header.setObjectName('PageTitle')
+                    layout.addWidget(header)
                 
                 # Scheduled scans table
                 table = QtWidgets.QTableWidget()
@@ -14642,6 +14737,7 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                         self._db.delete_scheduled_scan(sched_id)
                         refresh_table()
                 
+                self._schedule_refresh = refresh_table
                 refresh_table()
                 layout.addWidget(table, 1)
                 
@@ -14719,9 +14815,10 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                 btn_layout.addWidget(add_btn)
                 btn_layout.addStretch()
                 
-                close_btn = QPushButton(_t('close', self._lang))
-                close_btn.clicked.connect(lambda: self._navigate('scan'))
-                btn_layout.addWidget(close_btn)
+                if not embedded:
+                    close_btn = QPushButton(_t('close', self._lang))
+                    close_btn.clicked.connect(lambda: self._navigate('scan'))
+                    btn_layout.addWidget(close_btn)
 
                 layout.addLayout(btn_layout)
 
