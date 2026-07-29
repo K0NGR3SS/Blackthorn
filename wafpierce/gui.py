@@ -13198,156 +13198,798 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                 QMessageBox.critical(self, 'Plugin Manager Error', f'{str(e)}\\n\\n{traceback.format_exc()}')
                 return None
 
-        # ==================== CUSTOM PAYLOADS ====================
+        # ==================== PAYLOAD WORKBENCH ====================
         def _build_payloads_page(self):
-            """Custom payloads management as an in-place page (rebuilt per visit)."""
+            """Browse, compose, preview, and hand payloads to Repeater."""
             try:
-                if not self._db:
-                    QMessageBox.warning(self, 'Payloads', 'Database is not available.')
-                    return
+                from PySide6.QtCore import Qt
+                from PySide6.QtWidgets import (
+                    QAbstractItemView,
+                    QComboBox,
+                    QFormLayout,
+                    QGridLayout,
+                    QGroupBox,
+                    QPlainTextEdit,
+                    QSplitter,
+                    QTabWidget,
+                )
+                from .payloads import (
+                    AUTHORIZED_USE_NOTICE,
+                    CATEGORY_BY_KEY,
+                    ENCODING_OPTIONS,
+                    LOCATION_OPTIONS,
+                    PAYLOAD_CATEGORIES,
+                    PayloadTemplate,
+                    build_payload_request,
+                    category_name,
+                    families_for,
+                    filter_payloads,
+                    payload_catalog,
+                    payload_request_to_curl,
+                )
 
+                user_role = Qt.ItemDataRole.UserRole
                 dlg = QtWidgets.QWidget()
                 dlg.setObjectName('PayloadsPage')
-                dlg.setStyleSheet("""
-                    QWidget#PayloadsPage { background-color: #0f1112; }
-                    QLabel { color: #d7e1ea; }
-                    QListWidget { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; }
-                    QListWidget::item { padding: 8px; }
-                    QListWidget::item:selected { background-color: #3b82f6; }
-                    QLineEdit, QTextEdit, QComboBox { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; padding: 5px; }
-                """)
-                
                 layout = QVBoxLayout(dlg)
-                
-                header = QLabel('🎯 ' + (_t('custom_payloads', self._lang) if 'custom_payloads' in TRANSLATIONS.get(self._lang, {}) else 'Custom Payloads'))
-                header.setFont(QFont('', 14, QFont.Bold))
-                header.setStyleSheet('color: #58a6ff;')
+                layout.setContentsMargins(22, 20, 22, 20)
+                layout.setSpacing(10)
+
+                header = QLabel('Payload Workbench')
+                header.setFont(QFont('', 16, QFont.Bold))
                 layout.addWidget(header)
-                
-                # Payloads list
-                payload_list = QtWidgets.QListWidget()
-                
-                def refresh_payloads():
-                    payload_list.clear()
-                    payloads = self._db.get_custom_payloads()
-                    for p in payloads:
-                        item = QtWidgets.QListWidgetItem(f"[{p['category']}] {p['name']}")
-                        item.setData(256, p)
-                        payload_list.addItem(item)
-                
-                refresh_payloads()
-                layout.addWidget(payload_list, 1)
-                
-                # Add payload form
-                form_group = QtWidgets.QGroupBox(_t('add_payload', self._lang) if 'add_payload' in TRANSLATIONS.get(self._lang, {}) else 'Add New Payload')
-                form_layout = QVBoxLayout(form_group)
-                
-                name_edit = QLineEdit()
-                name_edit.setPlaceholderText(_t('payload_name', self._lang) if 'payload_name' in TRANSLATIONS.get(self._lang, {}) else 'Payload Name')
-                
-                cat_combo = QtWidgets.QComboBox()
-                cat_combo.addItems(['SQL Injection', 'XSS', 'Command Injection', 'Path Traversal', 'SSRF', 'XXE', 'SSTI', 'Custom'])
-                
-                payload_edit = QTextEdit()
-                payload_edit.setPlaceholderText(_t('payload_content', self._lang) if 'payload_content' in TRANSLATIONS.get(self._lang, {}) else 'Payload content...')
-                payload_edit.setMaximumHeight(80)
-                
-                sev_combo = QtWidgets.QComboBox()
-                sev_combo.addItems(['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO'])
-                sev_combo.setCurrentIndex(2)  # Default to MEDIUM
-                
-                form_layout.addWidget(name_edit)
-                form_layout.addWidget(cat_combo)
-                form_layout.addWidget(payload_edit)
-                form_layout.addWidget(sev_combo)
-                
-                layout.addWidget(form_group)
-                
-                # Buttons
-                btn_layout = QHBoxLayout()
-                
-                add_btn = QPushButton('➕ ' + (_t('add_payload', self._lang) if 'add_payload' in TRANSLATIONS.get(self._lang, {}) else 'Add'))
-                import_btn = QPushButton('📥 ' + (_t('import_payloads', self._lang) if 'import_payloads' in TRANSLATIONS.get(self._lang, {}) else 'Import'))
-                delete_btn = QPushButton('🗑 Delete Selected')
-                
+
+                subtitle = QLabel(
+                    'Choose a technique and variant, place it into an exact '
+                    'request, then review it before opening Repeater.'
+                )
+                subtitle.setWordWrap(True)
+                subtitle.setProperty('muted', True)
+                layout.addWidget(subtitle)
+
+                authorization_notice = QLabel(
+                    f'{AUTHORIZED_USE_NOTICE} The library composes locally; '
+                    'Repeater and Intruder are the network send boundary.'
+                )
+                authorization_notice.setWordWrap(True)
+                authorization_notice.setStyleSheet(
+                    'padding: 8px 10px; border: 1px solid #5f4a22; '
+                    'border-radius: 5px; color: #d8b56d;'
+                )
+                layout.addWidget(authorization_notice)
+
+                tabs = QTabWidget()
+                tabs.setObjectName('PayloadWorkbenchTabs')
+                layout.addWidget(tabs, 1)
+
+                # ------------------------ Browse & compose -------------------- #
+                compose_tab = QtWidgets.QWidget()
+                compose_layout = QVBoxLayout(compose_tab)
+                compose_layout.setContentsMargins(0, 10, 0, 0)
+                compose_layout.setSpacing(10)
+
+                filter_row = QHBoxLayout()
+                search_edit = QLineEdit()
+                search_edit.setObjectName('PayloadSearchInput')
+                search_edit.setPlaceholderText(
+                    'Search payload, family, DBMS, platform, or tag…'
+                )
+                search_edit.setClearButtonEnabled(True)
+                category_filter = QComboBox()
+                category_filter.setObjectName('PayloadCategoryFilter')
+                category_filter.addItem('All categories', '')
+                for category in PAYLOAD_CATEGORIES:
+                    if category.key != 'custom':
+                        category_filter.addItem(category.name, category.key)
+                category_filter.addItem('Custom', 'custom')
+                family_filter = QComboBox()
+                family_filter.setObjectName('PayloadFamilyFilter')
+                family_filter.addItem('All families', '')
+                source_filter = QComboBox()
+                source_filter.addItem('All sources', '')
+                source_filter.addItem('Built in', 'Built in')
+                source_filter.addItem('My payloads', 'Custom')
+                impact_filter = QComboBox()
+                impact_filter.addItem('All impact levels', '')
+                for impact in ('Low', 'Moderate', 'Medium', 'High', 'Critical'):
+                    impact_filter.addItem(impact, impact)
+                filter_row.addWidget(search_edit, 2)
+                filter_row.addWidget(category_filter, 1)
+                filter_row.addWidget(family_filter, 1)
+                filter_row.addWidget(source_filter, 1)
+                filter_row.addWidget(impact_filter, 1)
+                compose_layout.addLayout(filter_row)
+
+                splitter = QSplitter(Qt.Orientation.Horizontal)
+                splitter.setObjectName('PayloadWorkbenchSplitter')
+                compose_layout.addWidget(splitter, 1)
+
+                catalog_tree = QTreeWidget()
+                catalog_tree.setObjectName('PayloadCatalogTree')
+                catalog_tree.setColumnCount(4)
+                catalog_tree.setHeaderLabels(
+                    ['Technique / payload', 'Family', 'Platform', 'Impact']
+                )
+                catalog_tree.setAlternatingRowColors(True)
+                catalog_tree.setSelectionMode(
+                    QAbstractItemView.SelectionMode.SingleSelection
+                )
+                try:
+                    catalog_tree.header().setSectionResizeMode(
+                        0, QHeaderView.ResizeMode.Stretch
+                    )
+                    for column in (1, 2, 3):
+                        catalog_tree.header().setSectionResizeMode(
+                            column, QHeaderView.ResizeMode.ResizeToContents
+                        )
+                except Exception:
+                    pass
+                splitter.addWidget(catalog_tree)
+
+                inspector = QtWidgets.QWidget()
+                inspector_layout = QVBoxLayout(inspector)
+                inspector_layout.setContentsMargins(10, 0, 0, 0)
+                inspector_layout.setSpacing(8)
+
+                detail_title = QLabel('Select a payload')
+                detail_title.setFont(QFont('', 13, QFont.Bold))
+                inspector_layout.addWidget(detail_title)
+                detail_meta = QLabel('')
+                detail_meta.setWordWrap(True)
+                inspector_layout.addWidget(detail_meta)
+
+                payload_edit = QPlainTextEdit()
+                payload_edit.setObjectName('PayloadEditor')
+                payload_edit.setPlaceholderText('Selected payload')
+                payload_edit.setMaximumHeight(105)
+                inspector_layout.addWidget(payload_edit)
+
+                detail_description = QLabel(
+                    'Select a library entry to see when and how to use it.'
+                )
+                detail_description.setWordWrap(True)
+                inspector_layout.addWidget(detail_description)
+                expected_signal = QLabel('')
+                expected_signal.setWordWrap(True)
+                expected_signal.setStyleSheet('color: #aaa398;')
+                inspector_layout.addWidget(expected_signal)
+
+                request_group = QGroupBox('Where this payload will go')
+                request_grid = QGridLayout(request_group)
+                request_grid.setColumnStretch(1, 1)
+                request_grid.setColumnStretch(3, 1)
+
+                method_combo = QComboBox()
+                method_combo.setObjectName('PayloadMethodCombo')
+                method_combo.addItems(
+                    ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']
+                )
+                target_edit = QLineEdit()
+                target_edit.setObjectName('PayloadTargetInput')
+                target_edit.setPlaceholderText(
+                    'https://target.example/search?existing=value'
+                )
+                try:
+                    current_target = self.target_edit.text().strip()
+                except Exception:
+                    current_target = ''
+                if current_target:
+                    target_edit.setText(current_target)
+
+                location_combo = QComboBox()
+                location_combo.setObjectName('PayloadLocationCombo')
+                location_name_edit = QLineEdit()
+                location_name_edit.setObjectName('PayloadLocationNameInput')
+                location_name_edit.setText('q')
+                location_name_edit.setPlaceholderText(
+                    'parameter, property, header, or cookie name'
+                )
+                encoding_combo = QComboBox()
+                encoding_combo.setObjectName('PayloadEncodingCombo')
+                for key, label in ENCODING_OPTIONS:
+                    encoding_combo.addItem(label, key)
+
+                request_grid.addWidget(QLabel('Method'), 0, 0)
+                request_grid.addWidget(method_combo, 0, 1)
+                request_grid.addWidget(QLabel('Target URL'), 0, 2)
+                request_grid.addWidget(target_edit, 0, 3)
+                request_grid.addWidget(QLabel('Insertion point'), 1, 0)
+                request_grid.addWidget(location_combo, 1, 1)
+                request_grid.addWidget(QLabel('Name'), 1, 2)
+                request_grid.addWidget(location_name_edit, 1, 3)
+                request_grid.addWidget(QLabel('Encoding'), 2, 0)
+                request_grid.addWidget(encoding_combo, 2, 1)
+
+                headers_edit = QPlainTextEdit()
+                headers_edit.setObjectName('PayloadHeadersInput')
+                headers_edit.setPlaceholderText(
+                    'Optional headers — one per line\n'
+                    'Authorization: Bearer …\nCookie: session=…'
+                )
+                headers_edit.setMaximumHeight(82)
+                base_body_edit = QPlainTextEdit()
+                base_body_edit.setObjectName('PayloadBaseBodyInput')
+                base_body_edit.setPlaceholderText(
+                    'Optional existing form fields, JSON object, or body'
+                )
+                base_body_edit.setMaximumHeight(82)
+                request_grid.addWidget(QLabel('Existing headers'), 3, 0, 1, 2)
+                request_grid.addWidget(QLabel('Existing body'), 3, 2, 1, 2)
+                request_grid.addWidget(headers_edit, 4, 0, 1, 2)
+                request_grid.addWidget(base_body_edit, 4, 2, 1, 2)
+                inspector_layout.addWidget(request_group)
+
+                destination_label = QLabel('Select a payload to compose a request.')
+                destination_label.setObjectName('PayloadDestinationSummary')
+                destination_label.setWordWrap(True)
+                destination_label.setStyleSheet(
+                    'padding: 7px 9px; border-left: 3px solid #c99a45;'
+                )
+                inspector_layout.addWidget(destination_label)
+
+                preview_edit = QPlainTextEdit()
+                preview_edit.setObjectName('PayloadRequestPreview')
+                preview_edit.setReadOnly(True)
+                preview_edit.setPlaceholderText(
+                    'The exact request will appear here before any handoff.'
+                )
+                preview_edit.setMinimumHeight(150)
+                inspector_layout.addWidget(preview_edit, 1)
+
+                action_status = QLabel('')
+                action_status.setObjectName('PayloadActionStatus')
+                action_status.setWordWrap(True)
+                inspector_layout.addWidget(action_status)
+
+                action_row = QHBoxLayout()
+                copy_payload_btn = style_button(
+                    QPushButton(), 'secondary', text='Copy payload'
+                )
+                copy_curl_btn = style_button(
+                    QPushButton(), 'secondary', text='Copy cURL'
+                )
+                repeater_btn = style_button(
+                    QPushButton(), 'primary', text='Open exact request in Repeater',
+                    tooltip='Review and send the request from Repeater',
+                )
+                repeater_btn.setProperty('payloadAction', 'repeater')
+                action_row.addWidget(copy_payload_btn)
+                action_row.addWidget(copy_curl_btn)
+                action_row.addStretch()
+                action_row.addWidget(repeater_btn)
+                inspector_layout.addLayout(action_row)
+                splitter.addWidget(inspector)
+                splitter.setSizes([520, 720])
+                tabs.addTab(compose_tab, 'Library & compose')
+
+                # -------------------------- My payloads ----------------------- #
+                custom_tab = QtWidgets.QWidget()
+                custom_layout = QVBoxLayout(custom_tab)
+                custom_layout.setContentsMargins(0, 10, 0, 0)
+                custom_layout.setSpacing(10)
+
+                custom_intro = QLabel(
+                    'Saved and imported entries appear in the main catalog under '
+                    '“My payloads.” Built-ins are read-only.'
+                )
+                custom_intro.setWordWrap(True)
+                custom_layout.addWidget(custom_intro)
+
+                custom_splitter = QSplitter(Qt.Orientation.Horizontal)
+                custom_layout.addWidget(custom_splitter, 1)
+
+                custom_list = QTreeWidget()
+                custom_list.setObjectName('PayloadCustomList')
+                custom_list.setColumnCount(4)
+                custom_list.setHeaderLabels(
+                    ['Name', 'Category', 'Impact', 'Created']
+                )
+                custom_list.setSelectionMode(
+                    QAbstractItemView.SelectionMode.SingleSelection
+                )
+                custom_list.setAlternatingRowColors(True)
+                try:
+                    custom_list.header().setSectionResizeMode(
+                        0, QHeaderView.ResizeMode.Stretch
+                    )
+                except Exception:
+                    pass
+                custom_splitter.addWidget(custom_list)
+
+                custom_form_widget = QtWidgets.QWidget()
+                custom_form_layout = QVBoxLayout(custom_form_widget)
+                custom_form_layout.setContentsMargins(10, 0, 0, 0)
+                custom_form_group = QGroupBox('Add a custom payload')
+                custom_form = QFormLayout(custom_form_group)
+                custom_name_edit = QLineEdit()
+                custom_name_edit.setPlaceholderText('Descriptive name')
+                custom_category_combo = QComboBox()
+                for category in PAYLOAD_CATEGORIES:
+                    custom_category_combo.addItem(category.name, category.name)
+                custom_payload_edit = QPlainTextEdit()
+                custom_payload_edit.setPlaceholderText('Payload content')
+                custom_payload_edit.setMaximumHeight(110)
+                custom_description_edit = QLineEdit()
+                custom_description_edit.setPlaceholderText(
+                    'Context, expected signal, or CTF note'
+                )
+                custom_severity_combo = QComboBox()
+                custom_severity_combo.addItems(
+                    ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL', 'INFO']
+                )
+                custom_severity_combo.setCurrentText('MEDIUM')
+                custom_form.addRow('Name', custom_name_edit)
+                custom_form.addRow('Category', custom_category_combo)
+                custom_form.addRow('Payload', custom_payload_edit)
+                custom_form.addRow('Notes', custom_description_edit)
+                custom_form.addRow('Impact', custom_severity_combo)
+                custom_form_layout.addWidget(custom_form_group)
+
+                custom_action_row = QHBoxLayout()
+                add_btn = style_button(
+                    QPushButton(), 'primary', text='Add to library'
+                )
+                import_btn = style_button(
+                    QPushButton(), 'secondary', text='Import JSON / text'
+                )
+                delete_btn = style_button(
+                    QPushButton(), 'danger', text='Delete selected'
+                )
+                custom_action_row.addWidget(add_btn)
+                custom_action_row.addWidget(import_btn)
+                custom_action_row.addWidget(delete_btn)
+                custom_form_layout.addLayout(custom_action_row)
+                custom_db_status = QLabel('')
+                custom_db_status.setWordWrap(True)
+                custom_form_layout.addWidget(custom_db_status)
+                custom_form_layout.addStretch()
+                custom_splitter.addWidget(custom_form_widget)
+                custom_splitter.setSizes([650, 520])
+                tabs.addTab(custom_tab, 'My payloads')
+
+                state = {
+                    'custom_rows': [],
+                    'catalog': [],
+                    'selected': None,
+                    'request': None,
+                }
+
+                def load_custom_rows():
+                    if not self._db:
+                        state['custom_rows'] = []
+                        return
+                    try:
+                        state['custom_rows'] = self._db.get_custom_payloads()
+                    except Exception:
+                        state['custom_rows'] = []
+
+                def parse_headers():
+                    parsed = {}
+                    for line_number, raw_line in enumerate(
+                            headers_edit.toPlainText().splitlines(), 1):
+                        line = raw_line.strip()
+                        if not line:
+                            continue
+                        if ':' not in line:
+                            raise ValueError(
+                                f'Header line {line_number} must use Name: value.'
+                            )
+                        name, value = line.split(':', 1)
+                        if not name.strip():
+                            raise ValueError(
+                                f'Header line {line_number} has no name.'
+                            )
+                        parsed[name.strip()] = value.strip()
+                    return parsed
+
+                def selected_location():
+                    return str(location_combo.currentData() or 'query')
+
+                def refresh_preview():
+                    template = state.get('selected')
+                    if not isinstance(template, PayloadTemplate):
+                        state['request'] = None
+                        preview_edit.clear()
+                        destination_label.setText(
+                            'Select a payload to compose a request.'
+                        )
+                        copy_payload_btn.setEnabled(False)
+                        copy_curl_btn.setEnabled(False)
+                        repeater_btn.setEnabled(False)
+                        return
+                    copy_payload_btn.setEnabled(bool(payload_edit.toPlainText()))
+                    try:
+                        request = build_payload_request(
+                            method=method_combo.currentText(),
+                            url=target_edit.text(),
+                            payload=payload_edit.toPlainText(),
+                            location=selected_location(),
+                            name=location_name_edit.text(),
+                            encoding=str(encoding_combo.currentData() or 'none'),
+                            headers=parse_headers(),
+                            base_body=base_body_edit.toPlainText(),
+                        )
+                    except Exception as exc:
+                        state['request'] = None
+                        destination_label.setText(f'Not ready — {exc}')
+                        preview_edit.setPlainText(str(exc))
+                        copy_curl_btn.setEnabled(False)
+                        repeater_btn.setEnabled(False)
+                        return
+                    state['request'] = request
+                    encoding_label = encoding_combo.currentText()
+                    destination_label.setText(
+                        f'{request.method} {request.url}  ·  '
+                        f'{request.insertion_point}  ·  {encoding_label}  ·  '
+                        f'{template.impact} impact'
+                    )
+                    preview_edit.setPlainText(request.preview())
+                    copy_curl_btn.setEnabled(True)
+                    repeater_btn.setEnabled(True)
+                    action_status.setText('')
+
+                location_defaults = {
+                    'query': 'q',
+                    'form': 'q',
+                    'json': 'input',
+                    'header': 'X-Test',
+                    'cookie': 'test',
+                }
+
+                def location_changed():
+                    location = selected_location()
+                    needs_name = location in location_defaults
+                    location_name_edit.setEnabled(needs_name)
+                    location_name_edit.setPlaceholderText(
+                        'Not used for this insertion point'
+                        if not needs_name else
+                        'parameter, property, header, or cookie name'
+                    )
+                    if needs_name and (
+                            not location_name_edit.text().strip()
+                            or location_name_edit.text() in location_defaults.values()):
+                        location_name_edit.setText(location_defaults[location])
+                    if location in {'form', 'json', 'raw_body'}:
+                        if method_combo.currentText() in {'GET', 'HEAD'}:
+                            method_combo.setCurrentText('POST')
+                    refresh_preview()
+
+                def select_template(template):
+                    if not isinstance(template, PayloadTemplate):
+                        return
+                    state['selected'] = template
+                    detail_title.setText(template.name)
+                    meta = (
+                        f'{category_name(template.category)}  ·  {template.family}  ·  '
+                        f'{template.platform}  ·  {template.impact} impact  ·  '
+                        f'{template.source}'
+                    )
+                    if template.tags:
+                        meta += '  ·  ' + ', '.join(template.tags)
+                    detail_meta.setText(meta)
+                    detail_description.setText(template.description)
+                    expected_signal.setText(
+                        f'Expected signal: {template.expected_signal}'
+                    )
+                    payload_edit.blockSignals(True)
+                    payload_edit.setPlainText(template.payload)
+                    payload_edit.blockSignals(False)
+
+                    old_location = selected_location()
+                    location_combo.blockSignals(True)
+                    location_combo.clear()
+                    location_labels = dict(LOCATION_OPTIONS)
+                    for location in template.locations:
+                        location_combo.addItem(
+                            location_labels.get(location, location), location
+                        )
+                    category = CATEGORY_BY_KEY.get(template.category)
+                    wanted_location = (
+                        old_location
+                        if old_location in template.locations
+                        else (
+                            category.default_location
+                            if category and category.default_location in template.locations
+                            else template.locations[0]
+                        )
+                    )
+                    index = location_combo.findData(wanted_location)
+                    location_combo.setCurrentIndex(index if index >= 0 else 0)
+                    location_combo.blockSignals(False)
+
+                    if template.category == 'xxe' and not headers_edit.toPlainText().strip():
+                        headers_edit.setPlainText('Content-Type: application/xml')
+                    elif (
+                            template.category == 'nosql'
+                            and wanted_location == 'raw_body'
+                            and not headers_edit.toPlainText().strip()):
+                        headers_edit.setPlainText('Content-Type: application/json')
+                    location_changed()
+
+                def selected_tree_template():
+                    items = catalog_tree.selectedItems()
+                    if not items:
+                        return None
+                    value = items[0].data(0, user_role)
+                    return value if isinstance(value, PayloadTemplate) else None
+
+                def tree_selection_changed():
+                    template = selected_tree_template()
+                    if template is not None:
+                        select_template(template)
+
+                def update_family_filter():
+                    current = str(family_filter.currentData() or '')
+                    category = str(category_filter.currentData() or '')
+                    family_filter.blockSignals(True)
+                    family_filter.clear()
+                    family_filter.addItem('All families', '')
+                    for family in families_for(state['catalog'], category):
+                        family_filter.addItem(family, family)
+                    index = family_filter.findData(current)
+                    family_filter.setCurrentIndex(index if index >= 0 else 0)
+                    family_filter.blockSignals(False)
+
+                def refresh_catalog():
+                    selected_key = (
+                        state['selected'].key
+                        if isinstance(state.get('selected'), PayloadTemplate)
+                        else ''
+                    )
+                    state['catalog'] = payload_catalog(state['custom_rows'])
+                    update_family_filter()
+                    items = filter_payloads(
+                        state['catalog'],
+                        query=search_edit.text(),
+                        category=str(category_filter.currentData() or ''),
+                        family=str(family_filter.currentData() or ''),
+                    )
+                    source = str(source_filter.currentData() or '')
+                    impact = str(impact_filter.currentData() or '')
+                    if source:
+                        items = [item for item in items if item.source == source]
+                    if impact:
+                        items = [item for item in items if item.impact == impact]
+
+                    catalog_tree.blockSignals(True)
+                    catalog_tree.clear()
+                    category_nodes = {}
+                    family_nodes = {}
+                    first_item = None
+                    selected_item = None
+                    for template in items:
+                        category_key = template.category
+                        category_node = category_nodes.get(category_key)
+                        if category_node is None:
+                            category_node = QTreeWidgetItem(
+                                [category_name(category_key), '', '', '']
+                            )
+                            category_node.setFirstColumnSpanned(True)
+                            category_node.setExpanded(True)
+                            catalog_tree.addTopLevelItem(category_node)
+                            category_nodes[category_key] = category_node
+                        family_key = (category_key, template.family)
+                        family_node = family_nodes.get(family_key)
+                        if family_node is None:
+                            family_node = QTreeWidgetItem(
+                                [template.family, template.family, '', '']
+                            )
+                            family_node.setExpanded(
+                                bool(search_edit.text().strip())
+                                or bool(category_filter.currentData())
+                            )
+                            category_node.addChild(family_node)
+                            family_nodes[family_key] = family_node
+                        tree_item = QTreeWidgetItem(
+                            [
+                                template.name,
+                                template.family,
+                                template.platform,
+                                template.impact,
+                            ]
+                        )
+                        tree_item.setToolTip(0, template.payload)
+                        tree_item.setData(0, user_role, template)
+                        family_node.addChild(tree_item)
+                        first_item = first_item or tree_item
+                        if template.key == selected_key:
+                            selected_item = tree_item
+                    catalog_tree.blockSignals(False)
+                    chosen = selected_item or first_item
+                    if chosen is not None:
+                        catalog_tree.setCurrentItem(chosen)
+                        select_template(chosen.data(0, user_role))
+                    else:
+                        state['selected'] = None
+                        refresh_preview()
+                        detail_title.setText('No matching payloads')
+                        detail_meta.clear()
+
+                def refresh_custom_list():
+                    custom_list.clear()
+                    for row in state['custom_rows']:
+                        item = QTreeWidgetItem(
+                            [
+                                str(row.get('name') or 'Custom payload'),
+                                str(row.get('category') or 'Custom'),
+                                str(row.get('severity') or 'MEDIUM').title(),
+                                str(row.get('created_at') or ''),
+                            ]
+                        )
+                        item.setData(0, user_role, row)
+                        custom_list.addTopLevelItem(item)
+                    available = bool(self._db)
+                    for widget in (
+                        custom_name_edit,
+                        custom_category_combo,
+                        custom_payload_edit,
+                        custom_description_edit,
+                        custom_severity_combo,
+                        add_btn,
+                        import_btn,
+                        delete_btn,
+                    ):
+                        widget.setEnabled(available)
+                    custom_db_status.setText(
+                        f'{len(state["custom_rows"])} saved payload(s).'
+                        if available else
+                        'Database unavailable: built-in payloads still work, '
+                        'but custom entries cannot be saved or imported.'
+                    )
+
+                def refresh_custom_and_catalog():
+                    load_custom_rows()
+                    refresh_custom_list()
+                    refresh_catalog()
+
                 def add_payload():
-                    name = name_edit.text().strip()
-                    payload = payload_edit.toPlainText().strip()
+                    name = custom_name_edit.text().strip()
+                    payload = custom_payload_edit.toPlainText().strip()
                     if not name or not payload:
-                        QMessageBox.warning(dlg, 'Payload', 'Name and payload content are required.')
+                        custom_db_status.setText(
+                            'Name and payload content are required.'
+                        )
                         return
                     try:
                         self._db.add_custom_payload(
                             name=name,
-                            category=cat_combo.currentText(),
+                            category=str(custom_category_combo.currentData()),
                             payload=payload,
-                            severity=sev_combo.currentText()
+                            description=custom_description_edit.text().strip(),
+                            severity=custom_severity_combo.currentText(),
                         )
-                        name_edit.clear()
-                        payload_edit.clear()
-                        refresh_payloads()
-                        QMessageBox.information(dlg, 'Added', f'Payload "{name}" added!')
+                        custom_name_edit.clear()
+                        custom_payload_edit.clear()
+                        custom_description_edit.clear()
+                        refresh_custom_and_catalog()
+                        custom_db_status.setText(
+                            f'Added “{name}” to My payloads.'
+                        )
                     except Exception as e:
-                        QMessageBox.critical(dlg, 'Add Failed', str(e))
-                
+                        custom_db_status.setText(f'Add failed: {e}')
+
                 def import_payloads():
-                    path, _ = QFileDialog.getOpenFileName(dlg, 'Import Payloads', filter='JSON/Text (*.json *.txt)')
+                    path, _ = QFileDialog.getOpenFileName(
+                        dlg,
+                        'Import Payloads',
+                        filter='JSON/Text (*.json *.txt)',
+                    )
                     if not path:
                         return
                     try:
                         count = self._db.import_payloads_from_file(path)
-                        refresh_payloads()
-                        QMessageBox.information(dlg, 'Imported', f'Imported {count} payloads')
+                        refresh_custom_and_catalog()
+                        custom_db_status.setText(
+                            f'Imported {count} payload(s) from {os.path.basename(path)}.'
+                        )
                     except Exception as e:
-                        QMessageBox.critical(dlg, 'Import Failed', str(e))
+                        custom_db_status.setText(f'Import failed: {e}')
 
                 def delete_payload():
-                    item = payload_list.currentItem()
-                    if item is None:
-                        QMessageBox.warning(dlg, 'Delete Payload', 'Please select a payload to delete.')
+                    items = custom_list.selectedItems()
+                    if not items:
+                        custom_db_status.setText(
+                            'Select a saved payload to delete.'
+                        )
                         return
-
-                    payload_data = item.data(256) or {}
-                    payload_id = payload_data.get('id') if isinstance(payload_data, dict) else None
-                    payload_name = payload_data.get('name', 'selected payload') if isinstance(payload_data, dict) else 'selected payload'
-
+                    payload_data = items[0].data(0, user_role) or {}
+                    payload_id = (
+                        payload_data.get('id')
+                        if isinstance(payload_data, dict) else None
+                    )
+                    payload_name = (
+                        payload_data.get('name', 'selected payload')
+                        if isinstance(payload_data, dict) else 'selected payload'
+                    )
                     if payload_id is None:
-                        QMessageBox.warning(dlg, 'Delete Payload', 'Selected payload has no valid ID.')
+                        custom_db_status.setText(
+                            'The selected payload has no valid database ID.'
+                        )
                         return
-
                     confirm = QMessageBox.question(
                         dlg,
                         'Delete Payload',
-                        f'Delete payload "{payload_name}"?',
+                        f'Delete saved payload “{payload_name}”?',
                         QMessageBox.Yes | QMessageBox.No,
-                        QMessageBox.No
+                        QMessageBox.No,
                     )
                     if confirm != QMessageBox.Yes:
                         return
-
                     try:
                         deleted = self._db.delete_custom_payload(int(payload_id))
                         if deleted:
-                            refresh_payloads()
-                            QMessageBox.information(dlg, 'Deleted', f'Payload "{payload_name}" deleted.')
+                            refresh_custom_and_catalog()
+                            custom_db_status.setText(
+                                f'Deleted “{payload_name}”.'
+                            )
                         else:
-                            QMessageBox.warning(dlg, 'Delete Payload', 'Payload was not found or already deleted.')
+                            custom_db_status.setText(
+                                'Payload was not found or was already deleted.'
+                            )
                     except Exception as e:
-                        QMessageBox.critical(dlg, 'Delete Failed', str(e))
-                
+                        custom_db_status.setText(f'Delete failed: {e}')
+
+                def copy_payload():
+                    value = payload_edit.toPlainText()
+                    if not value:
+                        return
+                    QApplication.clipboard().setText(value)
+                    action_status.setText('Payload copied to the clipboard.')
+
+                def copy_curl():
+                    request = state.get('request')
+                    if request is None:
+                        refresh_preview()
+                        request = state.get('request')
+                    if request is None:
+                        return
+                    QApplication.clipboard().setText(
+                        payload_request_to_curl(request)
+                    )
+                    action_status.setText(
+                        'Exact cURL request copied to the clipboard.'
+                    )
+
+                def open_in_repeater():
+                    refresh_preview()
+                    request = state.get('request')
+                    if request is None:
+                        return
+                    self._repeater_load(request.as_repeater_prefill())
+
+                def filter_category_changed():
+                    update_family_filter()
+                    refresh_catalog()
+
+                for signal in (
+                    search_edit.textChanged,
+                    family_filter.currentIndexChanged,
+                    source_filter.currentIndexChanged,
+                    impact_filter.currentIndexChanged,
+                ):
+                    signal.connect(refresh_catalog)
+                category_filter.currentIndexChanged.connect(
+                    filter_category_changed
+                )
+                catalog_tree.itemSelectionChanged.connect(
+                    tree_selection_changed
+                )
+                payload_edit.textChanged.connect(refresh_preview)
+                method_combo.currentIndexChanged.connect(refresh_preview)
+                target_edit.textChanged.connect(refresh_preview)
+                location_combo.currentIndexChanged.connect(location_changed)
+                location_name_edit.textChanged.connect(refresh_preview)
+                encoding_combo.currentIndexChanged.connect(refresh_preview)
+                headers_edit.textChanged.connect(refresh_preview)
+                base_body_edit.textChanged.connect(refresh_preview)
+                copy_payload_btn.clicked.connect(copy_payload)
+                copy_curl_btn.clicked.connect(copy_curl)
+                repeater_btn.clicked.connect(open_in_repeater)
                 add_btn.clicked.connect(add_payload)
                 import_btn.clicked.connect(import_payloads)
                 delete_btn.clicked.connect(delete_payload)
-                
-                btn_layout.addWidget(add_btn)
-                btn_layout.addWidget(import_btn)
-                btn_layout.addWidget(delete_btn)
-                layout.addLayout(btn_layout)
-                
-                close_btn = QPushButton(_t('close', self._lang))
-                close_btn.clicked.connect(lambda: self._navigate('scan'))
-                layout.addWidget(close_btn)
 
+                refresh_custom_and_catalog()
                 return dlg
             except Exception as e:
                 QMessageBox.critical(self, 'Payloads Error', str(e))

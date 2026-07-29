@@ -10,7 +10,8 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 def test_results_workspace_builds_with_evidence_actions(monkeypatch):
     from PySide6.QtWidgets import (
         QApplication, QCheckBox, QComboBox, QLabel, QLineEdit, QListWidget,
-        QPushButton, QSplitter, QTextBrowser, QTreeWidget, QTreeWidgetItem,
+        QPlainTextEdit, QPushButton, QSplitter, QTextBrowser, QTreeWidget,
+        QTreeWidgetItem,
     )
     from PySide6.QtCore import Qt
 
@@ -28,6 +29,9 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
             return []
 
         def get_scan_queue(self):
+            return []
+
+        def get_custom_payloads(self):
             return []
 
         def get_dashboard_stats(self):
@@ -187,7 +191,62 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
             QSplitter, 'ReportSummarySplitter'
         ) is not None
 
+        payload_page = window._build_payloads_page()
+        payload_page.resize(1180, 820)
+        payload_page.show()
+        QApplication.processEvents()
+        assert payload_page.objectName() == 'PayloadsPage'
+        catalog = payload_page.findChild(
+            QTreeWidget, 'PayloadCatalogTree'
+        )
+        assert catalog is not None
+        assert catalog.topLevelItemCount() >= 8
+        category_filter = payload_page.findChild(
+            QComboBox, 'PayloadCategoryFilter'
+        )
+        category_filter.setCurrentIndex(category_filter.findData('sqli'))
+        QApplication.processEvents()
+        assert catalog.topLevelItemCount() == 1
+        sql_node = catalog.topLevelItem(0)
+        family_names = {
+            sql_node.child(index).text(0)
+            for index in range(sql_node.childCount())
+        }
+        assert {'Boolean / basic 1=1', 'UNION SELECT', 'Time based'} <= family_names
+
+        payload_target = payload_page.findChild(
+            QLineEdit, 'PayloadTargetInput'
+        )
+        payload_target.setText('https://ctf.example.test/search')
+        QApplication.processEvents()
+        preview = payload_page.findChild(
+            QPlainTextEdit, 'PayloadRequestPreview'
+        )
+        assert 'Host: ctf.example.test' in preview.toPlainText()
+        assert 'Query parameter: q' in next(
+            label.text() for label in payload_page.findChildren(QLabel)
+            if label.objectName() == 'PayloadDestinationSummary'
+        )
+        payload_buttons = {
+            button.text(): button
+            for button in payload_page.findChildren(QPushButton)
+        }
+        assert {
+            'Copy payload', 'Copy cURL', 'Open exact request in Repeater'
+        } <= set(payload_buttons)
+        assert payload_buttons['Open exact request in Repeater'].isEnabled()
+        payload_buttons['Copy cURL'].click()
+        assert 'https://ctf.example.test/search' in QApplication.clipboard().text()
+        repeater_prefill = {}
+        window._repeater_load = lambda request: repeater_prefill.update(request)
+        payload_buttons['Open exact request in Repeater'].click()
+        assert repeater_prefill['url'].startswith(
+            'https://ctf.example.test/search?'
+        )
+        assert repeater_prefill['method'] == 'GET'
+
         inspected['ok'] = True
+        payload_page.close()
         report_page.close()
         recon_page.close()
         page.close()
