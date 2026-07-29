@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import queue
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -237,6 +238,47 @@ def build_argv(spec: ToolSpec, path: str, ctx: Dict[str, str],
     if extra_args:
         argv.extend(extra_args)
     return argv
+
+
+def configured_command(
+    argv: List[str],
+    *,
+    custom_path: Optional[str] = None,
+    extra_args=None,
+    executable_index: Optional[int] = 0,
+) -> List[str]:
+    """Apply Tool Manager launch settings to an already-built argv list.
+
+    Guided workbenches build richer commands than a registry template can
+    express. This helper lets those pages share the same custom binary and
+    extra-argument configuration without invoking a shell or mutating their
+    original command.
+    """
+    if not argv:
+        raise ValueError('Cannot configure an empty tool command.')
+    command = [str(part) for part in argv]
+
+    if custom_path:
+        path = os.path.expandvars(os.path.expanduser(str(custom_path)))
+        if not os.path.isfile(path):
+            raise ValueError(f'Configured tool path not found: {custom_path}')
+        if executable_index is None:
+            raise ValueError(
+                'This managed launcher does not support a custom binary path.'
+            )
+        if executable_index < 0 or executable_index >= len(command):
+            raise ValueError('Configured executable position is invalid.')
+        command[executable_index] = path
+
+    if isinstance(extra_args, str):
+        try:
+            configured_args = shlex.split(extra_args, posix=os.name != 'nt')
+        except ValueError as exc:
+            raise ValueError(f'Invalid configured extra arguments: {exc}') from exc
+    else:
+        configured_args = [str(arg) for arg in (extra_args or [])]
+    command.extend(configured_args)
+    return command
 
 
 def _redact_argv(argv: List[str], secrets: Optional[List[str]] = None) -> List[str]:

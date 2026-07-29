@@ -4946,7 +4946,11 @@ def main() -> None:
             and fold its findings into the Results Explorer. Absent tools show an
             install hint and are never auto-installed."""
             try:
-                from .tools_registry import TOOL_CATEGORIES, tools_by_category
+                from .tools_registry import (
+                    TOOL_CATEGORIES,
+                    get_spec,
+                    tools_by_category,
+                )
                 from .tools_runtime import detect_all
             except Exception as e:
                 QMessageBox.critical(self, 'Tools', f'Tool registry unavailable: {e}')
@@ -5001,7 +5005,7 @@ def main() -> None:
 
             act = QHBoxLayout()
             run_btn = style_button(
-                QPushButton(), 'primary', text='Run selected tool'
+                QPushButton(), 'primary', text='Quick run selected tool'
             )
             stop_btn = style_button(
                 QPushButton(), 'danger', text='Stop tool'
@@ -5067,6 +5071,59 @@ def main() -> None:
                 it = tree.currentItem()
                 return it.data(0, 256) if it else None
 
+            def selected_spec():
+                key = selected_key()
+                try:
+                    return get_spec(key) if key else None
+                except Exception:
+                    return None
+
+            def update_primary_action():
+                spec = selected_spec()
+                if spec and spec.guided_workbench:
+                    labels = {
+                        'fuzzer': 'content discovery',
+                        'sqli': 'SQLi automation',
+                        'secrets': 'secret scanning',
+                    }
+                    destination = labels.get(
+                        spec.guided_workbench, 'guided workflow'
+                    )
+                    run_btn.setText(f'Open {destination}')
+                    run_btn.setToolTip(
+                        f'Use the guided {destination} preset for {spec.name}'
+                    )
+                else:
+                    run_btn.setText('Quick run selected tool')
+                    run_btn.setToolTip(
+                        'Run this registry tool with its default safe arguments'
+                    )
+
+            def open_guided_workbench(spec):
+                target = target_edit.text().strip()
+                if target:
+                    try:
+                        self.target_edit.setText(target)
+                    except Exception:
+                        pass
+                self._navigate(spec.guided_workbench)
+                holder = self._pages.get(spec.guided_workbench)
+                if not holder or not target:
+                    return
+                field_names = {
+                    'fuzzer': 'ContentDiscoveryTargetInput',
+                    'sqli': 'SqliTargetInput',
+                    'secrets': 'SecretsTargetInput',
+                }
+                field = holder.findChild(
+                    QLineEdit, field_names.get(spec.guided_workbench, '')
+                )
+                if field is None:
+                    return
+                if spec.guided_workbench == 'fuzzer' and 'FUZZ' not in target:
+                    target = target.rstrip('/') + '/FUZZ'
+                field.setText(target)
+
             def active_engagement():
                 engagement_id = (
                     getattr(self, '_current_engagement_id', None)
@@ -5086,6 +5143,10 @@ def main() -> None:
                 key = selected_key()
                 if not key:
                     QMessageBox.information(dlg, 'Tools', 'Select a tool row first.')
+                    return
+                spec = selected_spec()
+                if spec and spec.guided_workbench:
+                    open_guided_workbench(spec)
                     return
                 tgt = target_edit.text().strip()
                 if not tgt:
@@ -5159,7 +5220,9 @@ def main() -> None:
             cfg_btn.clicked.connect(configure)
             results_btn.clicked.connect(self.show_results_summary)
             tree.itemDoubleClicked.connect(lambda *_: run_selected())
+            tree.itemSelectionChanged.connect(update_primary_action)
             populate()
+            update_primary_action()
             return dlg
 
         def _configure_tool_dialog(self, tool_key, on_saved=None):
@@ -8313,6 +8376,37 @@ def main() -> None:
             self._browser_script_obj = locals().get('script')
             return page
 
+        def _tool_manager_config(self, tool_key):
+            """Return the launch settings shared by Tool Manager and presets."""
+            if not self._db:
+                return {}
+            try:
+                return self._db.get_tool_config(tool_key) or {}
+            except Exception:
+                return {}
+
+        def _configured_tool_status(self, tool_key):
+            """Resolve a tool using the same custom path shown in Tool Manager."""
+            from .tools_registry import get_spec
+            from .tools_runtime import detect
+
+            config = self._tool_manager_config(tool_key)
+            return detect(get_spec(tool_key), config.get('custom_path'))
+
+        def _configured_tool_command(
+            self, tool_key, cmd, *, executable_index=0
+        ):
+            """Apply Tool Manager binary/argument settings to a guided command."""
+            from .tools_runtime import configured_command
+
+            config = self._tool_manager_config(tool_key)
+            return configured_command(
+                cmd,
+                custom_path=config.get('custom_path'),
+                extra_args=config.get('extra_args'),
+                executable_index=executable_index,
+            )
+
         def _spawn_tool(self, page, cmd, on_stdout, on_finished, env_extra=None):
             """Run an external tool as a QProcess (merged stdout/stderr), streaming
             to on_stdout and calling on_finished(code) at the end. The proc is kept
@@ -8484,15 +8578,19 @@ def main() -> None:
                 _log(f'  → {len(ctx["live_urls"])} live URL(s), {len(ctx["param_urls"])} parameterized URL(s)')
 
             def _mk_ffuf():
-                import shutil
-                if not shutil.which('ffuf'):
-                    _log('  (ffuf not installed — skipping)'); return None, None
+                tool_status = self._configured_tool_status('ffuf')
+                if not tool_status.found:
+                    _log(
+                        f'  ({tool_status.error or "ffuf not available"} — skipping)'
+                    )
+                    return None, None
                 from . import recon_install
                 root = (ctx.get('live_urls') or ['https://' + _norm(target_edit.text())])[0].rstrip('/')
                 wl = recon_install.ensure_builtin_wordlist()
                 tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.json'); tmp.close()
                 ctx['tmp_ffuf'] = tmp.name; ctx.setdefault('tmps', []).append(tmp.name)
-                cmd = ['ffuf', '-w', wl, '-u', root + '/FUZZ', '-mc', '200,204,301,302,307,401,403',
+                cmd = [tool_status.path, '-w', wl, '-u', root + '/FUZZ',
+                       '-mc', '200,204,301,302,307,401,403',
                        '-t', '40', '-ac', '-of', 'json', '-o', tmp.name, '-s', '-noninteractive']
                 return cmd, None
 
@@ -8510,15 +8608,18 @@ def main() -> None:
                 _log(f'  → {n} path(s)')
 
             def _mk_nuclei():
-                import shutil
-                if not shutil.which('nuclei'):
-                    _log('  (nuclei not installed — skipping)'); return None, None
+                tool_status = self._configured_tool_status('nuclei')
+                if not tool_status.found:
+                    _log(
+                        f'  ({tool_status.error or "nuclei not available"} — skipping)'
+                    )
+                    return None, None
                 urls = ctx.get('live_urls') or []
                 if not urls:
                     return None, None
                 lf = tempfile.NamedTemporaryFile('w', delete=False, suffix='.txt', encoding='utf-8')
                 lf.write('\n'.join(urls)); lf.close(); ctx.setdefault('tmps', []).append(lf.name)
-                cmd = ['nuclei', '-l', lf.name, '-jsonl', '-silent',
+                cmd = [tool_status.path, '-l', lf.name, '-jsonl', '-silent',
                        '-severity', 'low,medium,high,critical']
                 if offensive_chk.isChecked():
                     cmd += ['-tags', 'cve,rce,sqli,lfi,ssrf,xxe,injection,exposure']
@@ -8545,12 +8646,19 @@ def main() -> None:
 
             def _mk_commix():
                 from . import recon_install
-                if not recon_install.is_installed('commix'):
-                    _log('  (commix not installed — skipping)'); return None, None
+                tool_status = self._configured_tool_status('commix')
+                if tool_status.found:
+                    pre, env = [tool_status.path], None
+                elif recon_install.is_installed('commix'):
+                    pre, env = recon_install.python_tool_cmd('commix')
+                else:
+                    _log(
+                        f'  ({tool_status.error or "commix not available"} — skipping)'
+                    )
+                    return None, None
                 params = ctx.get('param_urls') or []
                 if not params:
                     _log('  (no parameterized URLs to test)'); return None, None
-                pre, env = recon_install.python_tool_cmd('commix')
                 outdir = tempfile.mkdtemp(prefix='wp_commix_')
                 ctx['commix_url'] = params[0]
                 cmd = list(pre) + ['-u', params[0], '--batch', f'--output-dir={outdir}']
@@ -8567,10 +8675,21 @@ def main() -> None:
                     _log('  → no command injection confirmed')
 
             PHASES = {
-                'recon': {'name': 'Recon', 'make': _mk_recon, 'done': _done_recon},
-                'ffuf': {'name': 'Content discovery (ffuf)', 'make': _mk_ffuf, 'done': _done_ffuf},
-                'nuclei': {'name': 'Vuln scan (nuclei)', 'make': _mk_nuclei, 'done': _done_nuclei},
-                'commix': {'name': 'Command injection (commix)', 'make': _mk_commix, 'done': _done_commix},
+                'recon': {
+                    'name': 'Recon', 'make': _mk_recon, 'done': _done_recon,
+                },
+                'ffuf': {
+                    'name': 'Content discovery (ffuf)', 'tool': 'ffuf',
+                    'make': _mk_ffuf, 'done': _done_ffuf,
+                },
+                'nuclei': {
+                    'name': 'Vuln scan (nuclei)', 'tool': 'nuclei',
+                    'make': _mk_nuclei, 'done': _done_nuclei,
+                },
+                'commix': {
+                    'name': 'Command injection (commix)', 'tool': 'commix',
+                    'make': _mk_commix, 'done': _done_commix,
+                },
             }
 
             # ---------- runner ----------
@@ -8598,6 +8717,15 @@ def main() -> None:
                     _log(f'[!] {phase["name"]}: {e}'); pstate['i'] += 1; _next(); return
                 if not cmd:
                     pstate['i'] += 1; _next(); return
+                tool_key = phase.get('tool')
+                if tool_key:
+                    try:
+                        cmd = self._configured_tool_command(tool_key, cmd)
+                    except ValueError as exc:
+                        _log(f'[!] {phase["name"]}: {exc}')
+                        pstate['i'] += 1
+                        _next()
+                        return
                 _log(f'\n══ {phase["name"]} ══\n$ ' + ' '.join(str(c) for c in cmd) + '\n')
                 pstate['buf'] = ''
 
@@ -8674,7 +8802,6 @@ def main() -> None:
                 QPushButton, QPlainTextEdit, QSpinBox, QCheckBox, QComboBox, QTableWidget,
                 QTableWidgetItem, QSplitter, QHeaderView, QAbstractItemView, QFileDialog)
             from PySide6.QtCore import Qt
-            import shutil
             import tempfile
             import json as _json
             import os as _os
@@ -8689,7 +8816,9 @@ def main() -> None:
                                'e.g.  https://target/FUZZ   ·   https://target/api?FUZZ=1   ·   Host: FUZZ.target.com'))
 
             row = QHBoxLayout(); row.addWidget(QLabel('URL:'))
-            url_edit = QLineEdit(); url_edit.setPlaceholderText('https://target/FUZZ')
+            url_edit = QLineEdit()
+            url_edit.setObjectName('ContentDiscoveryTargetInput')
+            url_edit.setPlaceholderText('https://target/FUZZ')
             try:
                 t = self.target_edit.text().strip()
                 if t:
@@ -8826,10 +8955,13 @@ def main() -> None:
             def _run():
                 from . import recon_install
                 eng = engine_combo.currentText(); st['engine'] = eng
-                if not shutil.which(eng):
+                tool_status = self._configured_tool_status(eng)
+                if not tool_status.found:
                     self._download_tools_dialog([eng], f'{eng} is the selected fuzzing engine.',
                                                 title=f'Install {eng}')
-                    if not shutil.which(eng):
+                    tool_status = self._configured_tool_status(eng)
+                    if not tool_status.found:
+                        _ap(f'[!] {tool_status.error or f"{eng} is not available."}')
                         return
                 u = url_edit.text().strip()
                 wl = wl_edit.text().strip() or recon_install.ensure_builtin_wordlist()
@@ -8846,7 +8978,7 @@ def main() -> None:
                         return
                     tmpf = tempfile.NamedTemporaryFile(delete=False, suffix='.json'); tmpf.close()
                     st['tmp'] = tmpf.name
-                    cmd = ['ffuf', '-w', wl, '-u', u, '-mc', mc, '-t', th,
+                    cmd = [tool_status.path, '-w', wl, '-u', u, '-mc', mc, '-t', th,
                            '-of', 'json', '-o', tmpf.name, '-s', '-noninteractive']
                     if ac_chk.isChecked():
                         cmd.append('-ac')
@@ -8859,11 +8991,18 @@ def main() -> None:
                         return
                     st['base'] = base + '/'
                     if eng == 'feroxbuster':
-                        cmd = ['feroxbuster', '-u', base, '-w', wl, '--json', '--silent', '-t', th]
+                        cmd = [tool_status.path, '-u', base, '-w', wl,
+                               '--json', '--silent', '-t', th]
                     else:  # gobuster
-                        cmd = ['gobuster', 'dir', '-u', base, '-w', wl, '-q', '--no-error', '-t', th]
+                        cmd = [tool_status.path, 'dir', '-u', base, '-w', wl,
+                               '-q', '--no-error', '-t', th]
                     for h in headers:
                         cmd += ['-H', h]
+                try:
+                    cmd = self._configured_tool_command(eng, cmd)
+                except ValueError as exc:
+                    _ap(f'[!] {exc}')
+                    return
                 _ap('$ ' + ' '.join(cmd) + '\n')
                 run_btn.setEnabled(False); stop_btn.setEnabled(True)
                 st['proc'] = self._spawn_tool(page, cmd, _on_out, _on_fin)
@@ -8882,7 +9021,6 @@ def main() -> None:
                 QTableWidgetItem, QSplitter, QHeaderView, QAbstractItemView, QFileDialog)
             from PySide6.QtCore import Qt
             from PySide6.QtGui import QBrush, QColor
-            import shutil
             import json as _json
             import os as _os
 
@@ -8902,6 +9040,7 @@ def main() -> None:
             mode_combo = QComboBox(); mode_combo.addItems(['Git repo URL', 'Filesystem path'])
             row.addWidget(mode_combo)
             target_edit = QLineEdit()
+            target_edit.setObjectName('SecretsTargetInput')
             target_edit.setPlaceholderText('https://github.com/org/repo.git   or   C:\\path\\to\\code')
             browse_btn = QPushButton('Browse')
             row.addWidget(target_edit, 1); row.addWidget(browse_btn); v.addLayout(row)
@@ -9019,10 +9158,13 @@ def main() -> None:
             def _run():
                 import tempfile
                 eng = engine_combo.currentText(); st['engine'] = eng
-                if not shutil.which(eng):
+                tool_status = self._configured_tool_status(eng)
+                if not tool_status.found:
                     self._download_tools_dialog([eng], f'{eng} is the selected secret scanner.',
                                                 title=f'Install {eng}')
-                    if not shutil.which(eng):
+                    tool_status = self._configured_tool_status(eng)
+                    if not tool_status.found:
+                        _ap(f'[!] {tool_status.error or f"{eng} is not available."}')
                         return
                 tgt = target_edit.text().strip()
                 if not tgt:
@@ -9031,7 +9173,7 @@ def main() -> None:
                 table.setRowCount(0); log.clear(); st['buf'] = ''; st['count'] = 0; st['tmp'] = None
                 if eng == 'trufflehog':
                     sub = 'git' if mode_combo.currentIndex() == 0 else 'filesystem'
-                    cmd = ['trufflehog', sub, tgt, '--json', '--no-update']
+                    cmd = [tool_status.path, sub, tgt, '--json', '--no-update']
                     if verified_chk.isChecked():
                         cmd.append('--only-verified')
                 else:  # gitleaks — scans a local path/repo
@@ -9040,7 +9182,13 @@ def main() -> None:
                     sub = 'git' if mode_combo.currentIndex() == 0 else 'dir'
                     if mode_combo.currentIndex() == 0 and '://' in tgt:
                         _ap('[!] gitleaks scans local paths — give a folder, or use trufflehog for remote URLs.')
-                    cmd = ['gitleaks', sub, tgt, '-f', 'json', '-r', tmpf.name, '--no-banner', '--exit-code', '0']
+                    cmd = [tool_status.path, sub, tgt, '-f', 'json', '-r',
+                           tmpf.name, '--no-banner', '--exit-code', '0']
+                try:
+                    cmd = self._configured_tool_command(eng, cmd)
+                except ValueError as exc:
+                    _ap(f'[!] {exc}')
+                    return
                 _ap('$ ' + ' '.join(cmd) + '\n')
                 run_btn.setEnabled(False); stop_btn.setEnabled(True)
                 st['proc'] = self._spawn_tool(page, cmd, _on_out, _on_fin)
@@ -9068,7 +9216,9 @@ def main() -> None:
 
             g = QGridLayout()
             g.addWidget(QLabel('URL:'), 0, 0)
-            url_edit = QLineEdit(); url_edit.setPlaceholderText('http://target/page.php?id=1')
+            url_edit = QLineEdit()
+            url_edit.setObjectName('SqliTargetInput')
+            url_edit.setPlaceholderText('http://target/page.php?id=1')
             g.addWidget(url_edit, 0, 1, 1, 3)
             g.addWidget(QLabel('POST data:'), 1, 0)
             data_edit = QLineEdit(); data_edit.setPlaceholderText('(optional) id=1&name=x  → forces POST')
@@ -9145,16 +9295,27 @@ def main() -> None:
                     _ap('[!] enter a URL.')
                     return
                 env_extra = None
+                tool_status = self._configured_tool_status(eng)
                 if eng == 'sqlmap':
-                    script = recon_install.sqlmap_script()
-                    if not script:
-                        self._download_tools_dialog(['sqlmap'], 'sqlmap is needed to test for SQL injection.',
-                                                    title='Install sqlmap')
+                    if tool_status.found:
+                        prefix = [tool_status.path]
+                    else:
                         script = recon_install.sqlmap_script()
                         if not script:
-                            return
+                            self._download_tools_dialog(
+                                ['sqlmap'],
+                                'sqlmap is needed to test for SQL injection.',
+                                title='Install sqlmap',
+                            )
+                            script = recon_install.sqlmap_script()
+                            if not script:
+                                _ap(
+                                    f'[!] {tool_status.error or "sqlmap is not available."}'
+                                )
+                                return
+                        prefix = [sys.executable, script]
                     outdir = tempfile.mkdtemp(prefix='wp_sqlmap_out_')
-                    cmd = [sys.executable, script, '-u', u, '--batch', '--disable-coloring',
+                    cmd = [*prefix, '-u', u, '--batch', '--disable-coloring',
                            f'--level={level_spin.value()}', f'--risk={risk_spin.value()}',
                            f'--output-dir={outdir}']
                     if tamper_edit.text().strip():
@@ -9162,12 +9323,19 @@ def main() -> None:
                     if rand_chk.isChecked():
                         cmd.append('--random-agent')
                 else:  # ghauri (run as a module from the isolated pylibs dir)
-                    if not recon_install.is_installed('ghauri'):
+                    if tool_status.found:
+                        prefix = [tool_status.path]
+                    elif not recon_install.is_installed('ghauri'):
                         self._download_tools_dialog(['ghauri'], 'ghauri is a fast SQLi alternative.',
                                                     title='Install ghauri')
                         if not recon_install.is_installed('ghauri'):
+                            _ap(
+                                f'[!] {tool_status.error or "ghauri is not available."}'
+                            )
                             return
-                    prefix, env_extra = recon_install.python_tool_cmd('ghauri')
+                        prefix, env_extra = recon_install.python_tool_cmd('ghauri')
+                    else:
+                        prefix, env_extra = recon_install.python_tool_cmd('ghauri')
                     cmd = list(prefix) + ['-u', u, '--batch', f'--level={level_spin.value()}']
                 # shared options (both engines understand these)
                 if data_edit.text().strip():
@@ -9180,6 +9348,11 @@ def main() -> None:
                     cmd += ['--current-db', '--current-user']
                 if tables_chk.isChecked():
                     cmd.append('--tables')
+                try:
+                    cmd = self._configured_tool_command(eng, cmd)
+                except ValueError as exc:
+                    _ap(f'[!] {exc}')
+                    return
                 log.clear(); summary.setText(''); st['found'] = []
                 _ap('$ ' + ' '.join(cmd) + '\n')
                 run_btn.setEnabled(False); stop_btn.setEnabled(True)

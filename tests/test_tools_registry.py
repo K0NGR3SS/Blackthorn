@@ -38,6 +38,35 @@ def test_build_argv_rejects_flag_like_target():
         pass
 
 
+def test_configured_command_applies_manager_settings_without_mutating_input(
+        tmp_path):
+    binary = tmp_path / 'ffuf-custom'
+    binary.write_text('')
+    original = ['ffuf', '-u', 'https://example.test/FUZZ']
+
+    configured = rt.configured_command(
+        original,
+        custom_path=str(binary),
+        extra_args='-H "X-Test: one two" -rate 10',
+    )
+
+    assert original[0] == 'ffuf'
+    assert configured[:3] == [
+        str(binary), '-u', 'https://example.test/FUZZ'
+    ]
+    assert configured[-4:] == ['-H', 'X-Test: one two', '-rate', '10']
+
+
+def test_configured_command_rejects_missing_custom_path():
+    try:
+        rt.configured_command(
+            ['ffuf'], custom_path='/definitely/missing/wafpierce-tool'
+        )
+        assert False, 'expected missing custom tool path to fail'
+    except ValueError as exc:
+        assert 'not found' in str(exc)
+
+
 def test_detect_absent_tool_is_clean():
     spec = reg.ToolSpec(key='nope', name='Nope', category='recon',
                         binaries=('definitely_not_a_real_bin_xyz',))
@@ -148,3 +177,20 @@ def test_run_tool_scope_block_and_empty_output_are_not_findings():
     assert blocked['state'] == 'scope_blocked'
     assert completed['ok'] is True
     assert completed['findings'] == []
+
+
+def test_guided_workbenches_cover_duplicate_specialist_runners():
+    routes = {
+        key: spec.guided_workbench
+        for key, spec in reg.TOOL_REGISTRY.items()
+        if spec.guided_workbench
+    }
+    assert {
+        'ffuf': 'fuzzer',
+        'feroxbuster': 'fuzzer',
+        'gobuster': 'fuzzer',
+        'sqlmap': 'sqli',
+        'ghauri': 'sqli',
+        'trufflehog': 'secrets',
+        'gitleaks': 'secrets',
+    }.items() <= routes.items()
