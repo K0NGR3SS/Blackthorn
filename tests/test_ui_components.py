@@ -1,3 +1,6 @@
+import re
+from pathlib import Path
+
 from wafpierce.ui_components import (
     BUTTON_OBJECT_NAMES,
     DISCLOSURE_OBJECT_NAME,
@@ -6,7 +9,7 @@ from wafpierce.ui_components import (
     style_button,
     style_disclosure_button,
 )
-from wafpierce.theme import PALETTE, contrast_ratio, stylesheet
+from wafpierce.theme import PALETTE, asset_path, contrast_ratio, stylesheet
 from wafpierce.gui import PRIMARY_NAV_ITEMS, WORKBENCH_ITEMS
 
 
@@ -96,6 +99,17 @@ def test_theme_uses_restrained_brass_without_decorative_gradients():
     assert 'chevron-down.svg' in css
     assert 'border-left: 1px solid' in css
     assert 'QTreeWidget::branch:closed:has-children' in css
+
+
+def test_tree_chevrons_keep_the_mark_small_inside_qt_branch_canvas():
+    for name in ('chevron-right-muted.svg', 'chevron-down-muted.svg'):
+        svg = Path(asset_path(name)).read_text(encoding='utf-8')
+        assert 'viewBox="0 0 24 24"' in svg
+        path_data = re.search(r'<path d="([^"]+)"', svg).group(1)
+        coordinates = [float(value) for value in re.findall(r'\d+(?:\.\d+)?', path_data)]
+        xs, ys = coordinates[::2], coordinates[1::2]
+        assert max(xs) - min(xs) <= 8
+        assert max(ys) - min(ys) <= 8
 
 
 def test_core_theme_contrast_meets_wcag_aa():
