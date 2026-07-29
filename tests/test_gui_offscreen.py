@@ -81,6 +81,27 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
         assert window.height() == 900
         dropdown_image = window._workbench_combo.grab().toImage()
         assert 'Dropdown menu' in window._workbench_combo.accessibleDescription()
+        assert window._workbench_combo.objectName() == 'WorkbenchSelector'
+        workbench_labels = {
+            window._workbench_combo.itemData(index):
+            window._workbench_combo.itemText(index)
+            for index in range(window._workbench_combo.count())
+            if window._workbench_combo.itemData(index)
+        }
+        assert workbench_labels['repeater'] == 'Request lab'
+        assert workbench_labels['fuzzer'] == 'Content discovery'
+        assert workbench_labels['sqli'] == 'SQLi automation'
+        assert workbench_labels['tools'] == 'Tool manager'
+        group_rows = [
+            index
+            for index in range(window._workbench_combo.count())
+            if window._workbench_combo.itemText(index).startswith('— ')
+        ]
+        assert len(group_rows) == 4
+        assert all(
+            not window._workbench_combo.model().item(index).isEnabled()
+            for index in group_rows
+        )
         dropdown_light_pixels = 0
         for x in range(
                 max(0, dropdown_image.width() - 25),

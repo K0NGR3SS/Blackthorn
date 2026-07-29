@@ -53,22 +53,35 @@ PRIMARY_NAV_ITEMS = (
     ('dashboard', 'Report'),
 )
 
-WORKBENCH_ITEMS = (
-    ('External tools', 'tools'),
-    ('Browser', 'browser'),
-    ('Proxy', 'proxy'),
-    ('Repeater', 'repeater'),
-    ('Fuzzer', 'fuzzer'),
-    ('SQL injection', 'sqli'),
-    ('Secrets', 'secrets'),
-    ('Payload library', 'payloads'),
-    ('ZAP / Burp', 'zapburp'),
-    ('AD / Internal', 'adint'),
-    ('AI assistance', 'ai'),
-    ('Live logs', 'live'),
-    ('Timeline', 'timeline'),
-    ('Schedule', 'schedule'),
-    ('Plugins', 'plugins'),
+WORKBENCH_GROUPS = (
+    ('REQUEST TESTING', (
+        ('Browser', 'browser'),
+        ('Proxy', 'proxy'),
+        ('Request lab', 'repeater'),
+        ('Payload library', 'payloads'),
+    )),
+    ('AUTOMATED TESTING', (
+        ('Content discovery', 'fuzzer'),
+        ('SQLi automation', 'sqli'),
+        ('Secret scanning', 'secrets'),
+    )),
+    ('INTEGRATIONS', (
+        ('ZAP / Burp', 'zapburp'),
+        ('AD / Internal', 'adint'),
+        ('Tool manager', 'tools'),
+        ('AI assistance', 'ai'),
+    )),
+    ('OPERATIONS', (
+        ('Live findings', 'live'),
+        ('Timeline', 'timeline'),
+        ('Schedule', 'schedule'),
+        ('Plugins', 'plugins'),
+    )),
+)
+WORKBENCH_ITEMS = tuple(
+    item
+    for _group, items in WORKBENCH_GROUPS
+    for item in items
 )
 
 # Use shared config and secret-storage modules.
@@ -2891,14 +2904,23 @@ def main() -> None:
             section.setObjectName('NavSection')
             nav_lay.addWidget(section)
             workbench = QtWidgets.QComboBox()
+            workbench.setObjectName('WorkbenchSelector')
             workbench.setAccessibleName('Open a specialist workbench')
             workbench.setAccessibleDescription(
-                'Dropdown menu for choosing a specialist tool.'
+                'Dropdown menu grouped by specialist workflow.'
             )
-            workbench.setToolTip('Dropdown menu — choose a specialist tool')
-            workbench.addItem('Open a tool…', None)
-            for label, key in WORKBENCH_ITEMS:
-                workbench.addItem(label, key)
+            workbench.setToolTip('Dropdown menu — choose a specialist workflow')
+            workbench.addItem('Choose a workbench…', None)
+            for group, items in WORKBENCH_GROUPS:
+                workbench.addItem(f'— {group} —', None)
+                group_item = workbench.model().item(workbench.count() - 1)
+                if group_item is not None:
+                    group_item.setEnabled(False)
+                    group_font = group_item.font()
+                    group_font.setBold(True)
+                    group_item.setFont(group_font)
+                for label, key in items:
+                    workbench.addItem(label, key)
 
             def open_workbench(index):
                 key = workbench.itemData(index)
@@ -4919,7 +4941,7 @@ def main() -> None:
             return len(findings)
 
         def _build_tools_page(self):
-            """External pentest tools (detect-&-drive): list installed tools by
+            """Tool manager (detect-&-drive): list installed tools by
             category with status badges, run a selected one as a killable subprocess,
             and fold its findings into the Results Explorer. Absent tools show an
             install hint and are never auto-installed."""
@@ -4931,15 +4953,18 @@ def main() -> None:
                 return
 
             dlg = QtWidgets.QWidget()
-            dlg.setWindowTitle('External Tools')
+            dlg.setWindowTitle('Tool manager')
             dlg.resize(940, 660)
             outer = QVBoxLayout(dlg)
 
-            title = QLabel('External tools')
+            title = QLabel('Tool manager')
             title.setObjectName('PageTitle')
             outer.addWidget(title)
-            banner = QLabel('Detect-and-drive: Blackthorn runs tools already installed on this machine. '
-                            'Nothing is installed for you. Authorized targets only.')
+            banner = QLabel(
+                'Detect, configure, and quick-run tools already installed on '
+                'this machine. Nothing is installed automatically. '
+                'Authorized targets only.'
+            )
             banner.setWordWrap(True)
             outer.addWidget(banner)
 
@@ -8657,7 +8682,7 @@ def main() -> None:
 
             page = QtWidgets.QWidget(); page.setObjectName('FuzzerPage')
             v = QVBoxLayout(page); v.setContentsMargins(22, 20, 22, 20)
-            hdr = QLabel('⌗  Fuzzer — ffuf content discovery')
+            hdr = QLabel('Content discovery · ffuf / feroxbuster / gobuster')
             hdr.setStyleSheet('font-size:18px; font-weight:bold; color:#58a6ff;')
             v.addWidget(hdr)
             v.addWidget(QLabel('Put the FUZZ marker in the URL (or a header). '
@@ -8863,7 +8888,7 @@ def main() -> None:
 
             page = QtWidgets.QWidget(); page.setObjectName('SecretsPage')
             v = QVBoxLayout(page); v.setContentsMargins(22, 20, 22, 20)
-            hdr = QLabel('⚷  Secrets — trufflehog')
+            hdr = QLabel('Secret scanning · trufflehog / gitleaks')
             hdr.setStyleSheet('font-size:18px; font-weight:bold; color:#58a6ff;')
             v.addWidget(hdr)
             v.addWidget(QLabel('Scan a git repo (clone URL) or a local folder for leaked & verified '
@@ -9035,7 +9060,7 @@ def main() -> None:
 
             page = QtWidgets.QWidget(); page.setObjectName('SqliPage')
             v = QVBoxLayout(page); v.setContentsMargins(22, 20, 22, 20)
-            hdr = QLabel('⛁  SQLi — sqlmap')
+            hdr = QLabel('SQLi automation · sqlmap / ghauri')
             hdr.setStyleSheet('font-size:18px; font-weight:bold; color:#58a6ff;')
             v.addWidget(hdr)
             v.addWidget(QLabel('Automated SQL injection. Runs in --batch (non-interactive). '
@@ -11123,7 +11148,7 @@ def main() -> None:
                 QPushButton:disabled { background-color: #2b2f33; color: #6b7280; }
             """)
             root = QVBoxLayout(dlg)
-            _hdr = QLabel('↻  Repeater · Intruder · Decoder')
+            _hdr = QLabel('Request lab · Repeater · Intruder · Decoder')
             _hdr.setStyleSheet('font-size:18px; font-weight:bold; color:#58a6ff;')
             root.addWidget(_hdr)
             tabs = QTabWidget()

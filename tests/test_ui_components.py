@@ -10,7 +10,7 @@ from wafpierce.ui_components import (
     style_disclosure_button,
 )
 from wafpierce.theme import PALETTE, asset_path, contrast_ratio, stylesheet
-from wafpierce.gui import PRIMARY_NAV_ITEMS, WORKBENCH_ITEMS
+from wafpierce.gui import PRIMARY_NAV_ITEMS, WORKBENCH_GROUPS, WORKBENCH_ITEMS
 
 
 class _Button:
@@ -124,3 +124,22 @@ def test_primary_navigation_tracks_the_five_step_workflow():
     ]
     assert len({key for key, _label in PRIMARY_NAV_ITEMS}) == 5
     assert len({key for _label, key in WORKBENCH_ITEMS}) == len(WORKBENCH_ITEMS)
+
+
+def test_workbench_navigation_is_grouped_and_uses_task_focused_names():
+    assert [name for name, _items in WORKBENCH_GROUPS] == [
+        'REQUEST TESTING',
+        'AUTOMATED TESTING',
+        'INTEGRATIONS',
+        'OPERATIONS',
+    ]
+    assert tuple(
+        item
+        for _name, items in WORKBENCH_GROUPS
+        for item in items
+    ) == WORKBENCH_ITEMS
+    labels = {key: label for label, key in WORKBENCH_ITEMS}
+    assert labels['repeater'] == 'Request lab'
+    assert labels['fuzzer'] == 'Content discovery'
+    assert labels['sqli'] == 'SQLi automation'
+    assert labels['tools'] == 'Tool manager'
