@@ -10,7 +10,8 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 def test_results_workspace_builds_with_evidence_actions(monkeypatch):
     from PySide6.QtWidgets import (
         QApplication, QCheckBox, QComboBox, QLabel, QLineEdit, QListWidget,
-        QPushButton, QSplitter, QTextBrowser, QTreeWidget, QTreeWidgetItem,
+        QPlainTextEdit, QPushButton, QSplitter, QTabWidget, QTextBrowser,
+        QTreeWidget, QTreeWidgetItem,
     )
     from PySide6.QtCore import Qt
 
@@ -28,6 +29,15 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
             return []
 
         def get_scan_queue(self):
+            return []
+
+        def get_custom_payloads(self):
+            return []
+
+        def get_scan_history(self, limit=100):
+            return []
+
+        def get_scheduled_scans(self):
             return []
 
         def get_dashboard_stats(self):
@@ -75,6 +85,58 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
         QApplication.processEvents()
         assert window.width() == 1400
         assert window.height() == 900
+        dropdown_image = window._workbench_combo.grab().toImage()
+        assert 'Dropdown menu' in window._workbench_combo.accessibleDescription()
+        assert window._workbench_combo.objectName() == 'WorkbenchSelector'
+        workbench_labels = {
+            window._workbench_combo.itemData(index):
+            window._workbench_combo.itemText(index)
+            for index in range(window._workbench_combo.count())
+            if window._workbench_combo.itemData(index)
+        }
+        assert workbench_labels['repeater'] == 'Request lab'
+        assert workbench_labels['fuzzer'] == 'Content discovery'
+        assert workbench_labels['sqli'] == 'SQLi automation'
+        assert workbench_labels['tools'] == 'Tool manager'
+        assert {'live', 'timeline', 'schedule'}.isdisjoint(workbench_labels)
+        assert {'live', 'timeline', 'schedule'}.isdisjoint(
+            window._page_builders()
+        )
+        group_rows = [
+            index
+            for index in range(window._workbench_combo.count())
+            if window._workbench_combo.itemText(index).startswith('— ')
+        ]
+        assert len(group_rows) == 4
+        assert all(
+            not window._workbench_combo.model().item(index).isEnabled()
+            for index in group_rows
+        )
+        dropdown_light_pixels = 0
+        for x in range(
+                max(0, dropdown_image.width() - 25),
+                max(0, dropdown_image.width() - 5)):
+            for y in range(dropdown_image.height()):
+                color = dropdown_image.pixelColor(x, y)
+                if (
+                        color.red() > 180
+                        and color.green() > 180
+                        and color.blue() > 180):
+                    dropdown_light_pixels += 1
+        assert dropdown_light_pixels >= 3
+        scan_disclosure = next(
+            button for button in window.findChildren(QPushButton)
+            if button.objectName() == 'DisclosureButton'
+            and 'Advanced scan controls' in button.text()
+        )
+        assert scan_disclosure.text().startswith('▸')
+        assert scan_disclosure.isChecked() is False
+        assert 'collapsed' in scan_disclosure.accessibleDescription()
+        scan_disclosure.click()
+        QApplication.processEvents()
+        assert scan_disclosure.text().startswith('▾')
+        assert scan_disclosure.property('expanded') == 'true'
+        assert 'expanded' in scan_disclosure.accessibleDescription()
         target_input = next(
             field for field in window.findChildren(QLineEdit)
             if field.accessibleName() == 'Target URL'
@@ -100,6 +162,16 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
         QApplication.processEvents()
 
         assert page.objectName() == 'ResultsPage'
+        analyze_tabs = page.findChild(QTabWidget, 'ResultsPageTabs')
+        assert analyze_tabs is not None
+        assert [
+            analyze_tabs.tabText(index)
+            for index in range(analyze_tabs.count())
+        ] == ['Findings', 'Live findings']
+        assert next(
+            tree for tree in page.findChildren(QTreeWidget)
+            if tree.accessibleName() == 'Live findings stream'
+        )
         buttons = {button.text(): button for button in page.findChildren(QPushButton)}
         assert {'Copy cURL', 'Copy Python', 'Send to Repeater',
                 'Re-test request', 'Save state'} <= set(buttons)
@@ -117,10 +189,8 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
         )
         assert results_splitter is not None
         assert results_splitter.count() == 3
-        tree = next(
-            tree for tree in page.findChildren(QTreeWidget)
-            if tree.columnCount() == 4
-        )
+        tree = page.findChild(QTreeWidget, 'ResultsFindingsTree')
+        assert tree is not None
         tree.setCurrentItem(tree.topLevelItem(0).child(0))
         QApplication.processEvents()
         assert buttons['Re-test request'].isEnabled()
@@ -142,6 +212,15 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
             checkbox for checkbox in recon_page.findChildren(QCheckBox)
             if checkbox.text().startswith('Active ports')
         ).isChecked() is False
+        discovery_disclosure = next(
+            button for button in recon_page.findChildren(QPushButton)
+            if button.objectName() == 'DisclosureButton'
+        )
+        assert discovery_disclosure.text().startswith('▸')
+        discovery_disclosure.click()
+        QApplication.processEvents()
+        assert discovery_disclosure.text().startswith('▾')
+        assert discovery_disclosure.property('expanded') == 'true'
         host_inventory = next(
             tree for tree in recon_page.findChildren(QTreeWidget)
             if tree.accessibleName() == 'Discovered host inventory'
@@ -180,6 +259,12 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
         report_page.resize(780, 620)
         report_page.show()
         QApplication.processEvents()
+        report_tabs = report_page.findChild(QTabWidget, 'DashboardPageTabs')
+        assert report_tabs is not None
+        assert [
+            report_tabs.tabText(index)
+            for index in range(report_tabs.count())
+        ] == ['Summary', 'Timeline']
         assert report_page.findChild(
             QSplitter, 'ReportTablesSplitter'
         ) is not None
@@ -187,7 +272,135 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
             QSplitter, 'ReportSummarySplitter'
         ) is not None
 
+        pipeline_page = window._build_pipeline_page()
+        pipeline_page.resize(900, 700)
+        pipeline_page.show()
+        QApplication.processEvents()
+        plan_tabs = pipeline_page.findChild(QTabWidget, 'PipelinePageTabs')
+        assert plan_tabs is not None
+        assert [
+            plan_tabs.tabText(index)
+            for index in range(plan_tabs.count())
+        ] == ['Run now', 'Schedule']
+
+        payload_page = window._build_payloads_page()
+        payload_page.resize(1180, 820)
+        payload_page.show()
+        QApplication.processEvents()
+        assert payload_page.objectName() == 'PayloadsPage'
+        catalog = payload_page.findChild(
+            QTreeWidget, 'PayloadCatalogTree'
+        )
+        assert catalog is not None
+        assert catalog.topLevelItemCount() >= 8
+        category_filter = payload_page.findChild(
+            QComboBox, 'PayloadCategoryFilter'
+        )
+        assert category_filter.accessibleName() == 'Payload category dropdown'
+        category_filter.setCurrentIndex(category_filter.findData('sqli'))
+        QApplication.processEvents()
+        assert catalog.topLevelItemCount() == 1
+        sql_node = catalog.topLevelItem(0)
+        family_names = {
+            sql_node.child(index).text(0)
+            for index in range(sql_node.childCount())
+        }
+        assert {'Boolean / basic 1=1', 'UNION SELECT', 'Time based'} <= family_names
+        union_node = next(
+            sql_node.child(index)
+            for index in range(sql_node.childCount())
+            if sql_node.child(index).text(0) == 'UNION SELECT'
+        )
+        catalog.setCurrentItem(union_node.child(0))
+        QApplication.processEvents()
+
+        payload_target = payload_page.findChild(
+            QLineEdit, 'PayloadTargetInput'
+        )
+        payload_target.setText('https://ctf.example.test/search')
+        QApplication.processEvents()
+        preview = payload_page.findChild(
+            QPlainTextEdit, 'PayloadRequestPreview'
+        )
+        assert 'Host: ctf.example.test' in preview.toPlainText()
+        assert 'Query parameter: q' in next(
+            label.text() for label in payload_page.findChildren(QLabel)
+            if label.objectName() == 'PayloadDestinationSummary'
+        )
+        payload_buttons = {
+            button.text(): button
+            for button in payload_page.findChildren(QPushButton)
+        }
+        assert {
+            'Copy payload',
+            'Copy cURL',
+            'Test this family in Intruder',
+            'Open exact request in Repeater',
+        } <= set(payload_buttons)
+        assert payload_buttons['Open exact request in Repeater'].isEnabled()
+        payload_buttons['Copy cURL'].click()
+        assert 'https://ctf.example.test/search' in QApplication.clipboard().text()
+        repeater_prefill = {}
+        original_repeater_load = window._repeater_load
+        window._repeater_load = lambda request: repeater_prefill.update(request)
+        payload_buttons['Open exact request in Repeater'].click()
+        assert repeater_prefill['url'].startswith(
+            'https://ctf.example.test/search?'
+        )
+        assert repeater_prefill['method'] == 'GET'
+        window._repeater_load = original_repeater_load
+
+        intruder_handoff = {}
+        original_intruder_load = window._intruder_load
+        window._intruder_load = lambda config, payloads, label: intruder_handoff.update({
+            'config': config,
+            'payloads': payloads,
+            'label': label,
+        })
+        payload_buttons['Test this family in Intruder'].click()
+        assert intruder_handoff['config']['location'] == 'query'
+        assert intruder_handoff['label'].endswith('UNION SELECT')
+        assert len(intruder_handoff['payloads']) >= 3
+        assert all(
+            'UNION SELECT' in payload
+            for payload in intruder_handoff['payloads']
+        )
+        window._intruder_load = original_intruder_load
+
+        repeater_page = window._build_repeater_page()
+        repeater_page.resize(1050, 760)
+        repeater_page.show()
+        QApplication.processEvents()
+        intruder_sets = repeater_page.findChild(
+            QComboBox, 'IntruderPayloadSetCombo'
+        )
+        set_names = {
+            intruder_sets.itemText(index)
+            for index in range(intruder_sets.count())
+        }
+        assert {
+            'SQL injection',
+            'Cross-site scripting',
+            'Encoding / filter normalization',
+        } <= set_names
+        window._intruder_apply(
+            intruder_handoff['config'],
+            intruder_handoff['payloads'],
+            intruder_handoff['label'],
+        )
+        QApplication.processEvents()
+        assert 'q=FUZZ' in repeater_page.findChild(
+            QLineEdit, 'IntruderUrlInput'
+        ).text()
+        assert 'Exact workbench placement is active' in next(
+            label.text() for label in repeater_page.findChildren(QLabel)
+            if label.objectName() == 'IntruderStatus'
+        )
+
         inspected['ok'] = True
+        repeater_page.close()
+        payload_page.close()
+        pipeline_page.close()
         report_page.close()
         recon_page.close()
         page.close()

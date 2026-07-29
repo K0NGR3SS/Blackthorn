@@ -382,7 +382,13 @@ GUI functionality includes:
 - Dashboard statistics, scan comparison, historical timeline, and live logs.
 - Built-in intercepting proxy, local CA management, traffic history, and Repeater.
 - Browser workspace and ZAP/Burp handoff.
-- Fuzzer, SQLi helper, secrets workflow, payload management, and custom payload packs.
+- Payload Workbench with searchable category/family variants, expected-signal
+  guidance, explicit query/path/form/JSON/header/cookie/body placement, encoding,
+  exact HTTP/cURL preview, and Repeater handoff.
+- Catalog-backed Intruder sets and one-click family testing, including separate
+  SQLi syntax, boolean/basic `1=1`, authentication, UNION, error, and timing
+  families plus custom payload packs.
+- Fuzzer, SQLi automation helper, and secrets workflow.
 - External-tool detection, execution, output streaming, and normalized findings.
 - Engagement management, scheduled scans, scan-profile import/export, plugins, and persistent settings.
 

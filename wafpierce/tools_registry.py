@@ -71,6 +71,7 @@ class ToolSpec:
     needs_wordlist: bool = False
     default_dirs: Tuple[str, ...] = ()
     notes: str = ''
+    guided_workbench: str = ''
 
     def display_category(self) -> str:
         return TOOL_CATEGORIES.get(self.category, self.category)
@@ -149,19 +150,22 @@ _SPECS = [
           argv_template=('-u', '{url}/FUZZ', '-w', '{wordlist}', '-of', 'json', '-o', '{outfile}', '-s'),
           json_mode='file_json', parser='parse_ffuf_json',
           install_hint='go install github.com/ffuf/ffuf/v2@latest',
-          homepage='https://github.com/ffuf/ffuf'),
+          homepage='https://github.com/ffuf/ffuf',
+          guided_workbench='fuzzer'),
     _spec(key='feroxbuster', name='feroxbuster', category='content', binaries=('feroxbuster',),
           target_kind='url', version_args=('--version',), needs_wordlist=True,
           argv_template=('-u', '{url}', '-w', '{wordlist}', '--json', '-o', '{outfile}', '--silent'),
           json_mode='file_jsonl', parser='parse_ferox_jsonl',
           install_hint='Install feroxbuster from https://github.com/epi052/feroxbuster',
-          homepage='https://github.com/epi052/feroxbuster'),
+          homepage='https://github.com/epi052/feroxbuster',
+          guided_workbench='fuzzer'),
     _spec(key='gobuster', name='gobuster', category='content', binaries=('gobuster',),
           target_kind='url', version_args=('version',), needs_wordlist=True,
           argv_template=('dir', '-u', '{url}', '-w', '{wordlist}', '-q', '--no-color'),
           json_mode='lines', parser='parse_gobuster_lines',
           install_hint='go install github.com/OJ/gobuster/v3@latest',
-          homepage='https://github.com/OJ/gobuster'),
+          homepage='https://github.com/OJ/gobuster',
+          guided_workbench='fuzzer'),
     _spec(key='dirsearch', name='dirsearch', category='content', binaries=('dirsearch',),
           target_kind='url', version_args=('--version',), needs_wordlist=False,
           argv_template=('-u', '{url}', '--format=json', '-o', '{outfile}', '-q'),
@@ -205,7 +209,15 @@ _SPECS = [
           argv_template=('-u', '{url}', '--batch', '--output-dir', '{outdir}', '--flush-session'),
           json_mode='lines', parser='parse_sqlmap_lines',
           install_hint='pipx install sqlmap  (or git clone sqlmapproject/sqlmap).',
-          homepage='https://sqlmap.org', default_severity='INFO'),
+          homepage='https://sqlmap.org', default_severity='INFO',
+          guided_workbench='sqli'),
+    _spec(key='ghauri', name='Ghauri', category='vuln', binaries=('ghauri',),
+          target_kind='url', version_args=('--version',),
+          argv_template=('-u', '{url}', '--batch'),
+          json_mode='lines', parser='parse_sqlmap_lines',
+          install_hint='pipx install ghauri',
+          homepage='https://github.com/r0oth3x49/ghauri',
+          default_severity='INFO', guided_workbench='sqli'),
 
     # ---- Cloud & secrets -------------------------------------------------- #
     _spec(key='trufflehog', name='TruffleHog', category='cloud', binaries=('trufflehog',),
@@ -213,14 +225,16 @@ _SPECS = [
           argv_template=('--json', '--no-update', 'git', '{url}'),
           json_mode='stdout_jsonl', parser='parse_trufflehog_jsonl',
           install_hint='Install trufflehog from https://github.com/trufflesecurity/trufflehog',
-          homepage='https://github.com/trufflesecurity/trufflehog'),
+          homepage='https://github.com/trufflesecurity/trufflehog',
+          guided_workbench='secrets'),
     _spec(key='gitleaks', name='gitleaks', category='cloud', binaries=('gitleaks',),
           target_kind='path', version_args=('version',),
           argv_template=('detect', '--report-format', 'json', '--report-path', '{outfile}',
                          '--no-banner', '--source', '{target}'),
           json_mode='file_json', parser='parse_gitleaks_json',
           install_hint='go install github.com/gitleaks/gitleaks/v8@latest',
-          homepage='https://github.com/gitleaks/gitleaks'),
+          homepage='https://github.com/gitleaks/gitleaks',
+          guided_workbench='secrets'),
     _spec(key='scoutsuite', name='ScoutSuite', category='cloud', binaries=('scout',),
           target_kind='host', version_args=('--version',),
           argv_template=('--no-browser',),
@@ -233,6 +247,15 @@ _SPECS = [
           json_mode='lines', parser='generic_lines',
           install_hint='pipx install prowler  (cloud creds configured separately).',
           homepage='https://github.com/prowler-cloud/prowler', long_running=True),
+
+    # ---- Exploitation ----------------------------------------------------- #
+    _spec(key='commix', name='Commix', category='exploit',
+          binaries=('commix', 'commix.py'), target_kind='url',
+          version_args=('--version',),
+          argv_template=('-u', '{url}', '--batch'),
+          json_mode='lines', parser='generic_lines',
+          install_hint='pipx install commix',
+          homepage='https://github.com/commixproject/commix'),
 ]
 
 TOOL_REGISTRY: Dict[str, ToolSpec] = {s.key: s for s in _SPECS}

@@ -35,7 +35,11 @@ from .branding import (
     asset_path,
 )
 from .exporters import is_confirmed_result as _is_confirmed_result, result_state as _result_state
-from .ui_components import style_button
+from .ui_components import (
+    set_disclosure_state,
+    style_button,
+    style_disclosure_button,
+)
 
 LOGO_PATH = asset_path(TRANSPARENT_LOGO)
 SIDEBAR_LOGO_PATH = asset_path(DARK_LOGO)
@@ -49,22 +53,32 @@ PRIMARY_NAV_ITEMS = (
     ('dashboard', 'Report'),
 )
 
-WORKBENCH_ITEMS = (
-    ('External tools', 'tools'),
-    ('Browser', 'browser'),
-    ('Proxy', 'proxy'),
-    ('Repeater', 'repeater'),
-    ('Fuzzer', 'fuzzer'),
-    ('SQL injection', 'sqli'),
-    ('Secrets', 'secrets'),
-    ('Payload library', 'payloads'),
-    ('ZAP / Burp', 'zapburp'),
-    ('AD / Internal', 'adint'),
-    ('AI assistance', 'ai'),
-    ('Live logs', 'live'),
-    ('Timeline', 'timeline'),
-    ('Schedule', 'schedule'),
-    ('Plugins', 'plugins'),
+WORKBENCH_GROUPS = (
+    ('REQUEST TESTING', (
+        ('Browser', 'browser'),
+        ('Proxy', 'proxy'),
+        ('Request lab', 'repeater'),
+        ('Payload library', 'payloads'),
+    )),
+    ('AUTOMATED TESTING', (
+        ('Content discovery', 'fuzzer'),
+        ('SQLi automation', 'sqli'),
+        ('Secret scanning', 'secrets'),
+    )),
+    ('INTEGRATIONS', (
+        ('ZAP / Burp', 'zapburp'),
+        ('AD / Internal', 'adint'),
+        ('AI assistance', 'ai'),
+    )),
+    ('OPERATIONS', (
+        ('Tool manager', 'tools'),
+        ('Plugins', 'plugins'),
+    )),
+)
+WORKBENCH_ITEMS = tuple(
+    item
+    for _group, items in WORKBENCH_GROUPS
+    for item in items
 )
 
 # Use shared config and secret-storage modules.
@@ -2687,7 +2701,13 @@ def main() -> None:
                 QShortcut(QKeySequence('F5'), self, self.start_scan)
                 
                 # Ctrl+L - Timeline
-                QShortcut(QKeySequence('Ctrl+L'), self, lambda: self._navigate('timeline'))
+                QShortcut(
+                    QKeySequence('Ctrl+L'),
+                    self,
+                    lambda: self._navigate_workflow_tab(
+                        'dashboard', 'DashboardPageTabs', 1
+                    ),
+                )
 
                 # Ctrl+M - Plugin Manager
                 QShortcut(QKeySequence('Ctrl+M'), self, lambda: self._navigate('plugins'))
@@ -2887,10 +2907,23 @@ def main() -> None:
             section.setObjectName('NavSection')
             nav_lay.addWidget(section)
             workbench = QtWidgets.QComboBox()
+            workbench.setObjectName('WorkbenchSelector')
             workbench.setAccessibleName('Open a specialist workbench')
-            workbench.addItem('Open a tool…', None)
-            for label, key in WORKBENCH_ITEMS:
-                workbench.addItem(label, key)
+            workbench.setAccessibleDescription(
+                'Dropdown menu grouped by specialist workflow.'
+            )
+            workbench.setToolTip('Dropdown menu — choose a specialist workflow')
+            workbench.addItem('Choose a workbench…', None)
+            for group, items in WORKBENCH_GROUPS:
+                workbench.addItem(f'— {group} —', None)
+                group_item = workbench.model().item(workbench.count() - 1)
+                if group_item is not None:
+                    group_item.setEnabled(False)
+                    group_font = group_item.font()
+                    group_font.setBold(True)
+                    group_item.setFont(group_font)
+                for label, key in items:
+                    workbench.addItem(label, key)
 
             def open_workbench(index):
                 key = workbench.itemData(index)
@@ -3277,8 +3310,8 @@ def main() -> None:
             so any section without one falls back to its legacy dialog. This lets
             sections migrate to in-place pages one at a time without breakage."""
             keys = ['pipeline', 'recon', 'browser', 'fuzzer', 'secrets', 'sqli',
-                    'repeater', 'payloads', 'plugins', 'schedule', 'timeline',
-                    'dashboard', 'results', 'live', 'settings', 'ai',
+                    'repeater', 'payloads', 'plugins',
+                    'dashboard', 'results', 'settings', 'ai',
                     'tools', 'zapburp', 'adint', 'proxy', 'engagements']
             out = {}
             for k in keys:
@@ -3286,6 +3319,29 @@ def main() -> None:
                 if callable(fn):
                     out[k] = fn
             return out
+
+        def _tabbed_workflow_page(
+            self, object_name, accessible_name, entries
+        ):
+            """Compose existing workflow surfaces into one discoverable page."""
+            page = QWidget()
+            page.setObjectName(object_name)
+            layout = QVBoxLayout(page)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(0)
+            tabs = QtWidgets.QTabWidget()
+            tabs.setObjectName(f'{object_name}Tabs')
+            tabs.setAccessibleName(accessible_name)
+            tabs.setDocumentMode(True)
+            for label, child in entries:
+                if child is None:
+                    child = QWidget()
+                    empty_layout = QVBoxLayout(child)
+                    empty_layout.addWidget(QLabel(f'{label} is unavailable.'))
+                    empty_layout.addStretch()
+                tabs.addTab(child, label)
+            layout.addWidget(tabs)
+            return page
 
         def _legacy_actions(self):
             """Fallback dialog openers for any section without a page builder.
@@ -3318,8 +3374,10 @@ def main() -> None:
             # Data-driven sections rebuild fresh each visit so they never show
             # stale content; stateful sections (a running recon process, the live
             # feed, an in-progress repeater request, the settings form) persist.
-            dynamic = {'dashboard', 'results', 'timeline', 'plugins',
-                       'schedule', 'payloads', 'engagements', 'ai'}
+            dynamic = {
+                'dashboard', 'results', 'plugins',
+                'payloads', 'engagements', 'ai',
+            }
             page = self._pages.get(key)
             if page is not None and key in dynamic:
                 try:
@@ -3352,6 +3410,16 @@ def main() -> None:
                 fn = self._legacy_actions().get(key)
                 if fn is not None:
                     fn()
+
+        def _navigate_workflow_tab(self, page_key, tabs_name, index):
+            """Open a primary workflow page and focus one of its embedded tabs."""
+            self._navigate(page_key)
+            holder = self._pages.get(page_key)
+            if holder is None:
+                return
+            tabs = holder.findChild(QtWidgets.QTabWidget, tabs_name)
+            if tabs is not None and 0 <= index < tabs.count():
+                tabs.setCurrentIndex(index)
 
         def _wrap_scroll(self, widget):
             """Wrap a page in a frameless, resizable scroll area so content that is
@@ -3416,6 +3484,9 @@ def main() -> None:
             top.addWidget(engagement_lbl)
             self._engagement_combo = QtWidgets.QComboBox()
             self._engagement_combo.setAccessibleName('Active engagement')
+            self._engagement_combo.setAccessibleDescription(
+                'Dropdown menu for choosing the active engagement.'
+            )
             self._refresh_engagement_combo()
             top.addWidget(self._engagement_combo, 1)
             manage_btn = style_button(
@@ -3434,7 +3505,7 @@ def main() -> None:
             self._scan_profile_combo = QtWidgets.QComboBox()
             self._scan_profile_combo.setAccessibleName('Scan profile')
             self._scan_profile_combo.setAccessibleDescription(
-                'Task-based selection of scanner categories and safety defaults'
+                'Dropdown menu for task-based scanner categories and safety defaults'
             )
             for key, definition in SCAN_PROFILE_DEFINITIONS.items():
                 self._scan_profile_combo.addItem(definition['label'], key)
@@ -3452,14 +3523,21 @@ def main() -> None:
             self._scan_profile_summary.setObjectName('FieldLabel')
             layout.addWidget(self._scan_profile_summary)
 
-            advanced_group = QtWidgets.QGroupBox('Advanced controls')
-            advanced_group.setAccessibleName('Advanced scan controls')
-            advanced_group.setCheckable(True)
-            advanced_group.setChecked(False)
+            advanced_group = QWidget()
+            advanced_group.setObjectName('ScanAdvancedSection')
             advanced_layout = QtWidgets.QVBoxLayout(advanced_group)
-            advanced_body = QWidget()
+            advanced_layout.setContentsMargins(0, 0, 0, 0)
+            advanced_layout.setSpacing(6)
+            advanced_toggle = style_disclosure_button(
+                QPushButton(), 'Advanced scan controls', expanded=False
+            )
+            advanced_toggle.setProperty('sectionKey', 'scan-advanced')
+            advanced_layout.addWidget(advanced_toggle)
+            advanced_body = QtWidgets.QFrame()
+            advanced_body.setObjectName('ExpandablePanel')
+            advanced_body.setAccessibleName('Advanced scan controls')
             advanced_body_layout = QtWidgets.QVBoxLayout(advanced_body)
-            advanced_body_layout.setContentsMargins(0, 4, 0, 0)
+            advanced_body_layout.setContentsMargins(12, 10, 12, 12)
             advanced_body_layout.setSpacing(10)
 
             auth = QtWidgets.QGridLayout()
@@ -3551,7 +3629,16 @@ def main() -> None:
             advanced_body_layout.addLayout(cats)
             advanced_layout.addWidget(advanced_body)
             advanced_body.setVisible(False)
-            advanced_group.toggled.connect(advanced_body.setVisible)
+
+            def toggle_advanced_controls(expanded):
+                advanced_body.setVisible(bool(expanded))
+                set_disclosure_state(
+                    advanced_toggle,
+                    'Advanced scan controls',
+                    bool(expanded),
+                )
+
+            advanced_toggle.toggled.connect(toggle_advanced_controls)
             layout.addWidget(advanced_group)
 
             self._preflight_summary = QLabel()
@@ -4892,27 +4979,34 @@ def main() -> None:
             return len(findings)
 
         def _build_tools_page(self):
-            """External pentest tools (detect-&-drive): list installed tools by
+            """Tool manager (detect-&-drive): list installed tools by
             category with status badges, run a selected one as a killable subprocess,
             and fold its findings into the Results Explorer. Absent tools show an
             install hint and are never auto-installed."""
             try:
-                from .tools_registry import TOOL_CATEGORIES, tools_by_category
+                from .tools_registry import (
+                    TOOL_CATEGORIES,
+                    get_spec,
+                    tools_by_category,
+                )
                 from .tools_runtime import detect_all
             except Exception as e:
                 QMessageBox.critical(self, 'Tools', f'Tool registry unavailable: {e}')
                 return
 
             dlg = QtWidgets.QWidget()
-            dlg.setWindowTitle('External Tools')
+            dlg.setWindowTitle('Tool manager')
             dlg.resize(940, 660)
             outer = QVBoxLayout(dlg)
 
-            title = QLabel('External tools')
+            title = QLabel('Tool manager')
             title.setObjectName('PageTitle')
             outer.addWidget(title)
-            banner = QLabel('Detect-and-drive: Blackthorn runs tools already installed on this machine. '
-                            'Nothing is installed for you. Authorized targets only.')
+            banner = QLabel(
+                'Detect, configure, and quick-run tools already installed on '
+                'this machine. Nothing is installed automatically. '
+                'Authorized targets only.'
+            )
             banner.setWordWrap(True)
             outer.addWidget(banner)
 
@@ -4949,7 +5043,7 @@ def main() -> None:
 
             act = QHBoxLayout()
             run_btn = style_button(
-                QPushButton(), 'primary', text='Run selected tool'
+                QPushButton(), 'primary', text='Quick run selected tool'
             )
             stop_btn = style_button(
                 QPushButton(), 'danger', text='Stop tool'
@@ -5015,6 +5109,59 @@ def main() -> None:
                 it = tree.currentItem()
                 return it.data(0, 256) if it else None
 
+            def selected_spec():
+                key = selected_key()
+                try:
+                    return get_spec(key) if key else None
+                except Exception:
+                    return None
+
+            def update_primary_action():
+                spec = selected_spec()
+                if spec and spec.guided_workbench:
+                    labels = {
+                        'fuzzer': 'content discovery',
+                        'sqli': 'SQLi automation',
+                        'secrets': 'secret scanning',
+                    }
+                    destination = labels.get(
+                        spec.guided_workbench, 'guided workflow'
+                    )
+                    run_btn.setText(f'Open {destination}')
+                    run_btn.setToolTip(
+                        f'Use the guided {destination} preset for {spec.name}'
+                    )
+                else:
+                    run_btn.setText('Quick run selected tool')
+                    run_btn.setToolTip(
+                        'Run this registry tool with its default safe arguments'
+                    )
+
+            def open_guided_workbench(spec):
+                target = target_edit.text().strip()
+                if target:
+                    try:
+                        self.target_edit.setText(target)
+                    except Exception:
+                        pass
+                self._navigate(spec.guided_workbench)
+                holder = self._pages.get(spec.guided_workbench)
+                if not holder or not target:
+                    return
+                field_names = {
+                    'fuzzer': 'ContentDiscoveryTargetInput',
+                    'sqli': 'SqliTargetInput',
+                    'secrets': 'SecretsTargetInput',
+                }
+                field = holder.findChild(
+                    QLineEdit, field_names.get(spec.guided_workbench, '')
+                )
+                if field is None:
+                    return
+                if spec.guided_workbench == 'fuzzer' and 'FUZZ' not in target:
+                    target = target.rstrip('/') + '/FUZZ'
+                field.setText(target)
+
             def active_engagement():
                 engagement_id = (
                     getattr(self, '_current_engagement_id', None)
@@ -5034,6 +5181,10 @@ def main() -> None:
                 key = selected_key()
                 if not key:
                     QMessageBox.information(dlg, 'Tools', 'Select a tool row first.')
+                    return
+                spec = selected_spec()
+                if spec and spec.guided_workbench:
+                    open_guided_workbench(spec)
                     return
                 tgt = target_edit.text().strip()
                 if not tgt:
@@ -5107,7 +5258,9 @@ def main() -> None:
             cfg_btn.clicked.connect(configure)
             results_btn.clicked.connect(self.show_results_summary)
             tree.itemDoubleClicked.connect(lambda *_: run_selected())
+            tree.itemSelectionChanged.connect(update_primary_action)
             populate()
+            update_primary_action()
             return dlg
 
         def _configure_tool_dialog(self, tool_key, on_saved=None):
@@ -5186,6 +5339,7 @@ def main() -> None:
                 QDialog { background-color: #0f1112; }
                 QLabel { color: #d7e1ea; }
                 QLineEdit, QComboBox, QListWidget { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; border-radius: 4px; padding: 5px; }
+                QComboBox { padding-right: 40px; }
                 QListWidget::item:selected { background-color: #3b82f6; }
                 QPushButton { background-color: #2b2f33; color: #d7e1ea; border: none; padding: 7px 12px; border-radius: 4px; }
                 QPushButton:hover { background-color: #3b3f43; }
@@ -5264,6 +5418,7 @@ def main() -> None:
                 d = QtWidgets.QDialog(dlg); d.setWindowTitle(f"Configure {STAGE_TYPES.get(t, t)}"); d.resize(480, 220)
                 d.setStyleSheet('QDialog{background:#0f1112;} QLabel{color:#d7e1ea;} '
                                 'QLineEdit,QComboBox{background:#16181a;color:#d7e1ea;border:1px solid #2b2f33;padding:5px;} '
+                                'QComboBox{padding-right:40px;} '
                                 'QPushButton{background:#2b2f33;color:#d7e1ea;padding:6px 12px;border-radius:4px;}')
                 v = QVBoxLayout(d); w = {}
                 if t == 'wafpierce_scan':
@@ -5503,6 +5658,7 @@ def main() -> None:
                 QDialog { background-color: #0f1112; }
                 QLabel { color: #d7e1ea; }
                 QLineEdit, QComboBox, QPlainTextEdit { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; border-radius: 4px; padding: 5px; }
+                QComboBox { padding-right: 40px; }
                 QTreeWidget { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; }
                 QTreeWidget::item:selected { background-color: #3b82f6; }
                 QTabWidget::pane { border: 1px solid #2b2f33; }
@@ -5809,6 +5965,7 @@ def main() -> None:
                 QGroupBox { color:#d7e1ea; border:1px solid #2b2f33; margin-top:10px; padding-top:10px; }
                 QGroupBox::title { subcontrol-origin: margin; left:10px; padding:0 5px; }
                 QLineEdit, QComboBox { background:#16181a; color:#d7e1ea; border:1px solid #2b2f33; border-radius:4px; padding:5px; }
+                QComboBox { padding-right: 40px; }
                 QCheckBox { color:#d7e1ea; }
                 QPushButton { background:#2b2f33; color:#d7e1ea; border:none; padding:7px 12px; border-radius:4px; }
                 QPushButton:hover { background:#3b3f43; }
@@ -5946,6 +6103,7 @@ def main() -> None:
                 QDialog { background-color: #0f1112; }
                 QLabel { color:#d7e1ea; }
                 QLineEdit, QComboBox, QPlainTextEdit { background:#16181a; color:#d7e1ea; border:1px solid #2b2f33; border-radius:4px; padding:5px; }
+                QComboBox { padding-right: 40px; }
                 QTreeWidget { background:#16181a; color:#d7e1ea; border:1px solid #2b2f33; }
                 QTabWidget::pane { border:1px solid #2b2f33; }
                 QTabBar::tab { background:#16181a; color:#d7e1ea; padding:7px 14px; }
@@ -6514,23 +6672,27 @@ def main() -> None:
             )
             coverage_note.setObjectName('FieldLabel')
             coverage_note.setWordWrap(True)
-            coverage_toggle = style_button(
-                QPushButton(), 'quiet', text='Customize stages'
+            coverage_toggle = style_disclosure_button(
+                QPushButton(),
+                'Customize discovery stages',
+                expanded=False,
             )
+            coverage_toggle.setProperty('sectionKey', 'discovery-stages')
             coverage_row.addWidget(coverage_note, 1)
             coverage_row.addWidget(coverage_toggle)
             lay.addLayout(coverage_row)
             stages_box.setVisible(False)
             lay.addWidget(stages_box)
 
-            def _toggle_coverage():
-                visible = not stages_box.isVisible()
-                stages_box.setVisible(visible)
-                coverage_toggle.setText(
-                    'Hide stage settings' if visible else 'Customize stages'
+            def _toggle_coverage(expanded):
+                stages_box.setVisible(bool(expanded))
+                set_disclosure_state(
+                    coverage_toggle,
+                    'Customize discovery stages',
+                    bool(expanded),
                 )
 
-            coverage_toggle.clicked.connect(_toggle_coverage)
+            coverage_toggle.toggled.connect(_toggle_coverage)
 
             def _collect_opts():
                 return {
@@ -8252,6 +8414,37 @@ def main() -> None:
             self._browser_script_obj = locals().get('script')
             return page
 
+        def _tool_manager_config(self, tool_key):
+            """Return the launch settings shared by Tool Manager and presets."""
+            if not self._db:
+                return {}
+            try:
+                return self._db.get_tool_config(tool_key) or {}
+            except Exception:
+                return {}
+
+        def _configured_tool_status(self, tool_key):
+            """Resolve a tool using the same custom path shown in Tool Manager."""
+            from .tools_registry import get_spec
+            from .tools_runtime import detect
+
+            config = self._tool_manager_config(tool_key)
+            return detect(get_spec(tool_key), config.get('custom_path'))
+
+        def _configured_tool_command(
+            self, tool_key, cmd, *, executable_index=0
+        ):
+            """Apply Tool Manager binary/argument settings to a guided command."""
+            from .tools_runtime import configured_command
+
+            config = self._tool_manager_config(tool_key)
+            return configured_command(
+                cmd,
+                custom_path=config.get('custom_path'),
+                extra_args=config.get('extra_args'),
+                executable_index=executable_index,
+            )
+
         def _spawn_tool(self, page, cmd, on_stdout, on_finished, env_extra=None):
             """Run an external tool as a QProcess (merged stdout/stderr), streaming
             to on_stdout and calling on_finished(code) at the end. The proc is kept
@@ -8278,7 +8471,7 @@ def main() -> None:
                 pass
             return proc
 
-        def _build_pipeline_page(self):
+        def _build_pipeline_runner(self):
             """One-click chained pentest: Recon → content discovery → vuln scan →
             offensive (exploit-tag nuclei + commix), each phase auto-feeding the
             next. Offensive phases are gated and target only what you enter."""
@@ -8292,7 +8485,7 @@ def main() -> None:
             import os as _os
             import tempfile
 
-            page = QtWidgets.QWidget(); page.setObjectName('PipelinePage')
+            page = QtWidgets.QWidget(); page.setObjectName('PipelineRunnerPage')
             v = QVBoxLayout(page); v.setContentsMargins(22, 20, 22, 20)
             hdr = QLabel('Test pipeline')
             hdr.setObjectName('PageTitle')
@@ -8423,15 +8616,19 @@ def main() -> None:
                 _log(f'  → {len(ctx["live_urls"])} live URL(s), {len(ctx["param_urls"])} parameterized URL(s)')
 
             def _mk_ffuf():
-                import shutil
-                if not shutil.which('ffuf'):
-                    _log('  (ffuf not installed — skipping)'); return None, None
+                tool_status = self._configured_tool_status('ffuf')
+                if not tool_status.found:
+                    _log(
+                        f'  ({tool_status.error or "ffuf not available"} — skipping)'
+                    )
+                    return None, None
                 from . import recon_install
                 root = (ctx.get('live_urls') or ['https://' + _norm(target_edit.text())])[0].rstrip('/')
                 wl = recon_install.ensure_builtin_wordlist()
                 tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.json'); tmp.close()
                 ctx['tmp_ffuf'] = tmp.name; ctx.setdefault('tmps', []).append(tmp.name)
-                cmd = ['ffuf', '-w', wl, '-u', root + '/FUZZ', '-mc', '200,204,301,302,307,401,403',
+                cmd = [tool_status.path, '-w', wl, '-u', root + '/FUZZ',
+                       '-mc', '200,204,301,302,307,401,403',
                        '-t', '40', '-ac', '-of', 'json', '-o', tmp.name, '-s', '-noninteractive']
                 return cmd, None
 
@@ -8449,15 +8646,18 @@ def main() -> None:
                 _log(f'  → {n} path(s)')
 
             def _mk_nuclei():
-                import shutil
-                if not shutil.which('nuclei'):
-                    _log('  (nuclei not installed — skipping)'); return None, None
+                tool_status = self._configured_tool_status('nuclei')
+                if not tool_status.found:
+                    _log(
+                        f'  ({tool_status.error or "nuclei not available"} — skipping)'
+                    )
+                    return None, None
                 urls = ctx.get('live_urls') or []
                 if not urls:
                     return None, None
                 lf = tempfile.NamedTemporaryFile('w', delete=False, suffix='.txt', encoding='utf-8')
                 lf.write('\n'.join(urls)); lf.close(); ctx.setdefault('tmps', []).append(lf.name)
-                cmd = ['nuclei', '-l', lf.name, '-jsonl', '-silent',
+                cmd = [tool_status.path, '-l', lf.name, '-jsonl', '-silent',
                        '-severity', 'low,medium,high,critical']
                 if offensive_chk.isChecked():
                     cmd += ['-tags', 'cve,rce,sqli,lfi,ssrf,xxe,injection,exposure']
@@ -8484,12 +8684,19 @@ def main() -> None:
 
             def _mk_commix():
                 from . import recon_install
-                if not recon_install.is_installed('commix'):
-                    _log('  (commix not installed — skipping)'); return None, None
+                tool_status = self._configured_tool_status('commix')
+                if tool_status.found:
+                    pre, env = [tool_status.path], None
+                elif recon_install.is_installed('commix'):
+                    pre, env = recon_install.python_tool_cmd('commix')
+                else:
+                    _log(
+                        f'  ({tool_status.error or "commix not available"} — skipping)'
+                    )
+                    return None, None
                 params = ctx.get('param_urls') or []
                 if not params:
                     _log('  (no parameterized URLs to test)'); return None, None
-                pre, env = recon_install.python_tool_cmd('commix')
                 outdir = tempfile.mkdtemp(prefix='wp_commix_')
                 ctx['commix_url'] = params[0]
                 cmd = list(pre) + ['-u', params[0], '--batch', f'--output-dir={outdir}']
@@ -8506,10 +8713,21 @@ def main() -> None:
                     _log('  → no command injection confirmed')
 
             PHASES = {
-                'recon': {'name': 'Recon', 'make': _mk_recon, 'done': _done_recon},
-                'ffuf': {'name': 'Content discovery (ffuf)', 'make': _mk_ffuf, 'done': _done_ffuf},
-                'nuclei': {'name': 'Vuln scan (nuclei)', 'make': _mk_nuclei, 'done': _done_nuclei},
-                'commix': {'name': 'Command injection (commix)', 'make': _mk_commix, 'done': _done_commix},
+                'recon': {
+                    'name': 'Recon', 'make': _mk_recon, 'done': _done_recon,
+                },
+                'ffuf': {
+                    'name': 'Content discovery (ffuf)', 'tool': 'ffuf',
+                    'make': _mk_ffuf, 'done': _done_ffuf,
+                },
+                'nuclei': {
+                    'name': 'Vuln scan (nuclei)', 'tool': 'nuclei',
+                    'make': _mk_nuclei, 'done': _done_nuclei,
+                },
+                'commix': {
+                    'name': 'Command injection (commix)', 'tool': 'commix',
+                    'make': _mk_commix, 'done': _done_commix,
+                },
             }
 
             # ---------- runner ----------
@@ -8537,6 +8755,15 @@ def main() -> None:
                     _log(f'[!] {phase["name"]}: {e}'); pstate['i'] += 1; _next(); return
                 if not cmd:
                     pstate['i'] += 1; _next(); return
+                tool_key = phase.get('tool')
+                if tool_key:
+                    try:
+                        cmd = self._configured_tool_command(tool_key, cmd)
+                    except ValueError as exc:
+                        _log(f'[!] {phase["name"]}: {exc}')
+                        pstate['i'] += 1
+                        _next()
+                        return
                 _log(f'\n══ {phase["name"]} ══\n$ ' + ' '.join(str(c) for c in cmd) + '\n')
                 pstate['buf'] = ''
 
@@ -8606,6 +8833,28 @@ def main() -> None:
             merge_btn.clicked.connect(_merge)
             return page
 
+        def _build_pipeline_page(self):
+            """Test plan with immediate pipeline and scheduled-run tabs."""
+            page = self._tabbed_workflow_page(
+                'PipelinePage',
+                'Test plan workflows',
+                (
+                    ('Run now', self._build_pipeline_runner()),
+                    ('Schedule', self._build_schedule_page(embedded=True)),
+                ),
+            )
+            tabs = page.findChild(QtWidgets.QTabWidget, 'PipelinePageTabs')
+
+            def refresh_schedule(index):
+                if index == 1:
+                    refresh = getattr(self, '_schedule_refresh', None)
+                    if callable(refresh):
+                        refresh()
+
+            if tabs is not None:
+                tabs.currentChanged.connect(refresh_schedule)
+            return page
+
         def _build_fuzzer_page(self):
             """ffuf content discovery — dir/file/vhost/parameter fuzzing via FUZZ."""
             from PySide6 import QtWidgets
@@ -8613,7 +8862,6 @@ def main() -> None:
                 QPushButton, QPlainTextEdit, QSpinBox, QCheckBox, QComboBox, QTableWidget,
                 QTableWidgetItem, QSplitter, QHeaderView, QAbstractItemView, QFileDialog)
             from PySide6.QtCore import Qt
-            import shutil
             import tempfile
             import json as _json
             import os as _os
@@ -8621,14 +8869,16 @@ def main() -> None:
 
             page = QtWidgets.QWidget(); page.setObjectName('FuzzerPage')
             v = QVBoxLayout(page); v.setContentsMargins(22, 20, 22, 20)
-            hdr = QLabel('⌗  Fuzzer — ffuf content discovery')
+            hdr = QLabel('Content discovery · ffuf / feroxbuster / gobuster')
             hdr.setStyleSheet('font-size:18px; font-weight:bold; color:#58a6ff;')
             v.addWidget(hdr)
             v.addWidget(QLabel('Put the FUZZ marker in the URL (or a header). '
                                'e.g.  https://target/FUZZ   ·   https://target/api?FUZZ=1   ·   Host: FUZZ.target.com'))
 
             row = QHBoxLayout(); row.addWidget(QLabel('URL:'))
-            url_edit = QLineEdit(); url_edit.setPlaceholderText('https://target/FUZZ')
+            url_edit = QLineEdit()
+            url_edit.setObjectName('ContentDiscoveryTargetInput')
+            url_edit.setPlaceholderText('https://target/FUZZ')
             try:
                 t = self.target_edit.text().strip()
                 if t:
@@ -8765,10 +9015,13 @@ def main() -> None:
             def _run():
                 from . import recon_install
                 eng = engine_combo.currentText(); st['engine'] = eng
-                if not shutil.which(eng):
+                tool_status = self._configured_tool_status(eng)
+                if not tool_status.found:
                     self._download_tools_dialog([eng], f'{eng} is the selected fuzzing engine.',
                                                 title=f'Install {eng}')
-                    if not shutil.which(eng):
+                    tool_status = self._configured_tool_status(eng)
+                    if not tool_status.found:
+                        _ap(f'[!] {tool_status.error or f"{eng} is not available."}')
                         return
                 u = url_edit.text().strip()
                 wl = wl_edit.text().strip() or recon_install.ensure_builtin_wordlist()
@@ -8785,7 +9038,7 @@ def main() -> None:
                         return
                     tmpf = tempfile.NamedTemporaryFile(delete=False, suffix='.json'); tmpf.close()
                     st['tmp'] = tmpf.name
-                    cmd = ['ffuf', '-w', wl, '-u', u, '-mc', mc, '-t', th,
+                    cmd = [tool_status.path, '-w', wl, '-u', u, '-mc', mc, '-t', th,
                            '-of', 'json', '-o', tmpf.name, '-s', '-noninteractive']
                     if ac_chk.isChecked():
                         cmd.append('-ac')
@@ -8798,11 +9051,18 @@ def main() -> None:
                         return
                     st['base'] = base + '/'
                     if eng == 'feroxbuster':
-                        cmd = ['feroxbuster', '-u', base, '-w', wl, '--json', '--silent', '-t', th]
+                        cmd = [tool_status.path, '-u', base, '-w', wl,
+                               '--json', '--silent', '-t', th]
                     else:  # gobuster
-                        cmd = ['gobuster', 'dir', '-u', base, '-w', wl, '-q', '--no-error', '-t', th]
+                        cmd = [tool_status.path, 'dir', '-u', base, '-w', wl,
+                               '-q', '--no-error', '-t', th]
                     for h in headers:
                         cmd += ['-H', h]
+                try:
+                    cmd = self._configured_tool_command(eng, cmd)
+                except ValueError as exc:
+                    _ap(f'[!] {exc}')
+                    return
                 _ap('$ ' + ' '.join(cmd) + '\n')
                 run_btn.setEnabled(False); stop_btn.setEnabled(True)
                 st['proc'] = self._spawn_tool(page, cmd, _on_out, _on_fin)
@@ -8821,13 +9081,12 @@ def main() -> None:
                 QTableWidgetItem, QSplitter, QHeaderView, QAbstractItemView, QFileDialog)
             from PySide6.QtCore import Qt
             from PySide6.QtGui import QBrush, QColor
-            import shutil
             import json as _json
             import os as _os
 
             page = QtWidgets.QWidget(); page.setObjectName('SecretsPage')
             v = QVBoxLayout(page); v.setContentsMargins(22, 20, 22, 20)
-            hdr = QLabel('⚷  Secrets — trufflehog')
+            hdr = QLabel('Secret scanning · trufflehog / gitleaks')
             hdr.setStyleSheet('font-size:18px; font-weight:bold; color:#58a6ff;')
             v.addWidget(hdr)
             v.addWidget(QLabel('Scan a git repo (clone URL) or a local folder for leaked & verified '
@@ -8841,6 +9100,7 @@ def main() -> None:
             mode_combo = QComboBox(); mode_combo.addItems(['Git repo URL', 'Filesystem path'])
             row.addWidget(mode_combo)
             target_edit = QLineEdit()
+            target_edit.setObjectName('SecretsTargetInput')
             target_edit.setPlaceholderText('https://github.com/org/repo.git   or   C:\\path\\to\\code')
             browse_btn = QPushButton('Browse')
             row.addWidget(target_edit, 1); row.addWidget(browse_btn); v.addLayout(row)
@@ -8958,10 +9218,13 @@ def main() -> None:
             def _run():
                 import tempfile
                 eng = engine_combo.currentText(); st['engine'] = eng
-                if not shutil.which(eng):
+                tool_status = self._configured_tool_status(eng)
+                if not tool_status.found:
                     self._download_tools_dialog([eng], f'{eng} is the selected secret scanner.',
                                                 title=f'Install {eng}')
-                    if not shutil.which(eng):
+                    tool_status = self._configured_tool_status(eng)
+                    if not tool_status.found:
+                        _ap(f'[!] {tool_status.error or f"{eng} is not available."}')
                         return
                 tgt = target_edit.text().strip()
                 if not tgt:
@@ -8970,7 +9233,7 @@ def main() -> None:
                 table.setRowCount(0); log.clear(); st['buf'] = ''; st['count'] = 0; st['tmp'] = None
                 if eng == 'trufflehog':
                     sub = 'git' if mode_combo.currentIndex() == 0 else 'filesystem'
-                    cmd = ['trufflehog', sub, tgt, '--json', '--no-update']
+                    cmd = [tool_status.path, sub, tgt, '--json', '--no-update']
                     if verified_chk.isChecked():
                         cmd.append('--only-verified')
                 else:  # gitleaks — scans a local path/repo
@@ -8979,7 +9242,13 @@ def main() -> None:
                     sub = 'git' if mode_combo.currentIndex() == 0 else 'dir'
                     if mode_combo.currentIndex() == 0 and '://' in tgt:
                         _ap('[!] gitleaks scans local paths — give a folder, or use trufflehog for remote URLs.')
-                    cmd = ['gitleaks', sub, tgt, '-f', 'json', '-r', tmpf.name, '--no-banner', '--exit-code', '0']
+                    cmd = [tool_status.path, sub, tgt, '-f', 'json', '-r',
+                           tmpf.name, '--no-banner', '--exit-code', '0']
+                try:
+                    cmd = self._configured_tool_command(eng, cmd)
+                except ValueError as exc:
+                    _ap(f'[!] {exc}')
+                    return
                 _ap('$ ' + ' '.join(cmd) + '\n')
                 run_btn.setEnabled(False); stop_btn.setEnabled(True)
                 st['proc'] = self._spawn_tool(page, cmd, _on_out, _on_fin)
@@ -8999,7 +9268,7 @@ def main() -> None:
 
             page = QtWidgets.QWidget(); page.setObjectName('SqliPage')
             v = QVBoxLayout(page); v.setContentsMargins(22, 20, 22, 20)
-            hdr = QLabel('⛁  SQLi — sqlmap')
+            hdr = QLabel('SQLi automation · sqlmap / ghauri')
             hdr.setStyleSheet('font-size:18px; font-weight:bold; color:#58a6ff;')
             v.addWidget(hdr)
             v.addWidget(QLabel('Automated SQL injection. Runs in --batch (non-interactive). '
@@ -9007,7 +9276,9 @@ def main() -> None:
 
             g = QGridLayout()
             g.addWidget(QLabel('URL:'), 0, 0)
-            url_edit = QLineEdit(); url_edit.setPlaceholderText('http://target/page.php?id=1')
+            url_edit = QLineEdit()
+            url_edit.setObjectName('SqliTargetInput')
+            url_edit.setPlaceholderText('http://target/page.php?id=1')
             g.addWidget(url_edit, 0, 1, 1, 3)
             g.addWidget(QLabel('POST data:'), 1, 0)
             data_edit = QLineEdit(); data_edit.setPlaceholderText('(optional) id=1&name=x  → forces POST')
@@ -9084,16 +9355,27 @@ def main() -> None:
                     _ap('[!] enter a URL.')
                     return
                 env_extra = None
+                tool_status = self._configured_tool_status(eng)
                 if eng == 'sqlmap':
-                    script = recon_install.sqlmap_script()
-                    if not script:
-                        self._download_tools_dialog(['sqlmap'], 'sqlmap is needed to test for SQL injection.',
-                                                    title='Install sqlmap')
+                    if tool_status.found:
+                        prefix = [tool_status.path]
+                    else:
                         script = recon_install.sqlmap_script()
                         if not script:
-                            return
+                            self._download_tools_dialog(
+                                ['sqlmap'],
+                                'sqlmap is needed to test for SQL injection.',
+                                title='Install sqlmap',
+                            )
+                            script = recon_install.sqlmap_script()
+                            if not script:
+                                _ap(
+                                    f'[!] {tool_status.error or "sqlmap is not available."}'
+                                )
+                                return
+                        prefix = [sys.executable, script]
                     outdir = tempfile.mkdtemp(prefix='wp_sqlmap_out_')
-                    cmd = [sys.executable, script, '-u', u, '--batch', '--disable-coloring',
+                    cmd = [*prefix, '-u', u, '--batch', '--disable-coloring',
                            f'--level={level_spin.value()}', f'--risk={risk_spin.value()}',
                            f'--output-dir={outdir}']
                     if tamper_edit.text().strip():
@@ -9101,12 +9383,19 @@ def main() -> None:
                     if rand_chk.isChecked():
                         cmd.append('--random-agent')
                 else:  # ghauri (run as a module from the isolated pylibs dir)
-                    if not recon_install.is_installed('ghauri'):
+                    if tool_status.found:
+                        prefix = [tool_status.path]
+                    elif not recon_install.is_installed('ghauri'):
                         self._download_tools_dialog(['ghauri'], 'ghauri is a fast SQLi alternative.',
                                                     title='Install ghauri')
                         if not recon_install.is_installed('ghauri'):
+                            _ap(
+                                f'[!] {tool_status.error or "ghauri is not available."}'
+                            )
                             return
-                    prefix, env_extra = recon_install.python_tool_cmd('ghauri')
+                        prefix, env_extra = recon_install.python_tool_cmd('ghauri')
+                    else:
+                        prefix, env_extra = recon_install.python_tool_cmd('ghauri')
                     cmd = list(prefix) + ['-u', u, '--batch', f'--level={level_spin.value()}']
                 # shared options (both engines understand these)
                 if data_edit.text().strip():
@@ -9119,6 +9408,11 @@ def main() -> None:
                     cmd += ['--current-db', '--current-user']
                 if tables_chk.isChecked():
                     cmd.append('--tables')
+                try:
+                    cmd = self._configured_tool_command(eng, cmd)
+                except ValueError as exc:
+                    _ap(f'[!] {exc}')
+                    return
                 log.clear(); summary.setText(''); st['found'] = []
                 _ap('$ ' + ' '.join(cmd) + '\n')
                 run_btn.setEnabled(False); stop_btn.setEnabled(True)
@@ -10107,11 +10401,11 @@ def main() -> None:
             export_results(self._results, report_target, 'html', path, redact=True)
 
 
-        def _build_results_page(self):
+        def _build_results_explorer(self):
             """Results explorer as an in-place page (rebuilt fresh per visit)."""
             if not self._results:
                 empty = QWidget()
-                empty.setObjectName('ResultsPage')
+                empty.setObjectName('ResultsExplorerPage')
                 ev = QVBoxLayout(empty)
                 ev.setContentsMargins(22, 20, 22, 20)
                 hdr = QLabel('Analyze')
@@ -10150,7 +10444,7 @@ def main() -> None:
                 by_target[target].append(r)
             
             dlg = QtWidgets.QWidget()
-            dlg.setObjectName('ResultsPage')
+            dlg.setObjectName('ResultsExplorerPage')
             outer_layout = QVBoxLayout(dlg)
             title = QLabel('Analyze')
             title.setObjectName('PageTitle')
@@ -10312,6 +10606,7 @@ def main() -> None:
             
             # Results tree
             results_tree = QTreeWidget()
+            results_tree.setObjectName('ResultsFindingsTree')
             results_tree.setAccessibleName('Findings')
             results_tree.setColumnCount(4)
             results_tree.setHeaderLabels([_t('technique', self._lang), _t('severity', self._lang), _t('category', self._lang), _t('reason', self._lang)])
@@ -10879,6 +11174,17 @@ def main() -> None:
 
             return dlg
 
+        def _build_results_page(self):
+            """Analyze findings and the live stream in one workspace."""
+            return self._tabbed_workflow_page(
+                'ResultsPage',
+                'Analyze findings',
+                (
+                    ('Findings', self._build_results_explorer()),
+                    ('Live findings', self._build_live_page(embedded=True)),
+                ),
+            )
+
         def _export_results_view(self, results):
             """Export the current filtered/sorted view to JSON."""
             if not results:
@@ -10947,10 +11253,8 @@ def main() -> None:
                     f"{len(rows)} results  •  {confirmed} confirmed  •  "
                     f"{candidates} candidates  •  showing {len(shown)}")
 
-        def _build_live_page(self):
-            """Live, color-coded, filterable findings as an in-place page. The page
-            is cached and assigned to self._live_window, so the same background
-            code that pushes new findings keeps refreshing it while it's offscreen."""
+        def _build_live_page(self, embedded=False):
+            """Build the color-coded live stream used by Analyze."""
             from PySide6.QtWidgets import (QVBoxLayout, QHBoxLayout, QComboBox,
                                            QLabel, QTreeWidget, QHeaderView)
             from PySide6.QtCore import Qt
@@ -10960,16 +11264,17 @@ def main() -> None:
                 QWidget#LivePage { background-color: #0f1112; }
                 QLabel { color: #d7e1ea; font-size: 12px; }
                 QComboBox { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33;
-                    border-radius: 4px; padding: 4px 8px; }
+                    border-radius: 4px; padding: 4px 40px 4px 8px; }
                 QTreeWidget { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; }
                 QTreeWidget::item { padding: 3px; }
                 QTreeWidget::item:selected { background-color: #3b82f6; }
             """)
             v = QVBoxLayout(win)
             v.setContentsMargins(22, 20, 22, 20)
-            hdr = QLabel('◰  Live Findings')
-            hdr.setStyleSheet('font-size:18px; font-weight:bold; color:#58a6ff;')
-            v.addWidget(hdr)
+            if not embedded:
+                hdr = QLabel('Live findings')
+                hdr.setObjectName('PageTitle')
+                v.addWidget(hdr)
             top = QHBoxLayout()
             self._live_count_lbl = QLabel('0 findings')
             top.addWidget(self._live_count_lbl)
@@ -10982,6 +11287,7 @@ def main() -> None:
             top.addWidget(self._live_filter)
             v.addLayout(top)
             self._live_tree = QTreeWidget()
+            self._live_tree.setAccessibleName('Live findings stream')
             self._live_tree.setColumnCount(4)
             self._live_tree.setHeaderLabels(['Severity', 'Technique', 'Category', 'Reason'])
             self._live_tree.setAlternatingRowColors(True)
@@ -11019,31 +11325,16 @@ def main() -> None:
             import html as _html
             import re as _re
 
-            # ---- built-in web-security fuzzing payload sets ----
-            PAYLOADS = {
-                'XSS': ['<script>alert(1)</script>', '"><script>alert(1)</script>',
-                        "'><script>alert(1)</script>", '<img src=x onerror=alert(1)>',
-                        '<svg/onload=alert(1)>', 'javascript:alert(1)',
-                        '<body onload=alert(1)>', '"><img src=x onerror=alert(document.domain)>',
-                        '<iframe src=javascript:alert(1)>', '<details/open/ontoggle=alert(1)>'],
-                'SQLi': ["'", '"', "' OR '1'='1", "' OR 1=1-- -", '" OR "1"="1',
-                         "admin'-- -", "' OR ''='", "1' UNION SELECT NULL-- -",
-                         "1' AND SLEEP(5)-- -", "'; WAITFOR DELAY '0:0:5'-- -",
-                         "') OR ('1'='1", "1 OR 1=1"],
-                'LFI / Path Traversal': ['../../../../etc/passwd',
-                         '../../../../../../etc/passwd', '....//....//....//etc/passwd',
-                         '..%2f..%2f..%2fetc%2fpasswd', '..%252f..%252fetc%252fpasswd',
-                         '/etc/passwd', 'C:\\Windows\\win.ini', '..\\..\\..\\windows\\win.ini',
-                         'php://filter/convert.base64-encode/resource=index.php', '/etc/passwd%00'],
-                'Command Injection': ['; id', '| id', '|| id', '& id', '&& id', '`id`',
-                         '$(id)', '; sleep 5', '| sleep 5', '%0a id', '; cat /etc/passwd'],
-                'SSTI': ['{{7*7}}', '${7*7}', '#{7*7}', '<%= 7*7 %>', '${{7*7}}',
-                         '{{7*\'7\'}}', '{{config}}', '${T(java.lang.Runtime)}', '*{7*7}'],
-                'WAF Bypass': ['SeLeCt', '/*!50000SELECT*/', 'uni/**/on sel/**/ect',
-                         '1%0aOR%0a1=1', '<scr<script>ipt>alert(1)</scr</script>ipt>',
-                         '<sCrIpT>alert(1)</sCrIpT>', '%253Cscript%253E',
-                         "' /*!OR*/ '1'='1", '+UNION+SELECT+', '%00', '%09', '..%c0%af'],
-            }
+            # Payload Library and Intruder share one catalog so labels and
+            # built-ins cannot drift into separate grab-bags.
+            from .payloads import build_payload_request, intruder_payload_sets
+            try:
+                intruder_custom_rows = (
+                    self._db.get_custom_payloads() if self._db else []
+                )
+            except Exception:
+                intruder_custom_rows = []
+            PAYLOADS = intruder_payload_sets(intruder_custom_rows)
             SQL_ERR_RE = _re.compile(
                 r'(?i)SQL syntax|mysql_fetch|valid MySQL result|ORA-\d{5}|Unclosed quotation|SQLSTATE|PostgreSQL.{0,40}ERROR')
 
@@ -11095,13 +11386,14 @@ def main() -> None:
                 QComboBox, QLineEdit, QPlainTextEdit, QSpinBox { background-color: #16181a; color: #d7e1ea;
                     border: 1px solid #2b2f33; border-radius: 4px; padding: 6px;
                     font-family: 'Consolas','Menlo',monospace; }
+                QComboBox { padding-right: 40px; }
                 QPushButton { background-color: #1f6feb; color: #fff; border: none;
                     padding: 7px 14px; border-radius: 4px; }
                 QPushButton:hover { background-color: #388bfd; }
                 QPushButton:disabled { background-color: #2b2f33; color: #6b7280; }
             """)
             root = QVBoxLayout(dlg)
-            _hdr = QLabel('↻  Repeater · Intruder · Decoder')
+            _hdr = QLabel('Request lab · Repeater · Intruder · Decoder')
             _hdr.setStyleSheet('font-size:18px; font-weight:bold; color:#58a6ff;')
             root.addWidget(_hdr)
             tabs = QTabWidget()
@@ -11253,27 +11545,37 @@ def main() -> None:
             irow = QHBoxLayout()
             i_method = QComboBox(); i_method.addItems(['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
             i_url = QLineEdit(); i_url.setPlaceholderText('https://target/search?q=FUZZ')
+            i_url.setObjectName('IntruderUrlInput')
             load_btn = QPushButton('← Load from Repeater')
             irow.addWidget(i_method); irow.addWidget(i_url, 1); irow.addWidget(load_btn)
             il.addLayout(irow)
             i_headers = QPlainTextEdit(); i_headers.setMaximumHeight(80)
+            i_headers.setObjectName('IntruderHeadersInput')
             i_headers.setPlaceholderText('headers (optional) — e.g.  Cookie: id=FUZZ')
             il.addWidget(i_headers)
             i_body = QPlainTextEdit(); i_body.setMaximumHeight(70)
+            i_body.setObjectName('IntruderBodyInput')
             i_body.setPlaceholderText('body (optional) — e.g.  username=admin&password=FUZZ')
             il.addWidget(i_body)
 
             prow = QHBoxLayout()
-            pset_combo = QComboBox(); pset_combo.addItems(list(PAYLOADS.keys()) + ['Custom'])
+            payload_set_labels = list(PAYLOADS.keys())
+            if 'Custom' not in payload_set_labels:
+                payload_set_labels.append('Custom')
+            pset_combo = QComboBox(); pset_combo.addItems(payload_set_labels)
+            pset_combo.setObjectName('IntruderPayloadSetCombo')
+            pset_combo.setAccessibleName('Intruder payload-set dropdown')
             urlenc_chk = QCheckBox('URL-encode payloads')
             i_start = QPushButton('▶ Start')
             i_stop = QPushButton('■ Stop'); i_stop.setEnabled(False)
             i_status = QLabel('')
+            i_status.setObjectName('IntruderStatus')
             prow.addWidget(QLabel('Payload set:')); prow.addWidget(pset_combo)
             prow.addWidget(urlenc_chk); prow.addWidget(i_start); prow.addWidget(i_stop)
             prow.addWidget(i_status, 1)
             il.addLayout(prow)
             custom_edit = QPlainTextEdit(); custom_edit.setMaximumHeight(60)
+            custom_edit.setObjectName('IntruderCustomPayloads')
             custom_edit.setPlaceholderText('custom payloads — one per line (used for "Custom", else appended)')
             il.addWidget(custom_edit)
 
@@ -11295,16 +11597,47 @@ def main() -> None:
             tabs.addTab(intr, 'Intruder')
 
             ipool = {'pool': None}
-            istate = {'pending': [], 'baseline': None, 'baseline_fut': None, 'responses': {}}
+            istate = {
+                'pending': [],
+                'baseline': None,
+                'baseline_fut': None,
+                'responses': {},
+                'workbench_config': None,
+                'loaded_payloads': None,
+                'loaded_label': '',
+            }
             itimer = QTimer(dlg)
+
+            def _clear_workbench_config():
+                istate['workbench_config'] = None
+                urlenc_chk.setEnabled(True)
+
+            def _clear_loaded_payloads():
+                istate['loaded_payloads'] = None
+                istate['loaded_label'] = ''
 
             def _load_from_repeater():
                 i_method.setCurrentText(method.currentText())
                 i_url.setText(url.text())
                 i_headers.setPlainText(headers_edit.toPlainText())
                 i_body.setPlainText(body_edit.toPlainText())
+                _clear_workbench_config()
+                _clear_loaded_payloads()
 
             def _intr_build(payload):
+                workbench_config = istate.get('workbench_config')
+                if isinstance(workbench_config, dict):
+                    request = build_payload_request(
+                        method=i_method.currentText(),
+                        url=str(workbench_config.get('url') or ''),
+                        payload=payload,
+                        location=str(workbench_config.get('location') or 'query'),
+                        name=str(workbench_config.get('name') or 'q'),
+                        encoding=str(workbench_config.get('encoding') or 'none'),
+                        headers=workbench_config.get('headers') or {},
+                        base_body=str(workbench_config.get('base_body') or ''),
+                    )
+                    return request.url, dict(request.headers), request.body
                 enc = _ulib.quote(payload, safe='') if urlenc_chk.isChecked() else payload
                 u = i_url.text().replace('FUZZ', enc)
                 if u and '://' not in u:
@@ -11321,7 +11654,15 @@ def main() -> None:
                     return
                 pset = pset_combo.currentText()
                 if pset == 'Custom':
-                    payloads = [x for x in custom_edit.toPlainText().splitlines() if x.strip()]
+                    loaded_payloads = istate.get('loaded_payloads')
+                    payloads = (
+                        list(loaded_payloads)
+                        if isinstance(loaded_payloads, list)
+                        else [
+                            x for x in custom_edit.toPlainText().splitlines()
+                            if x.strip()
+                        ]
+                    )
                 else:
                     payloads = list(PAYLOADS.get(pset, []))
                     payloads += [x for x in custom_edit.toPlainText().splitlines() if x.strip()]
@@ -11332,20 +11673,34 @@ def main() -> None:
                 istate['responses'] = {}
                 istate['baseline'] = None
                 opts = _get_opts()
+                try:
+                    bu, bh, bb = _intr_build('')   # baseline = marker removed
+                    prepared = [
+                        (payload, *_intr_build(payload))
+                        for payload in payloads
+                    ]
+                except Exception as exc:
+                    i_status.setText(f'Could not build requests: {exc}')
+                    return
                 pool2 = concurrent.futures.ThreadPoolExecutor(max_workers=10)
                 ipool['pool'] = pool2
-                bu, bh, bb = _intr_build('')   # baseline = marker removed
                 istate['baseline_fut'] = pool2.submit(_send_request, m, bu, bh, bb, opts)
                 pending = []
                 res_table.setSortingEnabled(False)
-                for i, p in enumerate(payloads):
-                    u, hdrs, body = _intr_build(p)
+                for i, (p, u, hdrs, body) in enumerate(prepared):
                     r = res_table.rowCount(); res_table.insertRow(r)
                     res_table.setItem(r, 0, _num_item(i + 1))
                     pi = QTableWidgetItem(p); pi.setData(Qt.ItemDataRole.UserRole, r)
                     res_table.setItem(r, 1, pi)
                     res_table.setItem(r, 2, QTableWidgetItem('…'))
-                    pending.append((r, p, pool2.submit(_send_request, m, u, hdrs, body, opts)))
+                    pending.append((
+                        r,
+                        p,
+                        u,
+                        hdrs,
+                        body,
+                        pool2.submit(_send_request, m, u, hdrs, body, opts),
+                    ))
                 res_table.setSortingEnabled(True)
                 istate['pending'] = pending
                 i_start.setEnabled(False); i_stop.setEnabled(True)
@@ -11362,9 +11717,17 @@ def main() -> None:
                         except Exception:
                             istate['baseline'] = (0, 0)
                 still = []
-                for (rowi, p, fut) in istate['pending']:
+                for (rowi, p, request_url, request_headers, request_body, fut) in istate['pending']:
                     if not fut.done():
-                        still.append((rowi, p, fut)); continue
+                        still.append((
+                            rowi,
+                            p,
+                            request_url,
+                            request_headers,
+                            request_body,
+                            fut,
+                        ))
+                        continue
                     try:
                         r, dt = fut.result()
                         st, ln = r.status_code, len(r.content)
@@ -11390,9 +11753,22 @@ def main() -> None:
                             ni.setForeground(QBrush(QColor('#f59e0b')))
                         res_table.setItem(rowi, 5, ni)
                         body_txt = r.text if len(r.text) <= 100000 else r.text[:100000] + '\n…(truncated)'
-                        hdr_txt = '\n'.join(f"{k}: {v}" for k, v in r.headers.items())
-                        istate['responses'][rowi] = (f"PAYLOAD: {p}\nHTTP {st} {r.reason}  "
-                                                     f"({ln} bytes, {dt*1000:.0f} ms)\n\n{hdr_txt}\n\n{body_txt}")
+                        request_header_text = '\n'.join(
+                            f"{k}: {v}" for k, v in request_headers.items()
+                        )
+                        response_header_text = '\n'.join(
+                            f"{k}: {v}" for k, v in r.headers.items()
+                        )
+                        request_text = (
+                            f"{i_method.currentText()} {request_url}\n"
+                            f"{request_header_text}\n\n{request_body or ''}"
+                        )
+                        istate['responses'][rowi] = (
+                            f"PAYLOAD: {p}\n\nREQUEST\n{request_text}\n\n"
+                            f"RESPONSE\nHTTP {st} {r.reason}  "
+                            f"({ln} bytes, {dt*1000:.0f} ms)\n"
+                            f"{response_header_text}\n\n{body_txt}"
+                        )
                     except Exception as e:
                         res_table.setItem(rowi, 2, QTableWidgetItem('ERR'))
                         res_table.setItem(rowi, 5, QTableWidgetItem(str(e)[:60]))
@@ -11430,6 +11806,11 @@ def main() -> None:
             i_start.clicked.connect(_intr_start)
             i_stop.clicked.connect(_intr_stop)
             res_table.itemSelectionChanged.connect(_intr_detail)
+            i_method.currentIndexChanged.connect(_clear_workbench_config)
+            i_url.textEdited.connect(_clear_workbench_config)
+            i_headers.textChanged.connect(_clear_workbench_config)
+            i_body.textChanged.connect(_clear_workbench_config)
+            custom_edit.textChanged.connect(_clear_loaded_payloads)
 
             # ============================ DECODER TAB ============================
             dec = QtWidgets.QWidget()
@@ -11487,7 +11868,46 @@ def main() -> None:
                     tabs.setCurrentWidget(rep)
                 except Exception:
                     pass
+
+            def _apply_intruder_prefill(config, payloads, label='Selected family'):
+                """Load a placement-aware request family into Intruder."""
+                try:
+                    if not isinstance(config, dict) or not payloads:
+                        return
+                    marker_request = build_payload_request(
+                        method=str(config.get('method') or 'GET'),
+                        url=str(config.get('url') or ''),
+                        payload='FUZZ',
+                        location=str(config.get('location') or 'query'),
+                        name=str(config.get('name') or 'q'),
+                        encoding='none',
+                        headers=config.get('headers') or {},
+                        base_body=str(config.get('base_body') or ''),
+                    )
+                    i_method.setCurrentText(marker_request.method)
+                    i_url.setText(marker_request.url)
+                    i_headers.setPlainText('\n'.join(
+                        f"{key}: {value}"
+                        for key, value in marker_request.headers.items()
+                    ))
+                    i_body.setPlainText(marker_request.body or '')
+                    pset_combo.setCurrentText('Custom')
+                    custom_edit.setPlainText('\n'.join(str(p) for p in payloads))
+                    urlenc_chk.setChecked(False)
+                    urlenc_chk.setEnabled(False)
+                    istate['workbench_config'] = dict(config)
+                    istate['loaded_payloads'] = [str(p) for p in payloads]
+                    istate['loaded_label'] = str(label)
+                    i_status.setText(
+                        f'Loaded {len(payloads)} payload(s) from {label}. '
+                        'Exact workbench placement is active.'
+                    )
+                    tabs.setCurrentWidget(intr)
+                except Exception as exc:
+                    i_status.setText(f'Could not load payload family: {exc}')
+
             self._repeater_apply = _apply_prefill
+            self._intruder_apply = _apply_intruder_prefill
             return dlg
 
         def _repeater_load(self, prefill):
@@ -11496,6 +11916,13 @@ def main() -> None:
             fn = getattr(self, '_repeater_apply', None)
             if callable(fn):
                 fn(prefill)
+
+        def _intruder_load(self, config, payloads, label='Selected family'):
+            """Switch to Intruder with a placement-aware payload family."""
+            self._navigate('repeater')
+            fn = getattr(self, '_intruder_apply', None)
+            if callable(fn):
+                fn(config, payloads, label)
 
         def _show_http_log_dialog(self):
             """Show HTTP request/response log in a dialog."""
@@ -12126,7 +12553,7 @@ def main() -> None:
                 QMessageBox.critical(self, 'Import Error', str(e))
 
         # ==================== DASHBOARD ====================
-        def _build_dashboard_page(self):
+        def _build_report_summary(self):
             """Statistics dashboard as an in-place page (rebuilt fresh per visit)."""
             from PySide6.QtCore import Qt
 
@@ -12137,7 +12564,7 @@ def main() -> None:
                     stats = {'total_scans': 0, 'total_findings': 0, 'total_bypasses': 0, 'severity_distribution': {}, 'top_techniques': []}
 
                 page = QtWidgets.QWidget()
-                page.setObjectName('DashboardPage')
+                page.setObjectName('ReportSummaryPage')
                 layout = QVBoxLayout(page)
                 layout.setContentsMargins(22, 20, 22, 20)
                 layout.setSpacing(14)
@@ -12285,6 +12712,17 @@ def main() -> None:
                 QMessageBox.critical(self, 'Dashboard Error', str(e))
                 return None
 
+        def _build_dashboard_page(self):
+            """Report summary and scan history in one reporting workspace."""
+            return self._tabbed_workflow_page(
+                'DashboardPage',
+                'Reporting workspace',
+                (
+                    ('Summary', self._build_report_summary()),
+                    ('Timeline', self._build_timeline_page(embedded=True)),
+                ),
+            )
+
         def _show_compare_scans_dialog(self):
             """Show dialog to compare two scans."""
             try:
@@ -12294,7 +12732,7 @@ def main() -> None:
                 dlg.setStyleSheet("""
                     QDialog { background-color: #0f1112; }
                     QLabel { color: #d7e1ea; }
-                    QComboBox { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; padding: 5px; min-width: 300px; }
+                    QComboBox { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; padding: 5px 40px 5px 5px; min-width: 300px; }
                     QGroupBox { color: #d7e1ea; border: 1px solid #2b2f33; margin-top: 10px; padding-top: 10px; }
                     QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }
                     QListWidget { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; }
@@ -12407,7 +12845,7 @@ def main() -> None:
                 QMessageBox.critical(self, 'Compare Error', str(e))
 
         # ==================== TIMELINE VIEWER ====================
-        def _build_timeline_page(self):
+        def _build_timeline_page(self, embedded=False):
             """Scan history timeline as an in-place page (rebuilt fresh per visit)."""
             from PySide6.QtCore import Qt
             from PySide6.QtGui import QFontDatabase
@@ -12436,18 +12874,21 @@ def main() -> None:
                     QTableWidget::item {{ padding: 5px; }}
                     QTableWidget::item:selected {{ background-color: #3b82f6; }}
                     QHeaderView::section {{ background-color: #1c1f21; color: #d7e1ea; padding: 8px; border: none; border-bottom: 1px solid #2b2f33; font-family: '{selected_font}'; }}
-                    QComboBox {{ background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; padding: 5px; min-width: 200px; font-family: '{selected_font}'; }}
+                    QComboBox {{ background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; padding: 5px 40px 5px 5px; min-width: 200px; font-family: '{selected_font}'; }}
                     QPushButton {{ font-family: '{selected_font}'; }}
                     QTextEdit {{ font-family: '{selected_font}'; }}
                 """)
                 
                 layout = QVBoxLayout(dlg)
                 
-                # Header
-                header = QLabel('📅 ' + (_t('timeline_viewer', self._lang) if 'timeline_viewer' in TRANSLATIONS.get(self._lang, {}) else 'Scan History Timeline'))
-                header.setFont(QFont('', 16, QFont.Bold))
-                header.setStyleSheet('color: #58a6ff;')
-                layout.addWidget(header)
+                if not embedded:
+                    header = QLabel(
+                        _t('timeline_viewer', self._lang)
+                        if 'timeline_viewer' in TRANSLATIONS.get(self._lang, {})
+                        else 'Scan history timeline'
+                    )
+                    header.setObjectName('PageTitle')
+                    layout.addWidget(header)
                 
                 # Filter controls
                 filter_layout = QHBoxLayout()
@@ -12627,10 +13068,10 @@ def main() -> None:
                 
                 layout.addWidget(compare_group)
                 
-                # Close button -> back to Scan
-                close_btn = QPushButton(_t('close', self._lang))
-                close_btn.clicked.connect(lambda: self._navigate('scan'))
-                layout.addWidget(close_btn)
+                if not embedded:
+                    close_btn = QPushButton(_t('close', self._lang))
+                    close_btn.clicked.connect(lambda: self._navigate('scan'))
+                    layout.addWidget(close_btn)
 
                 return dlg
             except Exception as e:
@@ -13198,156 +13639,856 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                 QMessageBox.critical(self, 'Plugin Manager Error', f'{str(e)}\\n\\n{traceback.format_exc()}')
                 return None
 
-        # ==================== CUSTOM PAYLOADS ====================
+        # ==================== PAYLOAD WORKBENCH ====================
         def _build_payloads_page(self):
-            """Custom payloads management as an in-place page (rebuilt per visit)."""
+            """Browse, compose, preview, and hand payloads to Repeater."""
             try:
-                if not self._db:
-                    QMessageBox.warning(self, 'Payloads', 'Database is not available.')
-                    return
+                from PySide6.QtCore import Qt
+                from PySide6.QtWidgets import (
+                    QAbstractItemView,
+                    QComboBox,
+                    QFormLayout,
+                    QGridLayout,
+                    QGroupBox,
+                    QPlainTextEdit,
+                    QSplitter,
+                    QTabWidget,
+                )
+                from .payloads import (
+                    AUTHORIZED_USE_NOTICE,
+                    CATEGORY_BY_KEY,
+                    ENCODING_OPTIONS,
+                    LOCATION_OPTIONS,
+                    PAYLOAD_CATEGORIES,
+                    PayloadTemplate,
+                    build_payload_request,
+                    category_name,
+                    families_for,
+                    filter_payloads,
+                    payload_catalog,
+                    payload_request_to_curl,
+                )
 
+                user_role = Qt.ItemDataRole.UserRole
                 dlg = QtWidgets.QWidget()
                 dlg.setObjectName('PayloadsPage')
-                dlg.setStyleSheet("""
-                    QWidget#PayloadsPage { background-color: #0f1112; }
-                    QLabel { color: #d7e1ea; }
-                    QListWidget { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; }
-                    QListWidget::item { padding: 8px; }
-                    QListWidget::item:selected { background-color: #3b82f6; }
-                    QLineEdit, QTextEdit, QComboBox { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; padding: 5px; }
-                """)
-                
                 layout = QVBoxLayout(dlg)
-                
-                header = QLabel('🎯 ' + (_t('custom_payloads', self._lang) if 'custom_payloads' in TRANSLATIONS.get(self._lang, {}) else 'Custom Payloads'))
-                header.setFont(QFont('', 14, QFont.Bold))
-                header.setStyleSheet('color: #58a6ff;')
+                layout.setContentsMargins(22, 20, 22, 20)
+                layout.setSpacing(10)
+
+                header = QLabel('Payload Workbench')
+                header.setFont(QFont('', 16, QFont.Bold))
                 layout.addWidget(header)
-                
-                # Payloads list
-                payload_list = QtWidgets.QListWidget()
-                
-                def refresh_payloads():
-                    payload_list.clear()
-                    payloads = self._db.get_custom_payloads()
-                    for p in payloads:
-                        item = QtWidgets.QListWidgetItem(f"[{p['category']}] {p['name']}")
-                        item.setData(256, p)
-                        payload_list.addItem(item)
-                
-                refresh_payloads()
-                layout.addWidget(payload_list, 1)
-                
-                # Add payload form
-                form_group = QtWidgets.QGroupBox(_t('add_payload', self._lang) if 'add_payload' in TRANSLATIONS.get(self._lang, {}) else 'Add New Payload')
-                form_layout = QVBoxLayout(form_group)
-                
-                name_edit = QLineEdit()
-                name_edit.setPlaceholderText(_t('payload_name', self._lang) if 'payload_name' in TRANSLATIONS.get(self._lang, {}) else 'Payload Name')
-                
-                cat_combo = QtWidgets.QComboBox()
-                cat_combo.addItems(['SQL Injection', 'XSS', 'Command Injection', 'Path Traversal', 'SSRF', 'XXE', 'SSTI', 'Custom'])
-                
-                payload_edit = QTextEdit()
-                payload_edit.setPlaceholderText(_t('payload_content', self._lang) if 'payload_content' in TRANSLATIONS.get(self._lang, {}) else 'Payload content...')
-                payload_edit.setMaximumHeight(80)
-                
-                sev_combo = QtWidgets.QComboBox()
-                sev_combo.addItems(['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO'])
-                sev_combo.setCurrentIndex(2)  # Default to MEDIUM
-                
-                form_layout.addWidget(name_edit)
-                form_layout.addWidget(cat_combo)
-                form_layout.addWidget(payload_edit)
-                form_layout.addWidget(sev_combo)
-                
-                layout.addWidget(form_group)
-                
-                # Buttons
-                btn_layout = QHBoxLayout()
-                
-                add_btn = QPushButton('➕ ' + (_t('add_payload', self._lang) if 'add_payload' in TRANSLATIONS.get(self._lang, {}) else 'Add'))
-                import_btn = QPushButton('📥 ' + (_t('import_payloads', self._lang) if 'import_payloads' in TRANSLATIONS.get(self._lang, {}) else 'Import'))
-                delete_btn = QPushButton('🗑 Delete Selected')
-                
+
+                subtitle = QLabel(
+                    'Choose a technique and variant, place it into an exact '
+                    'request, then review it before opening Repeater.'
+                )
+                subtitle.setWordWrap(True)
+                subtitle.setProperty('muted', True)
+                layout.addWidget(subtitle)
+
+                authorization_notice = QLabel(
+                    f'{AUTHORIZED_USE_NOTICE} The library composes locally; '
+                    'Repeater and Intruder are the network send boundary.'
+                )
+                authorization_notice.setWordWrap(True)
+                authorization_notice.setStyleSheet(
+                    'padding: 8px 10px; border: 1px solid #5f4a22; '
+                    'border-radius: 5px; color: #d8b56d;'
+                )
+                layout.addWidget(authorization_notice)
+
+                tabs = QTabWidget()
+                tabs.setObjectName('PayloadWorkbenchTabs')
+                layout.addWidget(tabs, 1)
+
+                # ------------------------ Browse & compose -------------------- #
+                compose_tab = QtWidgets.QWidget()
+                compose_layout = QVBoxLayout(compose_tab)
+                compose_layout.setContentsMargins(0, 10, 0, 0)
+                compose_layout.setSpacing(10)
+
+                filter_row = QHBoxLayout()
+                search_edit = QLineEdit()
+                search_edit.setObjectName('PayloadSearchInput')
+                search_edit.setPlaceholderText(
+                    'Search payload, family, DBMS, platform, or tag…'
+                )
+                search_edit.setClearButtonEnabled(True)
+                category_filter = QComboBox()
+                category_filter.setObjectName('PayloadCategoryFilter')
+                category_filter.setAccessibleName('Payload category dropdown')
+                category_filter.setToolTip(
+                    'Dropdown menu — filter by payload category'
+                )
+                category_filter.addItem('All categories', '')
+                for category in PAYLOAD_CATEGORIES:
+                    if category.key != 'custom':
+                        category_filter.addItem(category.name, category.key)
+                category_filter.addItem('Custom', 'custom')
+                family_filter = QComboBox()
+                family_filter.setObjectName('PayloadFamilyFilter')
+                family_filter.setAccessibleName('Payload family dropdown')
+                family_filter.setToolTip(
+                    'Dropdown menu — filter by payload family'
+                )
+                family_filter.addItem('All families', '')
+                source_filter = QComboBox()
+                source_filter.setAccessibleName('Payload source dropdown')
+                source_filter.addItem('All sources', '')
+                source_filter.addItem('Built in', 'Built in')
+                source_filter.addItem('My payloads', 'Custom')
+                impact_filter = QComboBox()
+                impact_filter.setAccessibleName('Payload impact dropdown')
+                impact_filter.addItem('All impact levels', '')
+                for impact in ('Low', 'Moderate', 'Medium', 'High', 'Critical'):
+                    impact_filter.addItem(impact, impact)
+                filter_row.addWidget(search_edit, 2)
+                filter_row.addWidget(category_filter, 1)
+                filter_row.addWidget(family_filter, 1)
+                filter_row.addWidget(source_filter, 1)
+                filter_row.addWidget(impact_filter, 1)
+                compose_layout.addLayout(filter_row)
+
+                splitter = QSplitter(Qt.Orientation.Horizontal)
+                splitter.setObjectName('PayloadWorkbenchSplitter')
+                compose_layout.addWidget(splitter, 1)
+
+                catalog_tree = QTreeWidget()
+                catalog_tree.setObjectName('PayloadCatalogTree')
+                catalog_tree.setColumnCount(4)
+                catalog_tree.setHeaderLabels(
+                    ['Technique / payload', 'Family', 'Platform', 'Impact']
+                )
+                catalog_tree.setAlternatingRowColors(True)
+                catalog_tree.setSelectionMode(
+                    QAbstractItemView.SelectionMode.SingleSelection
+                )
+                try:
+                    catalog_tree.header().setSectionResizeMode(
+                        0, QHeaderView.ResizeMode.Stretch
+                    )
+                    for column in (1, 2, 3):
+                        catalog_tree.header().setSectionResizeMode(
+                            column, QHeaderView.ResizeMode.ResizeToContents
+                        )
+                except Exception:
+                    pass
+                splitter.addWidget(catalog_tree)
+
+                inspector = QtWidgets.QWidget()
+                inspector_layout = QVBoxLayout(inspector)
+                inspector_layout.setContentsMargins(10, 0, 0, 0)
+                inspector_layout.setSpacing(8)
+
+                detail_title = QLabel('Select a payload')
+                detail_title.setFont(QFont('', 13, QFont.Bold))
+                inspector_layout.addWidget(detail_title)
+                detail_meta = QLabel('')
+                detail_meta.setWordWrap(True)
+                inspector_layout.addWidget(detail_meta)
+
+                payload_edit = QPlainTextEdit()
+                payload_edit.setObjectName('PayloadEditor')
+                payload_edit.setPlaceholderText('Selected payload')
+                payload_edit.setMaximumHeight(105)
+                inspector_layout.addWidget(payload_edit)
+
+                detail_description = QLabel(
+                    'Select a library entry to see when and how to use it.'
+                )
+                detail_description.setWordWrap(True)
+                inspector_layout.addWidget(detail_description)
+                expected_signal = QLabel('')
+                expected_signal.setWordWrap(True)
+                expected_signal.setStyleSheet('color: #aaa398;')
+                inspector_layout.addWidget(expected_signal)
+
+                request_group = QGroupBox('Where this payload will go')
+                request_grid = QGridLayout(request_group)
+                request_grid.setColumnStretch(1, 1)
+                request_grid.setColumnStretch(3, 1)
+
+                method_combo = QComboBox()
+                method_combo.setObjectName('PayloadMethodCombo')
+                method_combo.setAccessibleName('HTTP method dropdown')
+                method_combo.addItems(
+                    ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']
+                )
+                target_edit = QLineEdit()
+                target_edit.setObjectName('PayloadTargetInput')
+                target_edit.setPlaceholderText(
+                    'https://target.example/search?existing=value'
+                )
+                try:
+                    current_target = self.target_edit.text().strip()
+                except Exception:
+                    current_target = ''
+                if current_target:
+                    target_edit.setText(current_target)
+
+                location_combo = QComboBox()
+                location_combo.setObjectName('PayloadLocationCombo')
+                location_combo.setAccessibleName('Payload insertion-point dropdown')
+                location_name_edit = QLineEdit()
+                location_name_edit.setObjectName('PayloadLocationNameInput')
+                location_name_edit.setText('q')
+                location_name_edit.setPlaceholderText(
+                    'parameter, property, header, or cookie name'
+                )
+                encoding_combo = QComboBox()
+                encoding_combo.setObjectName('PayloadEncodingCombo')
+                encoding_combo.setAccessibleName('Payload encoding dropdown')
+                for key, label in ENCODING_OPTIONS:
+                    encoding_combo.addItem(label, key)
+
+                request_grid.addWidget(QLabel('Method'), 0, 0)
+                request_grid.addWidget(method_combo, 0, 1)
+                request_grid.addWidget(QLabel('Target URL'), 0, 2)
+                request_grid.addWidget(target_edit, 0, 3)
+                request_grid.addWidget(QLabel('Insertion point'), 1, 0)
+                request_grid.addWidget(location_combo, 1, 1)
+                request_grid.addWidget(QLabel('Name'), 1, 2)
+                request_grid.addWidget(location_name_edit, 1, 3)
+                request_grid.addWidget(QLabel('Encoding'), 2, 0)
+                request_grid.addWidget(encoding_combo, 2, 1)
+
+                headers_edit = QPlainTextEdit()
+                headers_edit.setObjectName('PayloadHeadersInput')
+                headers_edit.setPlaceholderText(
+                    'Optional headers — one per line\n'
+                    'Authorization: Bearer …\nCookie: session=…'
+                )
+                headers_edit.setMaximumHeight(82)
+                base_body_edit = QPlainTextEdit()
+                base_body_edit.setObjectName('PayloadBaseBodyInput')
+                base_body_edit.setPlaceholderText(
+                    'Optional existing form fields, JSON object, or body'
+                )
+                base_body_edit.setMaximumHeight(82)
+                request_grid.addWidget(QLabel('Existing headers'), 3, 0, 1, 2)
+                request_grid.addWidget(QLabel('Existing body'), 3, 2, 1, 2)
+                request_grid.addWidget(headers_edit, 4, 0, 1, 2)
+                request_grid.addWidget(base_body_edit, 4, 2, 1, 2)
+                inspector_layout.addWidget(request_group)
+
+                destination_label = QLabel('Select a payload to compose a request.')
+                destination_label.setObjectName('PayloadDestinationSummary')
+                destination_label.setWordWrap(True)
+                destination_label.setStyleSheet(
+                    'padding: 7px 9px; border-left: 3px solid #c99a45;'
+                )
+                inspector_layout.addWidget(destination_label)
+
+                preview_edit = QPlainTextEdit()
+                preview_edit.setObjectName('PayloadRequestPreview')
+                preview_edit.setReadOnly(True)
+                preview_edit.setPlaceholderText(
+                    'The exact request will appear here before any handoff.'
+                )
+                preview_edit.setMinimumHeight(150)
+                inspector_layout.addWidget(preview_edit, 1)
+
+                action_status = QLabel('')
+                action_status.setObjectName('PayloadActionStatus')
+                action_status.setWordWrap(True)
+                inspector_layout.addWidget(action_status)
+
+                action_row = QHBoxLayout()
+                copy_payload_btn = style_button(
+                    QPushButton(), 'secondary', text='Copy payload'
+                )
+                copy_curl_btn = style_button(
+                    QPushButton(), 'secondary', text='Copy cURL'
+                )
+                intruder_family_btn = style_button(
+                    QPushButton(),
+                    'secondary',
+                    text='Test this family in Intruder',
+                    tooltip='Load this family and the exact insertion point into Intruder',
+                )
+                repeater_btn = style_button(
+                    QPushButton(), 'primary', text='Open exact request in Repeater',
+                    tooltip='Review and send the request from Repeater',
+                )
+                repeater_btn.setProperty('payloadAction', 'repeater')
+                action_row.addWidget(copy_payload_btn)
+                action_row.addWidget(copy_curl_btn)
+                action_row.addWidget(intruder_family_btn)
+                action_row.addStretch()
+                action_row.addWidget(repeater_btn)
+                inspector_layout.addLayout(action_row)
+                splitter.addWidget(inspector)
+                splitter.setSizes([520, 720])
+                tabs.addTab(compose_tab, 'Library & compose')
+
+                # -------------------------- My payloads ----------------------- #
+                custom_tab = QtWidgets.QWidget()
+                custom_layout = QVBoxLayout(custom_tab)
+                custom_layout.setContentsMargins(0, 10, 0, 0)
+                custom_layout.setSpacing(10)
+
+                custom_intro = QLabel(
+                    'Saved and imported entries appear in the main catalog under '
+                    '“My payloads.” Built-ins are read-only.'
+                )
+                custom_intro.setWordWrap(True)
+                custom_layout.addWidget(custom_intro)
+
+                custom_splitter = QSplitter(Qt.Orientation.Horizontal)
+                custom_layout.addWidget(custom_splitter, 1)
+
+                custom_list = QTreeWidget()
+                custom_list.setObjectName('PayloadCustomList')
+                custom_list.setColumnCount(4)
+                custom_list.setHeaderLabels(
+                    ['Name', 'Category', 'Impact', 'Created']
+                )
+                custom_list.setSelectionMode(
+                    QAbstractItemView.SelectionMode.SingleSelection
+                )
+                custom_list.setAlternatingRowColors(True)
+                try:
+                    custom_list.header().setSectionResizeMode(
+                        0, QHeaderView.ResizeMode.Stretch
+                    )
+                except Exception:
+                    pass
+                custom_splitter.addWidget(custom_list)
+
+                custom_form_widget = QtWidgets.QWidget()
+                custom_form_layout = QVBoxLayout(custom_form_widget)
+                custom_form_layout.setContentsMargins(10, 0, 0, 0)
+                custom_form_group = QGroupBox('Add a custom payload')
+                custom_form = QFormLayout(custom_form_group)
+                custom_name_edit = QLineEdit()
+                custom_name_edit.setPlaceholderText('Descriptive name')
+                custom_category_combo = QComboBox()
+                for category in PAYLOAD_CATEGORIES:
+                    custom_category_combo.addItem(category.name, category.name)
+                custom_payload_edit = QPlainTextEdit()
+                custom_payload_edit.setPlaceholderText('Payload content')
+                custom_payload_edit.setMaximumHeight(110)
+                custom_description_edit = QLineEdit()
+                custom_description_edit.setPlaceholderText(
+                    'Context, expected signal, or CTF note'
+                )
+                custom_severity_combo = QComboBox()
+                custom_severity_combo.addItems(
+                    ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL', 'INFO']
+                )
+                custom_severity_combo.setCurrentText('MEDIUM')
+                custom_form.addRow('Name', custom_name_edit)
+                custom_form.addRow('Category', custom_category_combo)
+                custom_form.addRow('Payload', custom_payload_edit)
+                custom_form.addRow('Notes', custom_description_edit)
+                custom_form.addRow('Impact', custom_severity_combo)
+                custom_form_layout.addWidget(custom_form_group)
+
+                custom_action_row = QHBoxLayout()
+                add_btn = style_button(
+                    QPushButton(), 'primary', text='Add to library'
+                )
+                import_btn = style_button(
+                    QPushButton(), 'secondary', text='Import JSON / text'
+                )
+                delete_btn = style_button(
+                    QPushButton(), 'danger', text='Delete selected'
+                )
+                custom_action_row.addWidget(add_btn)
+                custom_action_row.addWidget(import_btn)
+                custom_action_row.addWidget(delete_btn)
+                custom_form_layout.addLayout(custom_action_row)
+                custom_db_status = QLabel('')
+                custom_db_status.setWordWrap(True)
+                custom_form_layout.addWidget(custom_db_status)
+                custom_form_layout.addStretch()
+                custom_splitter.addWidget(custom_form_widget)
+                custom_splitter.setSizes([650, 520])
+                tabs.addTab(custom_tab, 'My payloads')
+
+                state = {
+                    'custom_rows': [],
+                    'catalog': [],
+                    'selected': None,
+                    'request': None,
+                }
+
+                def load_custom_rows():
+                    if not self._db:
+                        state['custom_rows'] = []
+                        return
+                    try:
+                        state['custom_rows'] = self._db.get_custom_payloads()
+                    except Exception:
+                        state['custom_rows'] = []
+
+                def parse_headers():
+                    parsed = {}
+                    for line_number, raw_line in enumerate(
+                            headers_edit.toPlainText().splitlines(), 1):
+                        line = raw_line.strip()
+                        if not line:
+                            continue
+                        if ':' not in line:
+                            raise ValueError(
+                                f'Header line {line_number} must use Name: value.'
+                            )
+                        name, value = line.split(':', 1)
+                        if not name.strip():
+                            raise ValueError(
+                                f'Header line {line_number} has no name.'
+                            )
+                        parsed[name.strip()] = value.strip()
+                    return parsed
+
+                def selected_location():
+                    return str(location_combo.currentData() or 'query')
+
+                def refresh_preview():
+                    template = state.get('selected')
+                    if not isinstance(template, PayloadTemplate):
+                        state['request'] = None
+                        preview_edit.clear()
+                        destination_label.setText(
+                            'Select a payload to compose a request.'
+                        )
+                        copy_payload_btn.setEnabled(False)
+                        copy_curl_btn.setEnabled(False)
+                        intruder_family_btn.setEnabled(False)
+                        repeater_btn.setEnabled(False)
+                        return
+                    copy_payload_btn.setEnabled(bool(payload_edit.toPlainText()))
+                    try:
+                        request = build_payload_request(
+                            method=method_combo.currentText(),
+                            url=target_edit.text(),
+                            payload=payload_edit.toPlainText(),
+                            location=selected_location(),
+                            name=location_name_edit.text(),
+                            encoding=str(encoding_combo.currentData() or 'none'),
+                            headers=parse_headers(),
+                            base_body=base_body_edit.toPlainText(),
+                        )
+                    except Exception as exc:
+                        state['request'] = None
+                        destination_label.setText(f'Not ready — {exc}')
+                        preview_edit.setPlainText(str(exc))
+                        copy_curl_btn.setEnabled(False)
+                        intruder_family_btn.setEnabled(False)
+                        repeater_btn.setEnabled(False)
+                        return
+                    state['request'] = request
+                    encoding_label = encoding_combo.currentText()
+                    destination_label.setText(
+                        f'{request.method} {request.url}  ·  '
+                        f'{request.insertion_point}  ·  {encoding_label}  ·  '
+                        f'{template.impact} impact'
+                    )
+                    preview_edit.setPlainText(request.preview())
+                    copy_curl_btn.setEnabled(True)
+                    intruder_family_btn.setEnabled(True)
+                    repeater_btn.setEnabled(True)
+                    action_status.setText('')
+
+                location_defaults = {
+                    'query': 'q',
+                    'form': 'q',
+                    'json': 'input',
+                    'header': 'X-Test',
+                    'cookie': 'test',
+                }
+
+                def location_changed():
+                    location = selected_location()
+                    needs_name = location in location_defaults
+                    location_name_edit.setEnabled(needs_name)
+                    location_name_edit.setPlaceholderText(
+                        'Not used for this insertion point'
+                        if not needs_name else
+                        'parameter, property, header, or cookie name'
+                    )
+                    if needs_name and (
+                            not location_name_edit.text().strip()
+                            or location_name_edit.text() in location_defaults.values()):
+                        location_name_edit.setText(location_defaults[location])
+                    if location in {'form', 'json', 'raw_body'}:
+                        if method_combo.currentText() in {'GET', 'HEAD'}:
+                            method_combo.setCurrentText('POST')
+                    refresh_preview()
+
+                def select_template(template):
+                    if not isinstance(template, PayloadTemplate):
+                        return
+                    state['selected'] = template
+                    detail_title.setText(template.name)
+                    meta = (
+                        f'{category_name(template.category)}  ·  {template.family}  ·  '
+                        f'{template.platform}  ·  {template.impact} impact  ·  '
+                        f'{template.source}'
+                    )
+                    if template.tags:
+                        meta += '  ·  ' + ', '.join(template.tags)
+                    detail_meta.setText(meta)
+                    detail_description.setText(template.description)
+                    expected_signal.setText(
+                        f'Expected signal: {template.expected_signal}'
+                    )
+                    payload_edit.blockSignals(True)
+                    payload_edit.setPlainText(template.payload)
+                    payload_edit.blockSignals(False)
+
+                    old_location = selected_location()
+                    location_combo.blockSignals(True)
+                    location_combo.clear()
+                    location_labels = dict(LOCATION_OPTIONS)
+                    for location in template.locations:
+                        location_combo.addItem(
+                            location_labels.get(location, location), location
+                        )
+                    category = CATEGORY_BY_KEY.get(template.category)
+                    wanted_location = (
+                        old_location
+                        if old_location in template.locations
+                        else (
+                            category.default_location
+                            if category and category.default_location in template.locations
+                            else template.locations[0]
+                        )
+                    )
+                    index = location_combo.findData(wanted_location)
+                    location_combo.setCurrentIndex(index if index >= 0 else 0)
+                    location_combo.blockSignals(False)
+
+                    if template.category == 'xxe' and not headers_edit.toPlainText().strip():
+                        headers_edit.setPlainText('Content-Type: application/xml')
+                    elif (
+                            template.category == 'nosql'
+                            and wanted_location == 'raw_body'
+                            and not headers_edit.toPlainText().strip()):
+                        headers_edit.setPlainText('Content-Type: application/json')
+                    location_changed()
+
+                def selected_tree_template():
+                    items = catalog_tree.selectedItems()
+                    if not items:
+                        return None
+                    value = items[0].data(0, user_role)
+                    return value if isinstance(value, PayloadTemplate) else None
+
+                def tree_selection_changed():
+                    template = selected_tree_template()
+                    if template is not None:
+                        select_template(template)
+
+                def update_family_filter():
+                    current = str(family_filter.currentData() or '')
+                    category = str(category_filter.currentData() or '')
+                    family_filter.blockSignals(True)
+                    family_filter.clear()
+                    family_filter.addItem('All families', '')
+                    for family in families_for(state['catalog'], category):
+                        family_filter.addItem(family, family)
+                    index = family_filter.findData(current)
+                    family_filter.setCurrentIndex(index if index >= 0 else 0)
+                    family_filter.blockSignals(False)
+
+                def refresh_catalog():
+                    selected_key = (
+                        state['selected'].key
+                        if isinstance(state.get('selected'), PayloadTemplate)
+                        else ''
+                    )
+                    state['catalog'] = payload_catalog(state['custom_rows'])
+                    update_family_filter()
+                    items = filter_payloads(
+                        state['catalog'],
+                        query=search_edit.text(),
+                        category=str(category_filter.currentData() or ''),
+                        family=str(family_filter.currentData() or ''),
+                    )
+                    source = str(source_filter.currentData() or '')
+                    impact = str(impact_filter.currentData() or '')
+                    if source:
+                        items = [item for item in items if item.source == source]
+                    if impact:
+                        items = [item for item in items if item.impact == impact]
+
+                    catalog_tree.blockSignals(True)
+                    catalog_tree.clear()
+                    category_nodes = {}
+                    family_nodes = {}
+                    first_item = None
+                    selected_item = None
+                    for template in items:
+                        category_key = template.category
+                        category_node = category_nodes.get(category_key)
+                        if category_node is None:
+                            category_node = QTreeWidgetItem(
+                                [category_name(category_key), '', '', '']
+                            )
+                            category_node.setFirstColumnSpanned(True)
+                            category_node.setExpanded(True)
+                            catalog_tree.addTopLevelItem(category_node)
+                            category_nodes[category_key] = category_node
+                        family_key = (category_key, template.family)
+                        family_node = family_nodes.get(family_key)
+                        if family_node is None:
+                            family_node = QTreeWidgetItem(
+                                [template.family, template.family, '', '']
+                            )
+                            family_node.setExpanded(
+                                bool(search_edit.text().strip())
+                                or bool(category_filter.currentData())
+                            )
+                            category_node.addChild(family_node)
+                            family_nodes[family_key] = family_node
+                        tree_item = QTreeWidgetItem(
+                            [
+                                template.name,
+                                template.family,
+                                template.platform,
+                                template.impact,
+                            ]
+                        )
+                        tree_item.setToolTip(0, template.payload)
+                        tree_item.setData(0, user_role, template)
+                        family_node.addChild(tree_item)
+                        first_item = first_item or tree_item
+                        if template.key == selected_key:
+                            selected_item = tree_item
+                    catalog_tree.blockSignals(False)
+                    chosen = selected_item or first_item
+                    if chosen is not None:
+                        catalog_tree.setCurrentItem(chosen)
+                        select_template(chosen.data(0, user_role))
+                    else:
+                        state['selected'] = None
+                        refresh_preview()
+                        detail_title.setText('No matching payloads')
+                        detail_meta.clear()
+
+                def refresh_custom_list():
+                    custom_list.clear()
+                    for row in state['custom_rows']:
+                        item = QTreeWidgetItem(
+                            [
+                                str(row.get('name') or 'Custom payload'),
+                                str(row.get('category') or 'Custom'),
+                                str(row.get('severity') or 'MEDIUM').title(),
+                                str(row.get('created_at') or ''),
+                            ]
+                        )
+                        item.setData(0, user_role, row)
+                        custom_list.addTopLevelItem(item)
+                    available = bool(self._db)
+                    for widget in (
+                        custom_name_edit,
+                        custom_category_combo,
+                        custom_payload_edit,
+                        custom_description_edit,
+                        custom_severity_combo,
+                        add_btn,
+                        import_btn,
+                        delete_btn,
+                    ):
+                        widget.setEnabled(available)
+                    custom_db_status.setText(
+                        f'{len(state["custom_rows"])} saved payload(s).'
+                        if available else
+                        'Database unavailable: built-in payloads still work, '
+                        'but custom entries cannot be saved or imported.'
+                    )
+
+                def refresh_custom_and_catalog():
+                    load_custom_rows()
+                    refresh_custom_list()
+                    refresh_catalog()
+
                 def add_payload():
-                    name = name_edit.text().strip()
-                    payload = payload_edit.toPlainText().strip()
+                    name = custom_name_edit.text().strip()
+                    payload = custom_payload_edit.toPlainText().strip()
                     if not name or not payload:
-                        QMessageBox.warning(dlg, 'Payload', 'Name and payload content are required.')
+                        custom_db_status.setText(
+                            'Name and payload content are required.'
+                        )
                         return
                     try:
                         self._db.add_custom_payload(
                             name=name,
-                            category=cat_combo.currentText(),
+                            category=str(custom_category_combo.currentData()),
                             payload=payload,
-                            severity=sev_combo.currentText()
+                            description=custom_description_edit.text().strip(),
+                            severity=custom_severity_combo.currentText(),
                         )
-                        name_edit.clear()
-                        payload_edit.clear()
-                        refresh_payloads()
-                        QMessageBox.information(dlg, 'Added', f'Payload "{name}" added!')
+                        custom_name_edit.clear()
+                        custom_payload_edit.clear()
+                        custom_description_edit.clear()
+                        refresh_custom_and_catalog()
+                        custom_db_status.setText(
+                            f'Added “{name}” to My payloads.'
+                        )
                     except Exception as e:
-                        QMessageBox.critical(dlg, 'Add Failed', str(e))
-                
+                        custom_db_status.setText(f'Add failed: {e}')
+
                 def import_payloads():
-                    path, _ = QFileDialog.getOpenFileName(dlg, 'Import Payloads', filter='JSON/Text (*.json *.txt)')
+                    path, _ = QFileDialog.getOpenFileName(
+                        dlg,
+                        'Import Payloads',
+                        filter='JSON/Text (*.json *.txt)',
+                    )
                     if not path:
                         return
                     try:
                         count = self._db.import_payloads_from_file(path)
-                        refresh_payloads()
-                        QMessageBox.information(dlg, 'Imported', f'Imported {count} payloads')
+                        refresh_custom_and_catalog()
+                        custom_db_status.setText(
+                            f'Imported {count} payload(s) from {os.path.basename(path)}.'
+                        )
                     except Exception as e:
-                        QMessageBox.critical(dlg, 'Import Failed', str(e))
+                        custom_db_status.setText(f'Import failed: {e}')
 
                 def delete_payload():
-                    item = payload_list.currentItem()
-                    if item is None:
-                        QMessageBox.warning(dlg, 'Delete Payload', 'Please select a payload to delete.')
+                    items = custom_list.selectedItems()
+                    if not items:
+                        custom_db_status.setText(
+                            'Select a saved payload to delete.'
+                        )
                         return
-
-                    payload_data = item.data(256) or {}
-                    payload_id = payload_data.get('id') if isinstance(payload_data, dict) else None
-                    payload_name = payload_data.get('name', 'selected payload') if isinstance(payload_data, dict) else 'selected payload'
-
+                    payload_data = items[0].data(0, user_role) or {}
+                    payload_id = (
+                        payload_data.get('id')
+                        if isinstance(payload_data, dict) else None
+                    )
+                    payload_name = (
+                        payload_data.get('name', 'selected payload')
+                        if isinstance(payload_data, dict) else 'selected payload'
+                    )
                     if payload_id is None:
-                        QMessageBox.warning(dlg, 'Delete Payload', 'Selected payload has no valid ID.')
+                        custom_db_status.setText(
+                            'The selected payload has no valid database ID.'
+                        )
                         return
-
                     confirm = QMessageBox.question(
                         dlg,
                         'Delete Payload',
-                        f'Delete payload "{payload_name}"?',
+                        f'Delete saved payload “{payload_name}”?',
                         QMessageBox.Yes | QMessageBox.No,
-                        QMessageBox.No
+                        QMessageBox.No,
                     )
                     if confirm != QMessageBox.Yes:
                         return
-
                     try:
                         deleted = self._db.delete_custom_payload(int(payload_id))
                         if deleted:
-                            refresh_payloads()
-                            QMessageBox.information(dlg, 'Deleted', f'Payload "{payload_name}" deleted.')
+                            refresh_custom_and_catalog()
+                            custom_db_status.setText(
+                                f'Deleted “{payload_name}”.'
+                            )
                         else:
-                            QMessageBox.warning(dlg, 'Delete Payload', 'Payload was not found or already deleted.')
+                            custom_db_status.setText(
+                                'Payload was not found or was already deleted.'
+                            )
                     except Exception as e:
-                        QMessageBox.critical(dlg, 'Delete Failed', str(e))
-                
+                        custom_db_status.setText(f'Delete failed: {e}')
+
+                def copy_payload():
+                    value = payload_edit.toPlainText()
+                    if not value:
+                        return
+                    QApplication.clipboard().setText(value)
+                    action_status.setText('Payload copied to the clipboard.')
+
+                def copy_curl():
+                    request = state.get('request')
+                    if request is None:
+                        refresh_preview()
+                        request = state.get('request')
+                    if request is None:
+                        return
+                    QApplication.clipboard().setText(
+                        payload_request_to_curl(request)
+                    )
+                    action_status.setText(
+                        'Exact cURL request copied to the clipboard.'
+                    )
+
+                def open_in_repeater():
+                    refresh_preview()
+                    request = state.get('request')
+                    if request is None:
+                        return
+                    self._repeater_load(request.as_repeater_prefill())
+
+                def open_family_in_intruder():
+                    refresh_preview()
+                    request = state.get('request')
+                    template = state.get('selected')
+                    if request is None or not isinstance(template, PayloadTemplate):
+                        return
+                    location = selected_location()
+                    family_payloads = [
+                        item.payload
+                        for item in state['catalog']
+                        if (
+                            item.category == template.category
+                            and item.family == template.family
+                            and location in item.locations
+                        )
+                    ]
+                    if not family_payloads:
+                        family_payloads = [payload_edit.toPlainText()]
+                    config = {
+                        'method': method_combo.currentText(),
+                        'url': target_edit.text(),
+                        'location': location,
+                        'name': location_name_edit.text(),
+                        'encoding': str(
+                            encoding_combo.currentData() or 'none'
+                        ),
+                        'headers': parse_headers(),
+                        'base_body': base_body_edit.toPlainText(),
+                    }
+                    label = (
+                        f'{category_name(template.category)} → {template.family}'
+                    )
+                    self._intruder_load(config, family_payloads, label)
+
+                def filter_category_changed():
+                    update_family_filter()
+                    refresh_catalog()
+
+                for signal in (
+                    search_edit.textChanged,
+                    family_filter.currentIndexChanged,
+                    source_filter.currentIndexChanged,
+                    impact_filter.currentIndexChanged,
+                ):
+                    signal.connect(refresh_catalog)
+                category_filter.currentIndexChanged.connect(
+                    filter_category_changed
+                )
+                catalog_tree.itemSelectionChanged.connect(
+                    tree_selection_changed
+                )
+                payload_edit.textChanged.connect(refresh_preview)
+                method_combo.currentIndexChanged.connect(refresh_preview)
+                target_edit.textChanged.connect(refresh_preview)
+                location_combo.currentIndexChanged.connect(location_changed)
+                location_name_edit.textChanged.connect(refresh_preview)
+                encoding_combo.currentIndexChanged.connect(refresh_preview)
+                headers_edit.textChanged.connect(refresh_preview)
+                base_body_edit.textChanged.connect(refresh_preview)
+                copy_payload_btn.clicked.connect(copy_payload)
+                copy_curl_btn.clicked.connect(copy_curl)
+                intruder_family_btn.clicked.connect(open_family_in_intruder)
+                repeater_btn.clicked.connect(open_in_repeater)
                 add_btn.clicked.connect(add_payload)
                 import_btn.clicked.connect(import_payloads)
                 delete_btn.clicked.connect(delete_payload)
-                
-                btn_layout.addWidget(add_btn)
-                btn_layout.addWidget(import_btn)
-                btn_layout.addWidget(delete_btn)
-                layout.addLayout(btn_layout)
-                
-                close_btn = QPushButton(_t('close', self._lang))
-                close_btn.clicked.connect(lambda: self._navigate('scan'))
-                layout.addWidget(close_btn)
 
+                refresh_custom_and_catalog()
                 return dlg
             except Exception as e:
                 QMessageBox.critical(self, 'Payloads Error', str(e))
@@ -13509,12 +14650,17 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                 QMessageBox.critical(self, 'Engagements Error', str(e))
                 return None
 
-        def _build_schedule_page(self):
+        def _build_schedule_page(self, embedded=False):
             """Scheduled jobs (scan or recon) as an in-place page (rebuilt per visit)."""
             try:
                 if not self._db:
-                    QMessageBox.warning(self, 'Scheduled Scans', 'Database is not available.')
-                    return
+                    empty = QWidget()
+                    empty.setObjectName('SchedulePage')
+                    empty_layout = QVBoxLayout(empty)
+                    empty_layout.setContentsMargins(22, 20, 22, 20)
+                    empty_layout.addWidget(QLabel('Scheduling is unavailable.'))
+                    empty_layout.addStretch()
+                    return empty
 
                 from PySide6.QtWidgets import QTimeEdit, QDateTimeEdit, QGridLayout
                 from PySide6.QtCore import QDateTime, QTime
@@ -13542,6 +14688,7 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                     QTableWidget::item:selected {{ background-color: #3b82f6; }}
                     QHeaderView::section {{ background-color: #21262d; color: #d7e1ea; padding: 8px; border: 1px solid #2b2f33; font-family: '{selected_font}'; }}
                     QLineEdit, QComboBox, QDateTimeEdit {{ background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; padding: 5px; font-family: '{selected_font}'; }}
+                    QComboBox {{ padding-right: 40px; }}
                     QGroupBox {{ color: #d7e1ea; border: 1px solid #2b2f33; margin-top: 10px; padding-top: 10px; font-family: '{selected_font}'; }}
                     QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 5px; }}
                     QPushButton {{ font-family: '{selected_font}'; }}
@@ -13549,10 +14696,14 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                 
                 layout = QVBoxLayout(dlg)
                 
-                header = QLabel('⏰ ' + (_t('scheduled_scans', self._lang) if 'scheduled_scans' in TRANSLATIONS.get(self._lang, {}) else 'Scheduled Scans'))
-                header.setFont(QFont('', 14, QFont.Bold))
-                header.setStyleSheet('color: #58a6ff;')
-                layout.addWidget(header)
+                if not embedded:
+                    header = QLabel(
+                        _t('scheduled_scans', self._lang)
+                        if 'scheduled_scans' in TRANSLATIONS.get(self._lang, {})
+                        else 'Scheduled scans'
+                    )
+                    header.setObjectName('PageTitle')
+                    layout.addWidget(header)
                 
                 # Scheduled scans table
                 table = QtWidgets.QTableWidget()
@@ -13586,6 +14737,7 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                         self._db.delete_scheduled_scan(sched_id)
                         refresh_table()
                 
+                self._schedule_refresh = refresh_table
                 refresh_table()
                 layout.addWidget(table, 1)
                 
@@ -13663,9 +14815,10 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                 btn_layout.addWidget(add_btn)
                 btn_layout.addStretch()
                 
-                close_btn = QPushButton(_t('close', self._lang))
-                close_btn.clicked.connect(lambda: self._navigate('scan'))
-                btn_layout.addWidget(close_btn)
+                if not embedded:
+                    close_btn = QPushButton(_t('close', self._lang))
+                    close_btn.clicked.connect(lambda: self._navigate('scan'))
+                    btn_layout.addWidget(close_btn)
 
                 layout.addLayout(btn_layout)
 

@@ -16,6 +16,8 @@ project_root = os.path.dirname(os.path.abspath(SPEC))
 datas = [
     # Include wordlists folder
     (os.path.join(project_root, 'wordlists'), 'wordlists'),
+    # Shared UI affordance icons (dropdown and tree chevrons).
+    (os.path.join(project_root, 'wafpierce', 'assets'), os.path.join('wafpierce', 'assets')),
     # Include the three supplied Blackthorn identity assets.
     (os.path.join(project_root, 'blackthorn-logo-transparent.png'), os.path.join('wafpierce', 'assets')),
     (os.path.join(project_root, 'blackthornlogo-background.jpg'), os.path.join('wafpierce', 'assets')),
