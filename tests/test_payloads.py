@@ -26,6 +26,7 @@ def test_catalog_has_guidance_and_varied_coverage():
         "xxe",
         "ssti",
         "nosql",
+        "normalization",
         "custom",
     } <= category_keys
     assert all(category.description and category.workflow_hint for category in PAYLOAD_CATEGORIES)
@@ -216,5 +217,6 @@ def test_intruder_sets_are_generated_from_the_same_catalog():
     sets = intruder_payload_sets()
     assert "SQL injection" in sets
     assert "Cross-site scripting" in sets
+    assert "Encoding / filter normalization" in sets
     assert any("UNION SELECT" in payload for payload in sets["SQL injection"])
     assert len(sets["SQL injection"]) == len(set(sets["SQL injection"]))

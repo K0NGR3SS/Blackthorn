@@ -11019,31 +11019,16 @@ def main() -> None:
             import html as _html
             import re as _re
 
-            # ---- built-in web-security fuzzing payload sets ----
-            PAYLOADS = {
-                'XSS': ['<script>alert(1)</script>', '"><script>alert(1)</script>',
-                        "'><script>alert(1)</script>", '<img src=x onerror=alert(1)>',
-                        '<svg/onload=alert(1)>', 'javascript:alert(1)',
-                        '<body onload=alert(1)>', '"><img src=x onerror=alert(document.domain)>',
-                        '<iframe src=javascript:alert(1)>', '<details/open/ontoggle=alert(1)>'],
-                'SQLi': ["'", '"', "' OR '1'='1", "' OR 1=1-- -", '" OR "1"="1',
-                         "admin'-- -", "' OR ''='", "1' UNION SELECT NULL-- -",
-                         "1' AND SLEEP(5)-- -", "'; WAITFOR DELAY '0:0:5'-- -",
-                         "') OR ('1'='1", "1 OR 1=1"],
-                'LFI / Path Traversal': ['../../../../etc/passwd',
-                         '../../../../../../etc/passwd', '....//....//....//etc/passwd',
-                         '..%2f..%2f..%2fetc%2fpasswd', '..%252f..%252fetc%252fpasswd',
-                         '/etc/passwd', 'C:\\Windows\\win.ini', '..\\..\\..\\windows\\win.ini',
-                         'php://filter/convert.base64-encode/resource=index.php', '/etc/passwd%00'],
-                'Command Injection': ['; id', '| id', '|| id', '& id', '&& id', '`id`',
-                         '$(id)', '; sleep 5', '| sleep 5', '%0a id', '; cat /etc/passwd'],
-                'SSTI': ['{{7*7}}', '${7*7}', '#{7*7}', '<%= 7*7 %>', '${{7*7}}',
-                         '{{7*\'7\'}}', '{{config}}', '${T(java.lang.Runtime)}', '*{7*7}'],
-                'WAF Bypass': ['SeLeCt', '/*!50000SELECT*/', 'uni/**/on sel/**/ect',
-                         '1%0aOR%0a1=1', '<scr<script>ipt>alert(1)</scr</script>ipt>',
-                         '<sCrIpT>alert(1)</sCrIpT>', '%253Cscript%253E',
-                         "' /*!OR*/ '1'='1", '+UNION+SELECT+', '%00', '%09', '..%c0%af'],
-            }
+            # Payload Library and Intruder share one catalog so labels and
+            # built-ins cannot drift into separate grab-bags.
+            from .payloads import build_payload_request, intruder_payload_sets
+            try:
+                intruder_custom_rows = (
+                    self._db.get_custom_payloads() if self._db else []
+                )
+            except Exception:
+                intruder_custom_rows = []
+            PAYLOADS = intruder_payload_sets(intruder_custom_rows)
             SQL_ERR_RE = _re.compile(
                 r'(?i)SQL syntax|mysql_fetch|valid MySQL result|ORA-\d{5}|Unclosed quotation|SQLSTATE|PostgreSQL.{0,40}ERROR')
 
@@ -11253,27 +11238,36 @@ def main() -> None:
             irow = QHBoxLayout()
             i_method = QComboBox(); i_method.addItems(['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
             i_url = QLineEdit(); i_url.setPlaceholderText('https://target/search?q=FUZZ')
+            i_url.setObjectName('IntruderUrlInput')
             load_btn = QPushButton('← Load from Repeater')
             irow.addWidget(i_method); irow.addWidget(i_url, 1); irow.addWidget(load_btn)
             il.addLayout(irow)
             i_headers = QPlainTextEdit(); i_headers.setMaximumHeight(80)
+            i_headers.setObjectName('IntruderHeadersInput')
             i_headers.setPlaceholderText('headers (optional) — e.g.  Cookie: id=FUZZ')
             il.addWidget(i_headers)
             i_body = QPlainTextEdit(); i_body.setMaximumHeight(70)
+            i_body.setObjectName('IntruderBodyInput')
             i_body.setPlaceholderText('body (optional) — e.g.  username=admin&password=FUZZ')
             il.addWidget(i_body)
 
             prow = QHBoxLayout()
-            pset_combo = QComboBox(); pset_combo.addItems(list(PAYLOADS.keys()) + ['Custom'])
+            payload_set_labels = list(PAYLOADS.keys())
+            if 'Custom' not in payload_set_labels:
+                payload_set_labels.append('Custom')
+            pset_combo = QComboBox(); pset_combo.addItems(payload_set_labels)
+            pset_combo.setObjectName('IntruderPayloadSetCombo')
             urlenc_chk = QCheckBox('URL-encode payloads')
             i_start = QPushButton('▶ Start')
             i_stop = QPushButton('■ Stop'); i_stop.setEnabled(False)
             i_status = QLabel('')
+            i_status.setObjectName('IntruderStatus')
             prow.addWidget(QLabel('Payload set:')); prow.addWidget(pset_combo)
             prow.addWidget(urlenc_chk); prow.addWidget(i_start); prow.addWidget(i_stop)
             prow.addWidget(i_status, 1)
             il.addLayout(prow)
             custom_edit = QPlainTextEdit(); custom_edit.setMaximumHeight(60)
+            custom_edit.setObjectName('IntruderCustomPayloads')
             custom_edit.setPlaceholderText('custom payloads — one per line (used for "Custom", else appended)')
             il.addWidget(custom_edit)
 
@@ -11295,16 +11289,47 @@ def main() -> None:
             tabs.addTab(intr, 'Intruder')
 
             ipool = {'pool': None}
-            istate = {'pending': [], 'baseline': None, 'baseline_fut': None, 'responses': {}}
+            istate = {
+                'pending': [],
+                'baseline': None,
+                'baseline_fut': None,
+                'responses': {},
+                'workbench_config': None,
+                'loaded_payloads': None,
+                'loaded_label': '',
+            }
             itimer = QTimer(dlg)
+
+            def _clear_workbench_config():
+                istate['workbench_config'] = None
+                urlenc_chk.setEnabled(True)
+
+            def _clear_loaded_payloads():
+                istate['loaded_payloads'] = None
+                istate['loaded_label'] = ''
 
             def _load_from_repeater():
                 i_method.setCurrentText(method.currentText())
                 i_url.setText(url.text())
                 i_headers.setPlainText(headers_edit.toPlainText())
                 i_body.setPlainText(body_edit.toPlainText())
+                _clear_workbench_config()
+                _clear_loaded_payloads()
 
             def _intr_build(payload):
+                workbench_config = istate.get('workbench_config')
+                if isinstance(workbench_config, dict):
+                    request = build_payload_request(
+                        method=i_method.currentText(),
+                        url=str(workbench_config.get('url') or ''),
+                        payload=payload,
+                        location=str(workbench_config.get('location') or 'query'),
+                        name=str(workbench_config.get('name') or 'q'),
+                        encoding=str(workbench_config.get('encoding') or 'none'),
+                        headers=workbench_config.get('headers') or {},
+                        base_body=str(workbench_config.get('base_body') or ''),
+                    )
+                    return request.url, dict(request.headers), request.body
                 enc = _ulib.quote(payload, safe='') if urlenc_chk.isChecked() else payload
                 u = i_url.text().replace('FUZZ', enc)
                 if u and '://' not in u:
@@ -11321,7 +11346,15 @@ def main() -> None:
                     return
                 pset = pset_combo.currentText()
                 if pset == 'Custom':
-                    payloads = [x for x in custom_edit.toPlainText().splitlines() if x.strip()]
+                    loaded_payloads = istate.get('loaded_payloads')
+                    payloads = (
+                        list(loaded_payloads)
+                        if isinstance(loaded_payloads, list)
+                        else [
+                            x for x in custom_edit.toPlainText().splitlines()
+                            if x.strip()
+                        ]
+                    )
                 else:
                     payloads = list(PAYLOADS.get(pset, []))
                     payloads += [x for x in custom_edit.toPlainText().splitlines() if x.strip()]
@@ -11332,20 +11365,34 @@ def main() -> None:
                 istate['responses'] = {}
                 istate['baseline'] = None
                 opts = _get_opts()
+                try:
+                    bu, bh, bb = _intr_build('')   # baseline = marker removed
+                    prepared = [
+                        (payload, *_intr_build(payload))
+                        for payload in payloads
+                    ]
+                except Exception as exc:
+                    i_status.setText(f'Could not build requests: {exc}')
+                    return
                 pool2 = concurrent.futures.ThreadPoolExecutor(max_workers=10)
                 ipool['pool'] = pool2
-                bu, bh, bb = _intr_build('')   # baseline = marker removed
                 istate['baseline_fut'] = pool2.submit(_send_request, m, bu, bh, bb, opts)
                 pending = []
                 res_table.setSortingEnabled(False)
-                for i, p in enumerate(payloads):
-                    u, hdrs, body = _intr_build(p)
+                for i, (p, u, hdrs, body) in enumerate(prepared):
                     r = res_table.rowCount(); res_table.insertRow(r)
                     res_table.setItem(r, 0, _num_item(i + 1))
                     pi = QTableWidgetItem(p); pi.setData(Qt.ItemDataRole.UserRole, r)
                     res_table.setItem(r, 1, pi)
                     res_table.setItem(r, 2, QTableWidgetItem('…'))
-                    pending.append((r, p, pool2.submit(_send_request, m, u, hdrs, body, opts)))
+                    pending.append((
+                        r,
+                        p,
+                        u,
+                        hdrs,
+                        body,
+                        pool2.submit(_send_request, m, u, hdrs, body, opts),
+                    ))
                 res_table.setSortingEnabled(True)
                 istate['pending'] = pending
                 i_start.setEnabled(False); i_stop.setEnabled(True)
@@ -11362,9 +11409,17 @@ def main() -> None:
                         except Exception:
                             istate['baseline'] = (0, 0)
                 still = []
-                for (rowi, p, fut) in istate['pending']:
+                for (rowi, p, request_url, request_headers, request_body, fut) in istate['pending']:
                     if not fut.done():
-                        still.append((rowi, p, fut)); continue
+                        still.append((
+                            rowi,
+                            p,
+                            request_url,
+                            request_headers,
+                            request_body,
+                            fut,
+                        ))
+                        continue
                     try:
                         r, dt = fut.result()
                         st, ln = r.status_code, len(r.content)
@@ -11390,9 +11445,22 @@ def main() -> None:
                             ni.setForeground(QBrush(QColor('#f59e0b')))
                         res_table.setItem(rowi, 5, ni)
                         body_txt = r.text if len(r.text) <= 100000 else r.text[:100000] + '\n…(truncated)'
-                        hdr_txt = '\n'.join(f"{k}: {v}" for k, v in r.headers.items())
-                        istate['responses'][rowi] = (f"PAYLOAD: {p}\nHTTP {st} {r.reason}  "
-                                                     f"({ln} bytes, {dt*1000:.0f} ms)\n\n{hdr_txt}\n\n{body_txt}")
+                        request_header_text = '\n'.join(
+                            f"{k}: {v}" for k, v in request_headers.items()
+                        )
+                        response_header_text = '\n'.join(
+                            f"{k}: {v}" for k, v in r.headers.items()
+                        )
+                        request_text = (
+                            f"{i_method.currentText()} {request_url}\n"
+                            f"{request_header_text}\n\n{request_body or ''}"
+                        )
+                        istate['responses'][rowi] = (
+                            f"PAYLOAD: {p}\n\nREQUEST\n{request_text}\n\n"
+                            f"RESPONSE\nHTTP {st} {r.reason}  "
+                            f"({ln} bytes, {dt*1000:.0f} ms)\n"
+                            f"{response_header_text}\n\n{body_txt}"
+                        )
                     except Exception as e:
                         res_table.setItem(rowi, 2, QTableWidgetItem('ERR'))
                         res_table.setItem(rowi, 5, QTableWidgetItem(str(e)[:60]))
@@ -11430,6 +11498,11 @@ def main() -> None:
             i_start.clicked.connect(_intr_start)
             i_stop.clicked.connect(_intr_stop)
             res_table.itemSelectionChanged.connect(_intr_detail)
+            i_method.currentIndexChanged.connect(_clear_workbench_config)
+            i_url.textEdited.connect(_clear_workbench_config)
+            i_headers.textChanged.connect(_clear_workbench_config)
+            i_body.textChanged.connect(_clear_workbench_config)
+            custom_edit.textChanged.connect(_clear_loaded_payloads)
 
             # ============================ DECODER TAB ============================
             dec = QtWidgets.QWidget()
@@ -11487,7 +11560,46 @@ def main() -> None:
                     tabs.setCurrentWidget(rep)
                 except Exception:
                     pass
+
+            def _apply_intruder_prefill(config, payloads, label='Selected family'):
+                """Load a placement-aware request family into Intruder."""
+                try:
+                    if not isinstance(config, dict) or not payloads:
+                        return
+                    marker_request = build_payload_request(
+                        method=str(config.get('method') or 'GET'),
+                        url=str(config.get('url') or ''),
+                        payload='FUZZ',
+                        location=str(config.get('location') or 'query'),
+                        name=str(config.get('name') or 'q'),
+                        encoding='none',
+                        headers=config.get('headers') or {},
+                        base_body=str(config.get('base_body') or ''),
+                    )
+                    i_method.setCurrentText(marker_request.method)
+                    i_url.setText(marker_request.url)
+                    i_headers.setPlainText('\n'.join(
+                        f"{key}: {value}"
+                        for key, value in marker_request.headers.items()
+                    ))
+                    i_body.setPlainText(marker_request.body or '')
+                    pset_combo.setCurrentText('Custom')
+                    custom_edit.setPlainText('\n'.join(str(p) for p in payloads))
+                    urlenc_chk.setChecked(False)
+                    urlenc_chk.setEnabled(False)
+                    istate['workbench_config'] = dict(config)
+                    istate['loaded_payloads'] = [str(p) for p in payloads]
+                    istate['loaded_label'] = str(label)
+                    i_status.setText(
+                        f'Loaded {len(payloads)} payload(s) from {label}. '
+                        'Exact workbench placement is active.'
+                    )
+                    tabs.setCurrentWidget(intr)
+                except Exception as exc:
+                    i_status.setText(f'Could not load payload family: {exc}')
+
             self._repeater_apply = _apply_prefill
+            self._intruder_apply = _apply_intruder_prefill
             return dlg
 
         def _repeater_load(self, prefill):
@@ -11496,6 +11608,13 @@ def main() -> None:
             fn = getattr(self, '_repeater_apply', None)
             if callable(fn):
                 fn(prefill)
+
+        def _intruder_load(self, config, payloads, label='Selected family'):
+            """Switch to Intruder with a placement-aware payload family."""
+            self._navigate('repeater')
+            fn = getattr(self, '_intruder_apply', None)
+            if callable(fn):
+                fn(config, payloads, label)
 
         def _show_http_log_dialog(self):
             """Show HTTP request/response log in a dialog."""
@@ -13448,6 +13567,12 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                 copy_curl_btn = style_button(
                     QPushButton(), 'secondary', text='Copy cURL'
                 )
+                intruder_family_btn = style_button(
+                    QPushButton(),
+                    'secondary',
+                    text='Test this family in Intruder',
+                    tooltip='Load this family and the exact insertion point into Intruder',
+                )
                 repeater_btn = style_button(
                     QPushButton(), 'primary', text='Open exact request in Repeater',
                     tooltip='Review and send the request from Repeater',
@@ -13455,6 +13580,7 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                 repeater_btn.setProperty('payloadAction', 'repeater')
                 action_row.addWidget(copy_payload_btn)
                 action_row.addWidget(copy_curl_btn)
+                action_row.addWidget(intruder_family_btn)
                 action_row.addStretch()
                 action_row.addWidget(repeater_btn)
                 inspector_layout.addLayout(action_row)
@@ -13595,6 +13721,7 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                         )
                         copy_payload_btn.setEnabled(False)
                         copy_curl_btn.setEnabled(False)
+                        intruder_family_btn.setEnabled(False)
                         repeater_btn.setEnabled(False)
                         return
                     copy_payload_btn.setEnabled(bool(payload_edit.toPlainText()))
@@ -13614,6 +13741,7 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                         destination_label.setText(f'Not ready — {exc}')
                         preview_edit.setPlainText(str(exc))
                         copy_curl_btn.setEnabled(False)
+                        intruder_family_btn.setEnabled(False)
                         repeater_btn.setEnabled(False)
                         return
                     state['request'] = request
@@ -13625,6 +13753,7 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                     )
                     preview_edit.setPlainText(request.preview())
                     copy_curl_btn.setEnabled(True)
+                    intruder_family_btn.setEnabled(True)
                     repeater_btn.setEnabled(True)
                     action_status.setText('')
 
@@ -13957,6 +14086,40 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                         return
                     self._repeater_load(request.as_repeater_prefill())
 
+                def open_family_in_intruder():
+                    refresh_preview()
+                    request = state.get('request')
+                    template = state.get('selected')
+                    if request is None or not isinstance(template, PayloadTemplate):
+                        return
+                    location = selected_location()
+                    family_payloads = [
+                        item.payload
+                        for item in state['catalog']
+                        if (
+                            item.category == template.category
+                            and item.family == template.family
+                            and location in item.locations
+                        )
+                    ]
+                    if not family_payloads:
+                        family_payloads = [payload_edit.toPlainText()]
+                    config = {
+                        'method': method_combo.currentText(),
+                        'url': target_edit.text(),
+                        'location': location,
+                        'name': location_name_edit.text(),
+                        'encoding': str(
+                            encoding_combo.currentData() or 'none'
+                        ),
+                        'headers': parse_headers(),
+                        'base_body': base_body_edit.toPlainText(),
+                    }
+                    label = (
+                        f'{category_name(template.category)} → {template.family}'
+                    )
+                    self._intruder_load(config, family_payloads, label)
+
                 def filter_category_changed():
                     update_family_filter()
                     refresh_catalog()
@@ -13984,6 +14147,7 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                 base_body_edit.textChanged.connect(refresh_preview)
                 copy_payload_btn.clicked.connect(copy_payload)
                 copy_curl_btn.clicked.connect(copy_curl)
+                intruder_family_btn.clicked.connect(open_family_in_intruder)
                 repeater_btn.clicked.connect(open_in_repeater)
                 add_btn.clicked.connect(add_payload)
                 import_btn.clicked.connect(import_payloads)

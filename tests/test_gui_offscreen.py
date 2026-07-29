@@ -213,6 +213,13 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
             for index in range(sql_node.childCount())
         }
         assert {'Boolean / basic 1=1', 'UNION SELECT', 'Time based'} <= family_names
+        union_node = next(
+            sql_node.child(index)
+            for index in range(sql_node.childCount())
+            if sql_node.child(index).text(0) == 'UNION SELECT'
+        )
+        catalog.setCurrentItem(union_node.child(0))
+        QApplication.processEvents()
 
         payload_target = payload_page.findChild(
             QLineEdit, 'PayloadTargetInput'
@@ -232,20 +239,73 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
             for button in payload_page.findChildren(QPushButton)
         }
         assert {
-            'Copy payload', 'Copy cURL', 'Open exact request in Repeater'
+            'Copy payload',
+            'Copy cURL',
+            'Test this family in Intruder',
+            'Open exact request in Repeater',
         } <= set(payload_buttons)
         assert payload_buttons['Open exact request in Repeater'].isEnabled()
         payload_buttons['Copy cURL'].click()
         assert 'https://ctf.example.test/search' in QApplication.clipboard().text()
         repeater_prefill = {}
+        original_repeater_load = window._repeater_load
         window._repeater_load = lambda request: repeater_prefill.update(request)
         payload_buttons['Open exact request in Repeater'].click()
         assert repeater_prefill['url'].startswith(
             'https://ctf.example.test/search?'
         )
         assert repeater_prefill['method'] == 'GET'
+        window._repeater_load = original_repeater_load
+
+        intruder_handoff = {}
+        original_intruder_load = window._intruder_load
+        window._intruder_load = lambda config, payloads, label: intruder_handoff.update({
+            'config': config,
+            'payloads': payloads,
+            'label': label,
+        })
+        payload_buttons['Test this family in Intruder'].click()
+        assert intruder_handoff['config']['location'] == 'query'
+        assert intruder_handoff['label'].endswith('UNION SELECT')
+        assert len(intruder_handoff['payloads']) >= 3
+        assert all(
+            'UNION SELECT' in payload
+            for payload in intruder_handoff['payloads']
+        )
+        window._intruder_load = original_intruder_load
+
+        repeater_page = window._build_repeater_page()
+        repeater_page.resize(1050, 760)
+        repeater_page.show()
+        QApplication.processEvents()
+        intruder_sets = repeater_page.findChild(
+            QComboBox, 'IntruderPayloadSetCombo'
+        )
+        set_names = {
+            intruder_sets.itemText(index)
+            for index in range(intruder_sets.count())
+        }
+        assert {
+            'SQL injection',
+            'Cross-site scripting',
+            'Encoding / filter normalization',
+        } <= set_names
+        window._intruder_apply(
+            intruder_handoff['config'],
+            intruder_handoff['payloads'],
+            intruder_handoff['label'],
+        )
+        QApplication.processEvents()
+        assert 'q=FUZZ' in repeater_page.findChild(
+            QLineEdit, 'IntruderUrlInput'
+        ).text()
+        assert 'Exact workbench placement is active' in next(
+            label.text() for label in repeater_page.findChildren(QLabel)
+            if label.objectName() == 'IntruderStatus'
+        )
 
         inspected['ok'] = True
+        repeater_page.close()
         payload_page.close()
         report_page.close()
         recon_page.close()
