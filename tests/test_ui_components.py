@@ -1,4 +1,11 @@
-from wafpierce.ui_components import BUTTON_OBJECT_NAMES, style_button
+from wafpierce.ui_components import (
+    BUTTON_OBJECT_NAMES,
+    DISCLOSURE_OBJECT_NAME,
+    disclosure_text,
+    set_disclosure_state,
+    style_button,
+    style_disclosure_button,
+)
 from wafpierce.theme import PALETTE, contrast_ratio, stylesheet
 from wafpierce.gui import PRIMARY_NAV_ITEMS, WORKBENCH_ITEMS
 
@@ -15,6 +22,20 @@ class _Button:
 
     def setToolTip(self, value):
         self.tooltip = value
+
+    def setCheckable(self, value):
+        self.checkable = value
+
+    def setChecked(self, value):
+        self.checked = value
+
+    def setProperty(self, key, value):
+        if not hasattr(self, 'properties'):
+            self.properties = {}
+        self.properties[key] = value
+
+    def setAccessibleDescription(self, value):
+        self.accessible_description = value
 
 
 def test_button_roles_are_explicit_and_accessible():
@@ -41,6 +62,27 @@ def test_unknown_button_role_fails_fast():
         pass
 
 
+def test_disclosure_buttons_expose_collapsed_and_expanded_state():
+    button = style_disclosure_button(
+        _Button(), 'Advanced scan controls', expanded=False
+    )
+
+    assert button.object_name == DISCLOSURE_OBJECT_NAME
+    assert button.checkable is True
+    assert button.checked is False
+    assert button.text == '▸ Advanced scan controls'
+    assert button.properties['expanded'] == 'false'
+    assert button.accessible_name == 'Show Advanced scan controls'
+    assert 'collapsed' in button.accessible_description
+
+    set_disclosure_state(button, 'Advanced scan controls', True)
+    assert button.text == '▾ Advanced scan controls'
+    assert button.properties['expanded'] == 'true'
+    assert button.accessible_name == 'Hide Advanced scan controls'
+    assert 'expanded' in button.accessible_description
+    assert disclosure_text('Options', False) == '▸ Options'
+
+
 def test_theme_uses_restrained_brass_without_decorative_gradients():
     css = stylesheet()
 
@@ -48,6 +90,12 @@ def test_theme_uses_restrained_brass_without_decorative_gradients():
     assert 'qlineargradient' not in css
     assert 'QPushButton#QuietButton' in css
     assert 'QPushButton#ResultsButton[hasResults="true"]' in css
+    assert 'QPushButton#DisclosureButton' in css
+    assert 'QComboBox::drop-down' in css
+    assert 'QComboBox::down-arrow' in css
+    assert 'chevron-down.svg' in css
+    assert 'border-left: 1px solid' in css
+    assert 'QTreeWidget::branch:closed:has-children' in css
 
 
 def test_core_theme_contrast_meets_wcag_aa():

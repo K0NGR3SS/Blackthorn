@@ -16,6 +16,8 @@ with the rest of the UI instead of hard-coding colours.
 
 from __future__ import annotations
 
+from .branding import asset_path
+
 
 # --- Palette -------------------------------------------------------------
 # Midnight surfaces with warm brass reserved for focus and primary actions.
@@ -65,7 +67,6 @@ PALETTE = {
 UI_FONT = '"Segoe UI", "Inter", -apple-system, "Helvetica Neue", Arial, sans-serif'
 MONO_FONT = '"JetBrains Mono", "Cascadia Code", "Fira Code", Consolas, "DejaVu Sans Mono", monospace'
 
-
 def _relative_luminance(hex_color: str) -> float:
     value = str(hex_color).lstrip('#')
     if len(value) != 6:
@@ -94,6 +95,9 @@ def contrast_ratio(foreground: str, background: str) -> float:
 def stylesheet() -> str:
     """Return the global application stylesheet."""
     p = PALETTE
+    chevron_down = asset_path('chevron-down.svg').replace('\\', '/')
+    chevron_down_muted = asset_path('chevron-down-muted.svg').replace('\\', '/')
+    chevron_right_muted = asset_path('chevron-right-muted.svg').replace('\\', '/')
     return f"""
 /* ============================ BASE ============================ */
 QWidget {{
@@ -127,6 +131,17 @@ QSpinBox, QDoubleSpinBox, QComboBox {{
     selection-background-color: {p['accent']};
     selection-color: {p['text_inverse']};
 }}
+QComboBox {{
+    padding-right: 40px;
+}}
+QComboBox:hover {{
+    border-color: {p['accent']};
+    background-color: {p['input_alt']};
+}}
+QComboBox:on {{
+    border-color: {p['accent']};
+    background-color: {p['input_alt']};
+}}
 QPlainTextEdit, QTextEdit {{ font-family: {MONO_FONT}; }}
 QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus,
 QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{
@@ -142,7 +157,30 @@ QSpinBox::up-button, QDoubleSpinBox::up-button,
 QSpinBox::down-button, QDoubleSpinBox::down-button {{
     width: 16px; border: none; background: transparent;
 }}
-QComboBox::drop-down {{ border: none; width: 22px; }}
+/* A bordered trailing button and high-contrast chevron make every selector
+   read as a dropdown, even on platforms whose native arrow is too subtle. */
+QComboBox::drop-down {{
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 30px;
+    border: none;
+    border-left: 1px solid {p['border']};
+    border-top-right-radius: 4px;
+    border-bottom-right-radius: 4px;
+    background-color: {p['elevated']};
+}}
+QComboBox::drop-down:hover {{
+    background-color: {p['accent_soft']};
+    border-left-color: {p['accent']};
+}}
+QComboBox::down-arrow {{
+    image: url("{chevron_down}");
+    width: 12px;
+    height: 8px;
+}}
+QComboBox::down-arrow:on {{
+    top: 1px;
+}}
 QComboBox QAbstractItemView {{
     background-color: {p['card']};
     color: {p['text']};
@@ -201,6 +239,32 @@ QPushButton#ResultsButton[hasResults="true"] {{
     border-color: {p['success']};
 }}
 
+/* Disclosure controls are visually and semantically distinct from actions. */
+QPushButton#DisclosureButton {{
+    background-color: {p['card']};
+    color: {p['text']};
+    border: 1px solid {p['border']};
+    border-left: 3px solid {p['text_faint']};
+    border-radius: 4px;
+    padding: 8px 11px;
+    text-align: left;
+    font-weight: 650;
+}}
+QPushButton#DisclosureButton:hover {{
+    background-color: {p['input_alt']};
+    border-color: {p['accent']};
+}}
+QPushButton#DisclosureButton:checked {{
+    background-color: {p['accent_softer']};
+    border-left-color: {p['accent']};
+    color: {p['text']};
+}}
+QWidget#ExpandablePanel {{
+    background-color: {p['card']};
+    border: 1px solid {p['border']};
+    border-radius: 5px;
+}}
+
 /* Danger button: set objectName('DangerButton') */
 QPushButton#DangerButton {{ color: #ffffff; background-color: {p['danger']}; border-color: {p['danger']}; }}
 QPushButton#DangerButton:hover {{ background-color: #f25555; }}
@@ -251,6 +315,12 @@ QHeaderView::section {{
     font-weight: 600;
 }}
 QTreeWidget::branch {{ background: transparent; }}
+QTreeWidget::branch:closed:has-children {{
+    image: url("{chevron_right_muted}");
+}}
+QTreeWidget::branch:open:has-children {{
+    image: url("{chevron_down_muted}");
+}}
 
 /* ============================ PROGRESS ============================ */
 QProgressBar {{

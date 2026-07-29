@@ -24,6 +24,7 @@ setup(
     long_description_content_type="text/markdown",
     python_requires=">=3.8",
     packages=find_packages(),
+    package_data={"wafpierce": ["assets/*.svg"]},
     data_files=[
         ("share/blackthorn", [
             "blackthorn-logo-transparent.png",

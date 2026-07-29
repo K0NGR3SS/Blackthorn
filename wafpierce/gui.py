@@ -35,7 +35,11 @@ from .branding import (
     asset_path,
 )
 from .exporters import is_confirmed_result as _is_confirmed_result, result_state as _result_state
-from .ui_components import style_button
+from .ui_components import (
+    set_disclosure_state,
+    style_button,
+    style_disclosure_button,
+)
 
 LOGO_PATH = asset_path(TRANSPARENT_LOGO)
 SIDEBAR_LOGO_PATH = asset_path(DARK_LOGO)
@@ -2888,6 +2892,10 @@ def main() -> None:
             nav_lay.addWidget(section)
             workbench = QtWidgets.QComboBox()
             workbench.setAccessibleName('Open a specialist workbench')
+            workbench.setAccessibleDescription(
+                'Dropdown menu for choosing a specialist tool.'
+            )
+            workbench.setToolTip('Dropdown menu — choose a specialist tool')
             workbench.addItem('Open a tool…', None)
             for label, key in WORKBENCH_ITEMS:
                 workbench.addItem(label, key)
@@ -3416,6 +3424,9 @@ def main() -> None:
             top.addWidget(engagement_lbl)
             self._engagement_combo = QtWidgets.QComboBox()
             self._engagement_combo.setAccessibleName('Active engagement')
+            self._engagement_combo.setAccessibleDescription(
+                'Dropdown menu for choosing the active engagement.'
+            )
             self._refresh_engagement_combo()
             top.addWidget(self._engagement_combo, 1)
             manage_btn = style_button(
@@ -3434,7 +3445,7 @@ def main() -> None:
             self._scan_profile_combo = QtWidgets.QComboBox()
             self._scan_profile_combo.setAccessibleName('Scan profile')
             self._scan_profile_combo.setAccessibleDescription(
-                'Task-based selection of scanner categories and safety defaults'
+                'Dropdown menu for task-based scanner categories and safety defaults'
             )
             for key, definition in SCAN_PROFILE_DEFINITIONS.items():
                 self._scan_profile_combo.addItem(definition['label'], key)
@@ -3452,14 +3463,21 @@ def main() -> None:
             self._scan_profile_summary.setObjectName('FieldLabel')
             layout.addWidget(self._scan_profile_summary)
 
-            advanced_group = QtWidgets.QGroupBox('Advanced controls')
-            advanced_group.setAccessibleName('Advanced scan controls')
-            advanced_group.setCheckable(True)
-            advanced_group.setChecked(False)
+            advanced_group = QWidget()
+            advanced_group.setObjectName('ScanAdvancedSection')
             advanced_layout = QtWidgets.QVBoxLayout(advanced_group)
-            advanced_body = QWidget()
+            advanced_layout.setContentsMargins(0, 0, 0, 0)
+            advanced_layout.setSpacing(6)
+            advanced_toggle = style_disclosure_button(
+                QPushButton(), 'Advanced scan controls', expanded=False
+            )
+            advanced_toggle.setProperty('sectionKey', 'scan-advanced')
+            advanced_layout.addWidget(advanced_toggle)
+            advanced_body = QtWidgets.QFrame()
+            advanced_body.setObjectName('ExpandablePanel')
+            advanced_body.setAccessibleName('Advanced scan controls')
             advanced_body_layout = QtWidgets.QVBoxLayout(advanced_body)
-            advanced_body_layout.setContentsMargins(0, 4, 0, 0)
+            advanced_body_layout.setContentsMargins(12, 10, 12, 12)
             advanced_body_layout.setSpacing(10)
 
             auth = QtWidgets.QGridLayout()
@@ -3551,7 +3569,16 @@ def main() -> None:
             advanced_body_layout.addLayout(cats)
             advanced_layout.addWidget(advanced_body)
             advanced_body.setVisible(False)
-            advanced_group.toggled.connect(advanced_body.setVisible)
+
+            def toggle_advanced_controls(expanded):
+                advanced_body.setVisible(bool(expanded))
+                set_disclosure_state(
+                    advanced_toggle,
+                    'Advanced scan controls',
+                    bool(expanded),
+                )
+
+            advanced_toggle.toggled.connect(toggle_advanced_controls)
             layout.addWidget(advanced_group)
 
             self._preflight_summary = QLabel()
@@ -5186,6 +5213,7 @@ def main() -> None:
                 QDialog { background-color: #0f1112; }
                 QLabel { color: #d7e1ea; }
                 QLineEdit, QComboBox, QListWidget { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; border-radius: 4px; padding: 5px; }
+                QComboBox { padding-right: 40px; }
                 QListWidget::item:selected { background-color: #3b82f6; }
                 QPushButton { background-color: #2b2f33; color: #d7e1ea; border: none; padding: 7px 12px; border-radius: 4px; }
                 QPushButton:hover { background-color: #3b3f43; }
@@ -5264,6 +5292,7 @@ def main() -> None:
                 d = QtWidgets.QDialog(dlg); d.setWindowTitle(f"Configure {STAGE_TYPES.get(t, t)}"); d.resize(480, 220)
                 d.setStyleSheet('QDialog{background:#0f1112;} QLabel{color:#d7e1ea;} '
                                 'QLineEdit,QComboBox{background:#16181a;color:#d7e1ea;border:1px solid #2b2f33;padding:5px;} '
+                                'QComboBox{padding-right:40px;} '
                                 'QPushButton{background:#2b2f33;color:#d7e1ea;padding:6px 12px;border-radius:4px;}')
                 v = QVBoxLayout(d); w = {}
                 if t == 'wafpierce_scan':
@@ -5503,6 +5532,7 @@ def main() -> None:
                 QDialog { background-color: #0f1112; }
                 QLabel { color: #d7e1ea; }
                 QLineEdit, QComboBox, QPlainTextEdit { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; border-radius: 4px; padding: 5px; }
+                QComboBox { padding-right: 40px; }
                 QTreeWidget { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; }
                 QTreeWidget::item:selected { background-color: #3b82f6; }
                 QTabWidget::pane { border: 1px solid #2b2f33; }
@@ -5809,6 +5839,7 @@ def main() -> None:
                 QGroupBox { color:#d7e1ea; border:1px solid #2b2f33; margin-top:10px; padding-top:10px; }
                 QGroupBox::title { subcontrol-origin: margin; left:10px; padding:0 5px; }
                 QLineEdit, QComboBox { background:#16181a; color:#d7e1ea; border:1px solid #2b2f33; border-radius:4px; padding:5px; }
+                QComboBox { padding-right: 40px; }
                 QCheckBox { color:#d7e1ea; }
                 QPushButton { background:#2b2f33; color:#d7e1ea; border:none; padding:7px 12px; border-radius:4px; }
                 QPushButton:hover { background:#3b3f43; }
@@ -5946,6 +5977,7 @@ def main() -> None:
                 QDialog { background-color: #0f1112; }
                 QLabel { color:#d7e1ea; }
                 QLineEdit, QComboBox, QPlainTextEdit { background:#16181a; color:#d7e1ea; border:1px solid #2b2f33; border-radius:4px; padding:5px; }
+                QComboBox { padding-right: 40px; }
                 QTreeWidget { background:#16181a; color:#d7e1ea; border:1px solid #2b2f33; }
                 QTabWidget::pane { border:1px solid #2b2f33; }
                 QTabBar::tab { background:#16181a; color:#d7e1ea; padding:7px 14px; }
@@ -6514,23 +6546,27 @@ def main() -> None:
             )
             coverage_note.setObjectName('FieldLabel')
             coverage_note.setWordWrap(True)
-            coverage_toggle = style_button(
-                QPushButton(), 'quiet', text='Customize stages'
+            coverage_toggle = style_disclosure_button(
+                QPushButton(),
+                'Customize discovery stages',
+                expanded=False,
             )
+            coverage_toggle.setProperty('sectionKey', 'discovery-stages')
             coverage_row.addWidget(coverage_note, 1)
             coverage_row.addWidget(coverage_toggle)
             lay.addLayout(coverage_row)
             stages_box.setVisible(False)
             lay.addWidget(stages_box)
 
-            def _toggle_coverage():
-                visible = not stages_box.isVisible()
-                stages_box.setVisible(visible)
-                coverage_toggle.setText(
-                    'Hide stage settings' if visible else 'Customize stages'
+            def _toggle_coverage(expanded):
+                stages_box.setVisible(bool(expanded))
+                set_disclosure_state(
+                    coverage_toggle,
+                    'Customize discovery stages',
+                    bool(expanded),
                 )
 
-            coverage_toggle.clicked.connect(_toggle_coverage)
+            coverage_toggle.toggled.connect(_toggle_coverage)
 
             def _collect_opts():
                 return {
@@ -10960,7 +10996,7 @@ def main() -> None:
                 QWidget#LivePage { background-color: #0f1112; }
                 QLabel { color: #d7e1ea; font-size: 12px; }
                 QComboBox { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33;
-                    border-radius: 4px; padding: 4px 8px; }
+                    border-radius: 4px; padding: 4px 40px 4px 8px; }
                 QTreeWidget { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; }
                 QTreeWidget::item { padding: 3px; }
                 QTreeWidget::item:selected { background-color: #3b82f6; }
@@ -11080,6 +11116,7 @@ def main() -> None:
                 QComboBox, QLineEdit, QPlainTextEdit, QSpinBox { background-color: #16181a; color: #d7e1ea;
                     border: 1px solid #2b2f33; border-radius: 4px; padding: 6px;
                     font-family: 'Consolas','Menlo',monospace; }
+                QComboBox { padding-right: 40px; }
                 QPushButton { background-color: #1f6feb; color: #fff; border: none;
                     padding: 7px 14px; border-radius: 4px; }
                 QPushButton:hover { background-color: #388bfd; }
@@ -11257,6 +11294,7 @@ def main() -> None:
                 payload_set_labels.append('Custom')
             pset_combo = QComboBox(); pset_combo.addItems(payload_set_labels)
             pset_combo.setObjectName('IntruderPayloadSetCombo')
+            pset_combo.setAccessibleName('Intruder payload-set dropdown')
             urlenc_chk = QCheckBox('URL-encode payloads')
             i_start = QPushButton('▶ Start')
             i_stop = QPushButton('■ Stop'); i_stop.setEnabled(False)
@@ -12413,7 +12451,7 @@ def main() -> None:
                 dlg.setStyleSheet("""
                     QDialog { background-color: #0f1112; }
                     QLabel { color: #d7e1ea; }
-                    QComboBox { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; padding: 5px; min-width: 300px; }
+                    QComboBox { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; padding: 5px 40px 5px 5px; min-width: 300px; }
                     QGroupBox { color: #d7e1ea; border: 1px solid #2b2f33; margin-top: 10px; padding-top: 10px; }
                     QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }
                     QListWidget { background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; }
@@ -12555,7 +12593,7 @@ def main() -> None:
                     QTableWidget::item {{ padding: 5px; }}
                     QTableWidget::item:selected {{ background-color: #3b82f6; }}
                     QHeaderView::section {{ background-color: #1c1f21; color: #d7e1ea; padding: 8px; border: none; border-bottom: 1px solid #2b2f33; font-family: '{selected_font}'; }}
-                    QComboBox {{ background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; padding: 5px; min-width: 200px; font-family: '{selected_font}'; }}
+                    QComboBox {{ background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; padding: 5px 40px 5px 5px; min-width: 200px; font-family: '{selected_font}'; }}
                     QPushButton {{ font-family: '{selected_font}'; }}
                     QTextEdit {{ font-family: '{selected_font}'; }}
                 """)
@@ -13396,6 +13434,10 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                 search_edit.setClearButtonEnabled(True)
                 category_filter = QComboBox()
                 category_filter.setObjectName('PayloadCategoryFilter')
+                category_filter.setAccessibleName('Payload category dropdown')
+                category_filter.setToolTip(
+                    'Dropdown menu — filter by payload category'
+                )
                 category_filter.addItem('All categories', '')
                 for category in PAYLOAD_CATEGORIES:
                     if category.key != 'custom':
@@ -13403,12 +13445,18 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                 category_filter.addItem('Custom', 'custom')
                 family_filter = QComboBox()
                 family_filter.setObjectName('PayloadFamilyFilter')
+                family_filter.setAccessibleName('Payload family dropdown')
+                family_filter.setToolTip(
+                    'Dropdown menu — filter by payload family'
+                )
                 family_filter.addItem('All families', '')
                 source_filter = QComboBox()
+                source_filter.setAccessibleName('Payload source dropdown')
                 source_filter.addItem('All sources', '')
                 source_filter.addItem('Built in', 'Built in')
                 source_filter.addItem('My payloads', 'Custom')
                 impact_filter = QComboBox()
+                impact_filter.setAccessibleName('Payload impact dropdown')
                 impact_filter.addItem('All impact levels', '')
                 for impact in ('Low', 'Moderate', 'Medium', 'High', 'Critical'):
                     impact_filter.addItem(impact, impact)
@@ -13480,6 +13528,7 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
 
                 method_combo = QComboBox()
                 method_combo.setObjectName('PayloadMethodCombo')
+                method_combo.setAccessibleName('HTTP method dropdown')
                 method_combo.addItems(
                     ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']
                 )
@@ -13497,6 +13546,7 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
 
                 location_combo = QComboBox()
                 location_combo.setObjectName('PayloadLocationCombo')
+                location_combo.setAccessibleName('Payload insertion-point dropdown')
                 location_name_edit = QLineEdit()
                 location_name_edit.setObjectName('PayloadLocationNameInput')
                 location_name_edit.setText('q')
@@ -13505,6 +13555,7 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                 )
                 encoding_combo = QComboBox()
                 encoding_combo.setObjectName('PayloadEncodingCombo')
+                encoding_combo.setAccessibleName('Payload encoding dropdown')
                 for key, label in ENCODING_OPTIONS:
                     encoding_combo.addItem(label, key)
 
@@ -14348,6 +14399,7 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                     QTableWidget::item:selected {{ background-color: #3b82f6; }}
                     QHeaderView::section {{ background-color: #21262d; color: #d7e1ea; padding: 8px; border: 1px solid #2b2f33; font-family: '{selected_font}'; }}
                     QLineEdit, QComboBox, QDateTimeEdit {{ background-color: #16181a; color: #d7e1ea; border: 1px solid #2b2f33; padding: 5px; font-family: '{selected_font}'; }}
+                    QComboBox {{ padding-right: 40px; }}
                     QGroupBox {{ color: #d7e1ea; border: 1px solid #2b2f33; margin-top: 10px; padding-top: 10px; font-family: '{selected_font}'; }}
                     QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 5px; }}
                     QPushButton {{ font-family: '{selected_font}'; }}

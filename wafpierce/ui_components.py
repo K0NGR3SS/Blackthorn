@@ -15,6 +15,10 @@ BUTTON_OBJECT_NAMES = {
     'results': 'ResultsButton',
 }
 
+DISCLOSURE_OBJECT_NAME = 'DisclosureButton'
+DISCLOSURE_CLOSED_GLYPH = '▸'
+DISCLOSURE_OPEN_GLYPH = '▾'
+
 
 def style_button(
     button,
@@ -35,3 +39,32 @@ def style_button(
     if tooltip:
         button.setToolTip(tooltip)
     return button
+
+
+def disclosure_text(label: str, expanded: bool) -> str:
+    """Return a consistent visible label for expandable sections."""
+    glyph = DISCLOSURE_OPEN_GLYPH if expanded else DISCLOSURE_CLOSED_GLYPH
+    return f'{glyph} {str(label).strip()}'
+
+
+def set_disclosure_state(button, label: str, expanded: bool):
+    """Update the visible and accessible state of a disclosure button."""
+    expanded = bool(expanded)
+    button.setProperty('expanded', 'true' if expanded else 'false')
+    button.setText(disclosure_text(label, expanded))
+    action = 'Hide' if expanded else 'Show'
+    state = 'expanded' if expanded else 'collapsed'
+    button.setAccessibleName(f'{action} {label}')
+    button.setAccessibleDescription(
+        f'Expandable section, currently {state}.'
+    )
+    button.setToolTip(f'{action} {label.lower()}')
+    return button
+
+
+def style_disclosure_button(button, label: str, *, expanded: bool = False):
+    """Make a button unambiguously control an expandable section."""
+    button.setObjectName(DISCLOSURE_OBJECT_NAME)
+    button.setCheckable(True)
+    button.setChecked(bool(expanded))
+    return set_disclosure_state(button, label, expanded)

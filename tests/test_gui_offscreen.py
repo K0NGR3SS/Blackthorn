@@ -79,6 +79,33 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
         QApplication.processEvents()
         assert window.width() == 1400
         assert window.height() == 900
+        dropdown_image = window._workbench_combo.grab().toImage()
+        assert 'Dropdown menu' in window._workbench_combo.accessibleDescription()
+        dropdown_light_pixels = 0
+        for x in range(
+                max(0, dropdown_image.width() - 25),
+                max(0, dropdown_image.width() - 5)):
+            for y in range(dropdown_image.height()):
+                color = dropdown_image.pixelColor(x, y)
+                if (
+                        color.red() > 180
+                        and color.green() > 180
+                        and color.blue() > 180):
+                    dropdown_light_pixels += 1
+        assert dropdown_light_pixels >= 3
+        scan_disclosure = next(
+            button for button in window.findChildren(QPushButton)
+            if button.objectName() == 'DisclosureButton'
+            and 'Advanced scan controls' in button.text()
+        )
+        assert scan_disclosure.text().startswith('▸')
+        assert scan_disclosure.isChecked() is False
+        assert 'collapsed' in scan_disclosure.accessibleDescription()
+        scan_disclosure.click()
+        QApplication.processEvents()
+        assert scan_disclosure.text().startswith('▾')
+        assert scan_disclosure.property('expanded') == 'true'
+        assert 'expanded' in scan_disclosure.accessibleDescription()
         target_input = next(
             field for field in window.findChildren(QLineEdit)
             if field.accessibleName() == 'Target URL'
@@ -146,6 +173,15 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
             checkbox for checkbox in recon_page.findChildren(QCheckBox)
             if checkbox.text().startswith('Active ports')
         ).isChecked() is False
+        discovery_disclosure = next(
+            button for button in recon_page.findChildren(QPushButton)
+            if button.objectName() == 'DisclosureButton'
+        )
+        assert discovery_disclosure.text().startswith('▸')
+        discovery_disclosure.click()
+        QApplication.processEvents()
+        assert discovery_disclosure.text().startswith('▾')
+        assert discovery_disclosure.property('expanded') == 'true'
         host_inventory = next(
             tree for tree in recon_page.findChildren(QTreeWidget)
             if tree.accessibleName() == 'Discovered host inventory'
@@ -204,6 +240,7 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
         category_filter = payload_page.findChild(
             QComboBox, 'PayloadCategoryFilter'
         )
+        assert category_filter.accessibleName() == 'Payload category dropdown'
         category_filter.setCurrentIndex(category_filter.findData('sqli'))
         QApplication.processEvents()
         assert catalog.topLevelItemCount() == 1
