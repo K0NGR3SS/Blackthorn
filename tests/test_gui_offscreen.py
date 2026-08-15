@@ -238,6 +238,63 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
         assert {
             'Resolved only', 'HTTP 2xx', 'HTTP 3xx', 'HTTP 4xx', 'HTTP 5xx'
         } <= filter_labels
+        window._recon_state['update_report']({
+            'target': 'example.test',
+            'findings': [{
+                'technique': 'Discovered Host',
+                'target': 'api.example.test',
+                'severity': 'INFO',
+                'reason': 'DNS resolved and HTTPS responded',
+                'http_status': 200,
+                'discovery': {'hostname': 'api.example.test'},
+            }],
+            'stages': {
+                'hosts': [{
+                    'hostname': 'api.example.test',
+                    'dns_live': True,
+                    'http_live': True,
+                    'http_status': 200,
+                    'http_url': 'https://api.example.test',
+                    'ip_addresses': ['192.0.2.1'],
+                }],
+                'ports': [{
+                    'host': '192.0.2.1',
+                    'port': 443,
+                    'service': 'https',
+                }],
+            },
+        })
+        QApplication.processEvents()
+        scanned_item = host_inventory.topLevelItem(0)
+        assert scanned_item.childCount() == 5
+        assert scanned_item.isExpanded() is False
+        host_inventory.itemClicked.emit(scanned_item, 0)
+        QApplication.processEvents()
+        assert scanned_item.isExpanded() is True
+        topology_tabs = next(
+            tabs for tabs in recon_page.findChildren(QTabWidget)
+            if 'Topology' in {
+                tabs.tabText(index) for index in range(tabs.count())
+            }
+        )
+        assert 'Topology' in {
+            topology_tabs.tabText(index)
+            for index in range(topology_tabs.count())
+        }
+        topology_details = next(
+            browser for browser in recon_page.findChildren(QTextBrowser)
+            if browser.accessibleName() == 'Topology host details'
+        )
+        assert 'api.example.test' in topology_details.toPlainText()
+        assert '443/tcp' in topology_details.toPlainText()
+        discovery_findings = next(
+            tree for tree in recon_page.findChildren(QTreeWidget)
+            if tree.accessibleName() == 'Discovery findings'
+        )
+        finding_item = discovery_findings.topLevelItem(0)
+        assert finding_item.childCount() >= 1
+        discovery_findings.itemClicked.emit(finding_item, 0)
+        assert finding_item.isExpanded() is True
         live_item = QTreeWidgetItem([
             'api.example.test', 'Resolved', 'Live · 200',
             'https://api.example.test', '192.0.2.1', 'subfinder',

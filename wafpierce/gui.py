@@ -6809,8 +6809,8 @@ def main() -> None:
             lay.addLayout(summary_row)
 
             inventory_action_hint = QLabel(
-                'Double-click a row to copy its URL. Right-click or press and '
-                'hold for URL, hostname, and IP copy options.'
+                'Click a host to expand its scan details. Right-click or press '
+                'and hold for URL, hostname, and IP copy options.'
             )
             inventory_action_hint.setObjectName('FieldLabel')
             inventory_action_hint.setWordWrap(True)
@@ -6831,8 +6831,8 @@ def main() -> None:
             host_tree.setAlternatingRowColors(True)
             host_tree.setContextMenuPolicy(Qt.CustomContextMenu)
             host_tree.setToolTip(
-                'Double-click a row to copy its URL. Right-click or press and '
-                'hold for more copy options.'
+                'Click a host to expand its ports, services, OS, and findings. '
+                'Right-click or press and hold for copy options.'
             )
             try:
                 header = host_tree.header()
@@ -6848,6 +6848,10 @@ def main() -> None:
             except Exception:
                 pass
             tabs.addTab(host_tree, 'Host inventory')
+
+            from .topology import create_topology_widget
+            topology = create_topology_widget(tabs)
+            tabs.addTab(topology, 'Topology')
 
             findings_tree = QTreeWidget()
             findings_tree.setAccessibleName('Discovery findings')
@@ -6881,7 +6885,12 @@ def main() -> None:
                 'tmp': None,
                 'findings': [],
                 'report': recon_report_parts(None),
+                'live_output': '',
+                'live_report_signature': None,
             }
+
+            live_report_timer = QtCore.QTimer(dlg)
+            live_report_timer.setInterval(500)
 
             def _append(text):
                 if not text:
@@ -6927,6 +6936,38 @@ def main() -> None:
                 else:
                     _copy_host_value(host.get('hostname'), 'hostname')
 
+            host_press_state = {'item': None, 'expanded': False}
+
+            def _remember_host_press(item, _column=0):
+                if item is not None and item.parent() is not None:
+                    item = item.parent()
+                host_press_state['item'] = item
+                host_press_state['expanded'] = bool(
+                    item is not None and item.isExpanded()
+                )
+
+            def _inspect_host_row(item, _column=0):
+                if item is None:
+                    return
+                if item.parent() is not None:
+                    item = item.parent()
+                host = _host_for_item(item)
+                if not host:
+                    return
+                expanded = not (
+                    host_press_state['expanded']
+                    if host_press_state.get('item') is item
+                    else item.isExpanded()
+                )
+                host_press_state['item'] = None
+                item.setExpanded(expanded)
+                topology.select_host(host)
+                inventory_action_hint.setText(
+                    ('Expanded' if expanded else 'Collapsed')
+                    + ' scan details for '
+                    + str(host.get('hostname') or 'selected host')
+                )
+
             def _show_host_copy_menu(point):
                 item = host_tree.itemAt(point)
                 host = _host_for_item(item)
@@ -6944,10 +6985,14 @@ def main() -> None:
                 copy_hostname.setEnabled(bool(hostname))
                 copy_ips = menu.addAction('Copy IP address(es)')
                 copy_ips.setEnabled(bool(ips))
+                menu.addSeparator()
+                inspect_host = menu.addAction('Inspect / expand host')
                 selected = menu.exec(
                     host_tree.viewport().mapToGlobal(point)
                 )
-                if selected == copy_url:
+                if selected == inspect_host:
+                    _inspect_host_row(item)
+                elif selected == copy_url:
                     _copy_host_value(url, 'URL')
                 elif selected == copy_hostname:
                     _copy_host_value(hostname, 'hostname')
@@ -6963,6 +7008,14 @@ def main() -> None:
                     inventory_search.text(),
                 )
                 from PySide6.QtGui import QBrush, QColor
+                from .topology import (
+                    build_topology, find_topology_node, host_detail_rows,
+                )
+                graph = build_topology(state['report'])
+                nodes_by_id = {
+                    str(node.get('id') or ''): node
+                    for node in graph.get('nodes') or []
+                }
                 for host in shown:
                     dns_text = (
                         'Resolved' if host.get('dns_live') else 'Unresolved'
@@ -7005,6 +7058,22 @@ def main() -> None:
                         )
                     except Exception:
                         pass
+                    node = nodes_by_id.get(
+                        str(host.get('hostname') or '').lower().rstrip('.')
+                    ) or find_topology_node(graph, host)
+                    for label, value in host_detail_rows(node):
+                        detail_item = QTreeWidgetItem([
+                            f'  {label}', '', '', value, '', '',
+                        ])
+                        detail_item.setToolTip(0, value)
+                        detail_item.setToolTip(3, value)
+                        try:
+                            detail_item.setForeground(
+                                0, QBrush(QColor('#9aa7b2'))
+                            )
+                        except Exception:
+                            pass
+                        item.addChild(detail_item)
                     host_tree.addTopLevelItem(item)
                 inventory_title.setText(
                     f'Discovered hosts · showing {len(shown)} of {len(hosts)}'
@@ -7023,10 +7092,36 @@ def main() -> None:
                     it = QTreeWidgetItem([
                         str(f.get('technique', '')), str(f.get('target', '')),
                         sev, str(f.get('reason', ''))[:240]])
+                    it.setData(0, 257, f)
                     try:
                         it.setForeground(2, QBrush(QColor(sev_color.get(sev, '#9aa7b2'))))
                     except Exception:
                         pass
+                    detail_rows = [
+                        ('Reason', str(f.get('reason') or 'No detail reported')),
+                    ]
+                    metadata = []
+                    for key in (
+                            'port', 'service', 'product', 'version',
+                            'http_status', 'template_id', 'ip_addresses'):
+                        value = f.get(key)
+                        if value not in (None, '', [], {}):
+                            if isinstance(value, (list, tuple, set)):
+                                value = ', '.join(str(item) for item in value)
+                            metadata.append(f'{key.replace("_", " ")}: {value}')
+                    if metadata:
+                        detail_rows.append(('Scan data', ' · '.join(metadata)))
+                    for label, value in detail_rows:
+                        child = QTreeWidgetItem([
+                            f'  {label}', '', '', value,
+                        ])
+                        child.setToolTip(0, value)
+                        child.setToolTip(3, value)
+                        try:
+                            child.setForeground(0, QBrush(QColor('#9aa7b2')))
+                        except Exception:
+                            pass
+                        it.addChild(child)
                     findings_tree.addTopLevelItem(it)
 
                 hosts = report.get('stages', {}).get('hosts') or []
@@ -7058,6 +7153,7 @@ def main() -> None:
                         f'{widget.accessibleName()}: {int(summary.get(key, 0) or 0)}'
                     )
                 _populate_host_inventory()
+                topology.set_report(report)
 
             def _set_outputs_enabled(on):
                 for b in (merge_btn, msf_btn, caido_btn, save_btn):
@@ -7068,12 +7164,104 @@ def main() -> None:
                     any(host.get('http_live') for host in hosts)
                 )
 
+            finding_press_state = {'item': None, 'expanded': False}
+
+            def _remember_finding_press(item, _column=0):
+                if item is not None and item.parent() is not None:
+                    item = item.parent()
+                finding_press_state['item'] = item
+                finding_press_state['expanded'] = bool(
+                    item is not None and item.isExpanded()
+                )
+
+            def _inspect_finding_row(item, _column=0):
+                if item is None:
+                    return
+                if item.parent() is not None:
+                    item = item.parent()
+                finding = item.data(0, 257)
+                if not isinstance(finding, dict):
+                    return
+                expanded = not (
+                    finding_press_state['expanded']
+                    if finding_press_state.get('item') is item
+                    else item.isExpanded()
+                )
+                finding_press_state['item'] = None
+                item.setExpanded(expanded)
+                discovery_host = finding.get('discovery')
+                if isinstance(discovery_host, dict):
+                    topology.select_host(discovery_host)
+
             def _on_stdout():
                 proc = state['proc']
                 if proc is not None:
-                    _append(bytes(proc.readAllStandardOutput()).decode('utf-8', 'replace'))
+                    text = bytes(proc.readAllStandardOutput()).decode(
+                        'utf-8', 'replace'
+                    )
+                    _append(text)
+                    state['live_output'] = (
+                        state.get('live_output', '') + text
+                    )[-100000:]
+                    try:
+                        from .topology import extract_live_hosts
+                        stages = dict(state['report'].get('stages') or {})
+                        existing = stages.get('hosts') or []
+                        live_hosts = extract_live_hosts(
+                            state['live_output'], target_edit.text(), existing
+                        )
+                        old_signature = tuple(sorted(
+                            (
+                                str(host.get('hostname') or ''),
+                                tuple(host.get('ip_addresses') or []),
+                                str(host.get('http_url') or ''),
+                            )
+                            for host in existing if isinstance(host, dict)
+                        ))
+                        new_signature = tuple(sorted(
+                            (
+                                str(host.get('hostname') or ''),
+                                tuple(host.get('ip_addresses') or []),
+                                str(host.get('http_url') or ''),
+                            )
+                            for host in live_hosts
+                        ))
+                        if live_hosts and new_signature != old_signature:
+                            stages['hosts'] = live_hosts
+                            _populate({
+                                'target': target_edit.text(),
+                                'findings': state['report'].get('findings') or [],
+                                'stages': stages,
+                            })
+                    except Exception:
+                        pass
+
+            def _poll_live_report():
+                """Consume partial report snapshots when a worker provides them."""
+                tmp = state.get('tmp')
+                if not tmp or not os.path.exists(tmp):
+                    return
+                try:
+                    size = os.path.getsize(tmp)
+                    if size <= 0:
+                        return
+                    with open(tmp, 'r', encoding='utf-8') as report_file:
+                        report = recon_report_parts(json.load(report_file))
+                    signature = (
+                        size,
+                        len(report.get('findings') or []),
+                        len(report.get('stages', {}).get('hosts') or []),
+                    )
+                    if signature != state.get('live_report_signature'):
+                        state['live_report_signature'] = signature
+                        state['findings'] = report['findings']
+                        _populate(report)
+                except (OSError, ValueError, json.JSONDecodeError):
+                    # The writer may be between JSON tokens; the next tick retries.
+                    return
 
             def _on_finished(code=0, status=None):
+                live_report_timer.stop()
                 run_btn.setEnabled(True); stop_btn.setEnabled(False)
                 report = recon_report_parts(None)
                 tmp = state['tmp']
@@ -7162,6 +7350,8 @@ def main() -> None:
                 state['tmp'] = tmpf.name
                 state['report'] = recon_report_parts(None)
                 state['findings'] = []
+                state['live_output'] = ''
+                state['live_report_signature'] = None
                 log.clear()
                 host_tree.clear()
                 findings_tree.clear()
@@ -7189,6 +7379,7 @@ def main() -> None:
                 state['proc'] = proc
                 _append('[recon] $ ' + ' '.join(cmd) + '\n\n')
                 run_btn.setEnabled(False); stop_btn.setEnabled(True)
+                live_report_timer.start()
                 proc.start(cmd[0], cmd[1:])
 
             def _stop():
@@ -7327,12 +7518,19 @@ def main() -> None:
             inventory_search.textChanged.connect(
                 lambda: _populate_host_inventory()
             )
+            host_tree.itemPressed.connect(_remember_host_press)
+            host_tree.itemClicked.connect(_inspect_host_row)
             host_tree.itemDoubleClicked.connect(_copy_host_row)
             host_tree.customContextMenuRequested.connect(
                 _show_host_copy_menu
             )
+            findings_tree.itemPressed.connect(_remember_finding_press)
+            findings_tree.itemClicked.connect(_inspect_finding_row)
+            live_report_timer.timeout.connect(_poll_live_report)
 
             # Keep a handle so other code (e.g. abort on quit) can reach the proc.
+            state['update_report'] = _populate
+            state['topology'] = topology
             self._recon_state = state
             return dlg
 
