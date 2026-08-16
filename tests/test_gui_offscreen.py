@@ -212,6 +212,10 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
             checkbox for checkbox in recon_page.findChildren(QCheckBox)
             if checkbox.text().startswith('Active ports')
         ).isChecked() is False
+        assert next(
+            checkbox for checkbox in recon_page.findChildren(QCheckBox)
+            if checkbox.text().startswith('Network paths')
+        ).isChecked() is False
         discovery_disclosure = next(
             button for button in recon_page.findChildren(QPushButton)
             if button.objectName() == 'DisclosureButton'
@@ -266,7 +270,7 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
         })
         QApplication.processEvents()
         scanned_item = host_inventory.topLevelItem(0)
-        assert scanned_item.childCount() == 5
+        assert scanned_item.childCount() >= 12
         assert scanned_item.isExpanded() is False
         host_inventory.itemClicked.emit(scanned_item, 0)
         QApplication.processEvents()
@@ -287,6 +291,19 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
         )
         assert 'api.example.test' in topology_details.toPlainText()
         assert '443/tcp' in topology_details.toPlainText()
+        assert 'Scan coverage' in topology_details.toPlainText()
+        assert next(
+            field for field in recon_page.findChildren(QLineEdit)
+            if field.accessibleName() == 'Search topology hosts'
+        )
+        assert next(
+            widget for widget in recon_page.findChildren(QListWidget)
+            if widget.accessibleName() == 'Topology host navigator'
+        ).count() >= 1
+        assert next(
+            combo for combo in recon_page.findChildren(QComboBox)
+            if combo.accessibleName() == 'Topology radial layout'
+        ).count() == 2
         discovery_findings = next(
             tree for tree in recon_page.findChildren(QTreeWidget)
             if tree.accessibleName() == 'Discovery findings'

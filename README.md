@@ -116,6 +116,7 @@ blackthorn scan --list-techniques
 - Detect subdomain takeover conditions across supported provider signatures.
 - Run a dedicated discovery workflow with Subfinder, Amass, Certificate Transparency, dnsx, and ProjectDiscovery httpx; Nmap is a separately confirmed active option.
 - Filter the finished host inventory by DNS state, HTTP availability, response class, or exact status code, and copy one URL directly from its row.
+- Explore a radial discovery topology with measured hop rings, RTT-aware routes, shared-IP and CNAME relationships, searchable hosts, open-port exposure, and per-host scan coverage.
 
 ### Active web-security testing
 
@@ -423,11 +424,15 @@ blackthorn recon '*.example.com'
 
 Nmap is disabled by default because it is an active scan that can trigger
 network or endpoint security alerts. Enable its unprivileged, capped connect
-scan only for an authorized target:
+scan or measured topology routes only for an authorized target:
 
 ```bash
 blackthorn recon example.com --ports
+blackthorn recon example.com --traceroute
 ```
+
+Without traceroute evidence, the topology keeps scope-to-host relationships
+dashed and labels its rings as relationship layers rather than network hops.
 
 ## CLI commands
 

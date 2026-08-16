@@ -90,6 +90,7 @@ STAGE_TOOL = {
     'tls': 'tlsx',
     'historical': 'gau',
     'ports': 'nmap',
+    'traceroute': 'nmap',
     'naabu': 'naabu',
     'crawl': 'katana',
     'nuclei': 'nuclei',
@@ -541,6 +542,69 @@ def scan_ports(ips: Sequence[str], timeout: float,
     return rows
 
 
+def _parse_nmap_traceroute_xml(xml_text: str) -> List[Dict[str, Any]]:
+    """Parse Nmap XML routes without inventing entries for missing hops."""
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.fromstring(xml_text)
+    except Exception:
+        return []
+    routes: List[Dict[str, Any]] = []
+    for host in root.findall('host'):
+        address_el = host.find("address[@addrtype='ipv4']")
+        if address_el is None:
+            address_el = host.find('address')
+        address = address_el.get('addr', '') if address_el is not None else ''
+        trace = host.find('trace')
+        if trace is None:
+            continue
+        hops = []
+        for hop in trace.findall('hop'):
+            row: Dict[str, Any] = {
+                'ip': str(hop.get('ipaddr') or ''),
+                'hostname': str(hop.get('host') or ''),
+            }
+            try:
+                row['hop'] = int(hop.get('ttl', ''))
+            except (TypeError, ValueError):
+                pass
+            try:
+                row['rtt'] = float(hop.get('rtt', ''))
+            except (TypeError, ValueError):
+                pass
+            if row.get('ip') or row.get('hostname'):
+                hops.append(row)
+        if hops:
+            routes.append({
+                'target': address,
+                'protocol': str(trace.get('proto') or ''),
+                'port': str(trace.get('port') or ''),
+                'hops': hops,
+            })
+    return routes
+
+
+def trace_routes(ips: Sequence[str], timeout: float) -> List[Dict[str, Any]]:
+    """Opt-in Nmap traceroute for measured network paths to resolved hosts."""
+    routes: List[Dict[str, Any]] = []
+    for ip in sorted({value for value in ips if value}):
+        _emit(f"[*] nmap --traceroute {ip}")
+        rc, out, err = _run(
+            ['nmap', '-sn', '-T3', '-n', '--traceroute', '-oX', '-', ip],
+            timeout,
+        )
+        parsed = _parse_nmap_traceroute_xml(out)
+        routes.extend(parsed)
+        msg = f"[+] traceroute {ip}: {len(parsed[0]['hops']) if parsed else 0} hop(s)"
+        if rc:
+            msg += f"  (rc={rc})"
+            if not parsed and _err_tail(err):
+                msg += f"\n    ! {_err_tail(err)}"
+        _emit(msg)
+    return routes
+
+
 # --------------------------------------------------------------------------- #
 # Optional stages (run only when the tool is installed)
 # --------------------------------------------------------------------------- #
@@ -774,7 +838,7 @@ def run_recon(target: str, *, timeout: float = 300.0, top_ports: int = 100,
               nuclei_severity: str = 'low,medium,high,critical', nuclei_tags: str = '',
               do_tls: bool = True, do_historical: bool = True, do_naabu: bool = False,
               do_crawl: bool = False, do_nuclei: bool = False, do_xss: bool = False,
-              do_ports: bool = False) -> Dict[str, Any]:
+              do_ports: bool = False, do_traceroute: bool = False) -> Dict[str, Any]:
     """Run the recon pipeline against ``target`` and return a structured report.
 
     Each optional stage is individually switchable (``do_*``). The ``findings``
@@ -788,7 +852,7 @@ def run_recon(target: str, *, timeout: float = 300.0, top_ports: int = 100,
     enabled = [n for n, on in (('tls', do_tls), ('gau', do_historical),
                                ('naabu', do_naabu), ('katana', do_crawl),
                                ('nuclei', do_nuclei), ('dalfox', do_xss),
-                               ('nmap', do_ports)) if on]
+                               ('nmap', do_ports), ('traceroute', do_traceroute)) if on]
     _emit(diagnostics_banner())
     _emit(f"[*] Recon target: {domain}  (stages: subfinder, amass, dnsx, httpx"
           + (', ' + ', '.join(enabled) if enabled else '') + ')')
@@ -990,6 +1054,21 @@ def run_recon(target: str, *, timeout: float = 300.0, top_ports: int = 100,
                 severity='LOW', port=p.get('port'), service=p.get('service'),
                 product=p.get('product'), version=p.get('version')))
 
+    routes: List[Dict[str, Any]] = []
+    if do_traceroute:
+        route_ips = sorted(all_ips)[:min(25, max_hosts)]
+        if len(all_ips) > len(route_ips):
+            _emit(
+                f"[!] {len(all_ips)} IP(s) resolved — tracing the first "
+                f"{len(route_ips)}"
+            )
+        routes = trace_routes(route_ips, timeout)
+        findings.append(_finding(
+            'Network Paths', domain,
+            f"{len(routes)} measured traceroute path(s)",
+            severity='INFO', routes=len(routes),
+        ))
+
     summary = {
         'subdomains': subdomain_count,
         'hosts_total': len(subdomains),
@@ -1000,11 +1079,12 @@ def run_recon(target: str, *, timeout: float = 300.0, top_ports: int = 100,
             if host['dns_live'] and not host['http_live']
         ),
         'unresolved': sum(1 for host in inventory if not host['dns_live']),
+        'routes': len(routes),
     }
     _emit(f"[+] Recon complete: {subdomain_count} subdomains, {len(resolved)} resolved, "
           f"{summary['web_live']} web hosts, {len(historical)} historical URLs, "
           f"{len(endpoints)} crawled, {len(naabu_rows)} fast-ports, {len(vulns)} vulns, "
-          f"{len(xss)} XSS, {len(ports)} open ports")
+          f"{len(xss)} XSS, {len(ports)} open ports, {len(routes)} routes")
 
     return {
         'target': domain,
@@ -1023,6 +1103,16 @@ def run_recon(target: str, *, timeout: float = 300.0, top_ports: int = 100,
             'vulns': vulns,
             'xss': xss,
             'ports': ports,
+            'traceroute': routes,
+            'coverage': {
+                'dns': True,
+                'http': True,
+                'ports': bool(do_ports or do_naabu),
+                'tls': bool(do_tls),
+                'routes': bool(do_traceroute),
+                'content': bool(do_crawl or do_historical),
+                'vulnerabilities': bool(do_nuclei or do_xss),
+            },
         },
     }
 
@@ -1057,6 +1147,11 @@ def _build_parser() -> argparse.ArgumentParser:
         '--ports',
         action='store_true',
         help='opt in to an active Nmap connect/service scan (disabled by default)',
+    )
+    p.add_argument(
+        '--traceroute',
+        action='store_true',
+        help='opt in to Nmap network-path discovery for topology hop data',
     )
     p.add_argument(
         '--no-ports',
@@ -1106,6 +1201,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             do_nuclei=args.nuclei or args.deep,
             do_xss=args.xss or args.deep,
             do_ports=args.ports and not args.no_ports,
+            do_traceroute=args.traceroute,
         )
     except ValueError as e:
         print(f"[!] {e}", file=sys.stderr)

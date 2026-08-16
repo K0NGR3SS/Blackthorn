@@ -145,6 +145,7 @@ def _run_recon_worker() -> int:
     parser.add_argument('--no-tls', action='store_true')
     parser.add_argument('--no-historical', action='store_true')
     parser.add_argument('--ports', action='store_true')
+    parser.add_argument('--traceroute', action='store_true')
     parser.add_argument('--naabu', action='store_true')
     parser.add_argument('--crawl', action='store_true')
     parser.add_argument('--nuclei', action='store_true')
@@ -174,6 +175,7 @@ def _run_recon_worker() -> int:
             do_nuclei=args.nuclei,
             do_xss=args.xss,
             do_ports=args.ports,
+            do_traceroute=args.traceroute,
         )
         with open(args.output, 'w', encoding='utf-8') as f:
             json.dump(report, f, indent=2, default=str)

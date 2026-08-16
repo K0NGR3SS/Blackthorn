@@ -6488,6 +6488,8 @@ def main() -> None:
             cmd += ['--crawl-depth', str(opts.get('crawl_depth', 2))]
             if not no_ports and opts.get('do_ports', False):
                 cmd.append('--ports')
+            if opts.get('do_traceroute', False):
+                cmd.append('--traceroute')
             if not opts.get('do_tls', True):
                 cmd.append('--no-tls')
             if not opts.get('do_historical', True):
@@ -6624,6 +6626,13 @@ def main() -> None:
             _stage('crawl', 'Crawl (katana)', 'Crawl live sites (incl. JS) for endpoints.', False, 1, 1)
             _stage('nuclei', 'Vuln scan (nuclei)', 'Run nuclei templates against live web services.', False, 1, 2)
             _stage('xss', 'XSS (dalfox)', 'Test URLs that carry parameters for XSS.', False, 2, 0)
+            _stage(
+                'traceroute',
+                'Network paths (Nmap traceroute) — opt in',
+                'Measure router hops and round-trip time so topology connections '
+                'are based on observed paths instead of scope relationships.',
+                False, 2, 1,
+            )
             stage_chks['ports'].toggled.connect(ports_spin.setEnabled)
 
             # nuclei + crawl tuning (compact 3-column grid)
@@ -6707,6 +6716,7 @@ def main() -> None:
                     'do_nuclei': stage_chks['nuclei'].isChecked(),
                     'do_xss': stage_chks['xss'].isChecked(),
                     'do_ports': stage_chks['ports'].isChecked(),
+                    'do_traceroute': stage_chks['traceroute'].isChecked(),
                 }
 
             # Actions — two compact rows so the buttons never overflow a narrow
@@ -6722,7 +6732,10 @@ def main() -> None:
             tools_btn = style_button(
                 QPushButton(), 'quiet', text='Tool setup'
             )
-            tools_btn.setToolTip('Install optional recon tools: tlsx, gau, katana, nuclei, naabu, dalfox')
+            tools_btn.setToolTip(
+                'Install optional recon tools: nmap, tlsx, gau, katana, '
+                'nuclei, naabu, dalfox'
+            )
             run_row.addWidget(run_btn)
             run_row.addWidget(stop_btn)
             run_row.addStretch()
@@ -6762,13 +6775,14 @@ def main() -> None:
             out_grid.addWidget(caido_btn, 1, 2, 1, 2)
             lay.addLayout(out_grid)
             tools_btn.clicked.connect(lambda: self._download_tools_dialog(
-                ['tlsx', 'gau', 'katana', 'nuclei', 'naabu', 'dalfox'],
+                ['nmap', 'tlsx', 'gau', 'katana', 'nuclei', 'naabu', 'dalfox'],
                 'Optional recon tools — each one that installs adds a richer stage:\n'
                 '  tlsx   — TLS certs + extra subdomains from SAN entries\n'
                 '  gau    — historical URLs (wayback / commoncrawl / otx)\n'
                 '  katana — crawl live sites for endpoints\n'
                 '  nuclei — vulnerability / misconfiguration scan\n'
                 '  naabu  — fast port discovery\n'
+                '  nmap   — active ports plus measured traceroute paths\n'
                 '  dalfox — XSS scanning of URLs with parameters\n',
                 title='Install optional recon tools'))
 
@@ -7330,15 +7344,16 @@ def main() -> None:
                 except Exception as exc:
                     _append(f'[!] Tool preflight failed: {exc}\n')
                     return
-                if opts.get('do_ports'):
+                if opts.get('do_ports') or opts.get('do_traceroute'):
                     ret = QMessageBox.question(
                         dlg,
-                        'Run active Nmap scan?',
-                        'Nmap is an active network scan and may trigger macOS, '
+                        'Run active Nmap discovery?',
+                        'Nmap port and path discovery are active network scans '
+                        'and may trigger macOS, '
                         'EDR, IDS, or provider alerts.\n\n'
-                        'Blackthorn will use an unprivileged TCP connect scan, '
-                        'light version detection, no NSE scripts, and at most '
-                        '10 resolved IPs.\n\n'
+                        'Blackthorn uses no NSE scripts. Port discovery uses an '
+                        'unprivileged TCP connect scan against at most 10 resolved '
+                        'IPs; path discovery measures hops for at most 25.\n\n'
                         'Continue only if this activity is authorized.',
                         QMessageBox.Yes | QMessageBox.No,
                         QMessageBox.No,

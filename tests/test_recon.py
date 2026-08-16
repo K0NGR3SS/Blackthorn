@@ -253,8 +253,18 @@ def test_run_recon_normalizes_wildcard_and_skips_nmap_by_default(monkeypatch):
         'web_live': 1,
         'dns_without_http': 1,
         'unresolved': 0,
+        'routes': 0,
     }
     assert len(report['stages']['hosts']) == 2
+    assert report['stages']['coverage'] == {
+        'dns': True,
+        'http': True,
+        'ports': False,
+        'tls': False,
+        'routes': False,
+        'content': False,
+        'vulnerabilities': False,
+    }
 
 
 def test_nmap_uses_unprivileged_light_connect_scan(monkeypatch):
@@ -271,6 +281,43 @@ def test_nmap_uses_unprivileged_light_connect_scan(monkeypatch):
     assert '-T3' in command
     assert '--version-light' in command
     assert '--script' not in command
+
+
+def test_traceroute_parses_intermediate_hops_and_uses_nmap_xml(monkeypatch):
+    xml = '''
+    <nmaprun><host><address addr="192.0.2.20" addrtype="ipv4"/>
+      <trace proto="tcp" port="443">
+        <hop ttl="1" ipaddr="198.51.100.1" rtt="2.30" host="gateway.test"/>
+        <hop ttl="2" ipaddr="192.0.2.20" rtt="18.70"/>
+      </trace>
+    </host></nmaprun>
+    '''
+    commands = []
+
+    def run(command, _timeout, stdin_text=None):
+        commands.append(command)
+        return 0, xml, ''
+
+    monkeypatch.setattr(recon, '_run', run)
+    routes = recon.trace_routes(['192.0.2.20'], 20)
+
+    assert routes == [{
+        'target': '192.0.2.20',
+        'protocol': 'tcp',
+        'port': '443',
+        'hops': [
+            {
+                'ip': '198.51.100.1', 'hostname': 'gateway.test',
+                'hop': 1, 'rtt': 2.3,
+            },
+            {
+                'ip': '192.0.2.20', 'hostname': '',
+                'hop': 2, 'rtt': 18.7,
+            },
+        ],
+    }]
+    assert {'-sn', '-n', '--traceroute', '-oX'} <= set(commands[0])
+    assert '--script' not in commands[0]
 
 
 def test_cli_can_write_full_discovery_report(monkeypatch, tmp_path):
@@ -320,4 +367,5 @@ def test_frozen_recon_worker_writes_report_without_enabling_nmap(
     assert run_gui._run_recon_worker() == 0
     assert calls[0][0] == '*.example.com'
     assert calls[0][1]['do_ports'] is False
+    assert calls[0][1]['do_traceroute'] is False
     assert json.loads(output.read_text(encoding='utf-8'))['target'] == 'example.com'
