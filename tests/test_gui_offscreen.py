@@ -10,7 +10,8 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 def test_results_workspace_builds_with_evidence_actions(monkeypatch):
     from PySide6.QtWidgets import (
         QApplication, QCheckBox, QComboBox, QLabel, QLineEdit, QListWidget,
-        QPlainTextEdit, QPushButton, QSplitter, QTabWidget, QTextBrowser,
+        QPlainTextEdit, QProgressBar, QPushButton, QSplitter, QTabWidget,
+        QTableWidget, QTextBrowser, QWidget,
         QTreeWidget, QTreeWidgetItem,
     )
     from PySide6.QtCore import Qt
@@ -98,6 +99,8 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
         assert workbench_labels['fuzzer'] == 'Content discovery'
         assert workbench_labels['sqli'] == 'SQLi automation'
         assert workbench_labels['tools'] == 'Tool manager'
+        assert 'browser' not in workbench_labels
+        assert window._nav_buttons['browser'].text().endswith('Browser')
         assert {'live', 'timeline', 'schedule'}.isdisjoint(workbench_labels)
         assert {'live', 'timeline', 'schedule'}.isdisjoint(
             window._page_builders()
@@ -216,6 +219,13 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
             checkbox for checkbox in recon_page.findChildren(QCheckBox)
             if checkbox.text().startswith('Network paths')
         ).isChecked() is False
+        progress = next(
+            bar for bar in recon_page.findChildren(QProgressBar)
+            if bar.accessibleName() == 'Discovery progress'
+        )
+        assert progress.minimum() == 0
+        assert progress.maximum() == 100
+        assert progress.value() == 0
         discovery_disclosure = next(
             button for button in recon_page.findChildren(QPushButton)
             if button.objectName() == 'DisclosureButton'
@@ -253,6 +263,20 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
                 'discovery': {'hostname': 'api.example.test'},
             }],
             'stages': {
+                'sources': {
+                    'api.example.test': [
+                        'subfinder', 'certificate transparency',
+                    ],
+                },
+                'resolved': {
+                    'api.example.test': ['192.0.2.1', '192.0.2.2'],
+                },
+                'http': [{
+                    'url': 'https://api.example.test',
+                    'status_code': 200,
+                    'title': 'Example API',
+                    'tech': ['nginx', 'GraphQL'],
+                }],
                 'hosts': [{
                     'hostname': 'api.example.test',
                     'dns_live': True,
@@ -308,6 +332,44 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
             tree for tree in recon_page.findChildren(QTreeWidget)
             if tree.accessibleName() == 'Discovery findings'
         )
+        tool_groups = {
+            discovery_findings.topLevelItem(index).text(0).split(' · ', 1)[0]
+            for index in range(discovery_findings.topLevelItemCount())
+        }
+        assert {
+            'Subfinder', 'Certificate Transparency', 'dnsx', 'httpx', 'Nmap',
+        } <= tool_groups
+        httpx_group = next(
+            discovery_findings.topLevelItem(index)
+            for index in range(discovery_findings.topLevelItemCount())
+            if discovery_findings.topLevelItem(index).text(0).startswith('httpx')
+        )
+        httpx_result = httpx_group.child(0)
+        tech_field = next(
+            httpx_result.child(index)
+            for index in range(httpx_result.childCount())
+            if httpx_result.child(index).text(0).strip() == 'tech'
+        )
+        assert tech_field.childCount() == 2
+        assert [
+            tech_field.child(index).text(1)
+            for index in range(tech_field.childCount())
+        ] == ['nginx', 'GraphQL']
+        tool_filter = next(
+            combo for combo in recon_page.findChildren(QComboBox)
+            if combo.accessibleName() == 'Discovery tool filter'
+        )
+        tool_search = next(
+            field for field in recon_page.findChildren(QLineEdit)
+            if field.accessibleName() == 'Search discovery tool results'
+        )
+        assert tool_filter.findData('httpx') >= 0
+        tool_search.setText('GraphQL')
+        QApplication.processEvents()
+        assert discovery_findings.topLevelItemCount() == 1
+        assert discovery_findings.topLevelItem(0).text(0).startswith('httpx')
+        tool_search.clear()
+        QApplication.processEvents()
         finding_item = discovery_findings.topLevelItem(0)
         assert finding_item.childCount() >= 1
         discovery_findings.itemClicked.emit(finding_item, 0)
@@ -346,16 +408,50 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
             QSplitter, 'ReportSummarySplitter'
         ) is not None
 
-        pipeline_page = window._build_pipeline_page()
-        pipeline_page.resize(900, 700)
-        pipeline_page.show()
+        automation_page = window._build_pipeline_page()
+        automation_page.resize(1000, 760)
+        automation_page.show()
         QApplication.processEvents()
-        plan_tabs = pipeline_page.findChild(QTabWidget, 'PipelinePageTabs')
-        assert plan_tabs is not None
+        automation_tabs = automation_page.findChild(
+            QTabWidget, 'AutomationPageTabs'
+        )
+        assert automation_tabs is not None
         assert [
-            plan_tabs.tabText(index)
-            for index in range(plan_tabs.count())
-        ] == ['Run now', 'Schedule']
+            automation_tabs.tabText(index)
+            for index in range(automation_tabs.count())
+        ] == [
+            'Radar', 'Inventory', 'Exposure Matches', 'Remediation', 'Rules',
+            'Validation Queue', 'Notifications & Health', 'Watch Schedules',
+            'Run History',
+        ]
+        assert automation_page.findChild(QTableWidget, 'AutomationRadarTable')
+        assert automation_page.findChild(
+            QTableWidget, 'AutomationInventoryTable'
+        )
+        assert automation_page.findChild(
+            QTableWidget, 'AutomationRemediationTable'
+        )
+        assert automation_page.findChild(
+            QTableWidget, 'AutomationValidationQueue'
+        )
+        assert automation_page.findChild(
+            QTableWidget, 'AutomationFeedHealthTable'
+        )
+        assert automation_page.findChild(QWidget, 'BrowserPage') is None
+
+        window._navigate('browser')
+        QApplication.processEvents()
+        browser_holder = window._pages['browser']
+        browser_page = browser_holder.findChild(QWidget, 'BrowserPage')
+        assert window._stack.currentWidget() is browser_holder
+        assert browser_page is not None
+        assert browser_page.objectName() == 'BrowserPage'
+        assert browser_page.findChild(
+            QTableWidget, 'BrowserEngineStack'
+        ) is not None
+        assert browser_page.findChild(
+            QProgressBar, 'BrowserEngineProgress'
+        ) is not None
 
         payload_page = window._build_payloads_page()
         payload_page.resize(1180, 820)
@@ -474,7 +570,8 @@ def test_results_workspace_builds_with_evidence_actions(monkeypatch):
         inspected['ok'] = True
         repeater_page.close()
         payload_page.close()
-        pipeline_page.close()
+        browser_holder.close()
+        automation_page.close()
         report_page.close()
         recon_page.close()
         page.close()

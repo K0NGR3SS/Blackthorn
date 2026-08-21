@@ -105,7 +105,7 @@ def test_intrusive_workflows_require_explicit_flag(capsys):
 
     assert cli.main([
         'scan', 'https://example.invalid', '--dry-run', '--no-color',
-        '--intrusive', '-c', 'business_logic',
+        '--full-impact', '--intrusive', '-c', 'business_logic',
     ]) == 0
     enabled = capsys.readouterr().out
     assert 'intrusive=on' in enabled
@@ -115,7 +115,7 @@ def test_intrusive_workflows_require_explicit_flag(capsys):
 def test_intrusive_flag_cannot_enable_unsupported_transport_checks(capsys):
     assert cli.main([
         'scan', 'https://example.invalid', '--dry-run', '--no-color',
-        '--intrusive', '-c', 'protocol_level',
+        '--full-impact', '--intrusive', '-c', 'protocol_level',
     ]) == 0
     output = capsys.readouterr().out
 

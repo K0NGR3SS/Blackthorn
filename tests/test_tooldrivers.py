@@ -80,3 +80,33 @@ def test_detect_zap_absent():
             raise OSError('refused')
     st = td.detect_zap(session=_Sess())
     assert st['state'] == 'absent'
+
+
+def test_zap_client_spider_uses_modern_strict_scope_api(monkeypatch):
+    calls = []
+    client = td.ZAPClient(session=object())
+
+    def fake_get(path, **params):
+        calls.append((path, params))
+        if '/action/scan/' in path:
+            return {'scan': '12'}
+        if '/view/status/' in path:
+            return {'status': '67'}
+        return {'Result': 'OK'}
+
+    monkeypatch.setattr(client, '_get', fake_get)
+
+    scan_id = client.client_spider(
+        'https://app.example.test', context_name='App', user_name='Admin',
+        max_depth=7, browsers=2,
+    )
+    assert scan_id == '12'
+    assert client.client_spider_status(scan_id) == 67
+    client.client_spider_stop(scan_id)
+
+    path, params = calls[0]
+    assert path == '/JSON/clientSpider/action/scan/'
+    assert params['scopeCheck'] == 'STRICT'
+    assert params['logoutAvoidance'] == 'true'
+    assert params['contextName'] == 'App'
+    assert params['userName'] == 'Admin'

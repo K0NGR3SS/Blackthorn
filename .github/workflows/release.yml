@@ -59,21 +59,21 @@ jobs:
         shell: bash
         run: |
           mkdir -p out
-          cp dist/WAFPierce.exe "out/${{ matrix.asset }}"
+          cp dist/Blackthorn.exe "out/${{ matrix.asset }}"
 
       - name: Package (macOS)
         if: runner.os == 'macOS'
         run: |
           mkdir -p out
-          chmod +x dist/WAFPierce
-          cd dist && zip -r "../out/${{ matrix.asset }}" WAFPierce
+          chmod +x dist/Blackthorn
+          cd dist && zip -r "../out/${{ matrix.asset }}" Blackthorn
 
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: |
           mkdir -p out
-          chmod +x dist/WAFPierce
-          tar -czf "out/${{ matrix.asset }}" -C dist WAFPierce
+          chmod +x dist/Blackthorn
+          tar -czf "out/${{ matrix.asset }}" -C dist Blackthorn
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4

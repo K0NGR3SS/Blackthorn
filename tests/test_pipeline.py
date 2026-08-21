@@ -1,6 +1,7 @@
 """Unit tests for the GUI-free pipeline engine (P3)."""
 import os
 import tempfile
+import hashlib
 
 from wafpierce import pipeline as pl
 from wafpierce.database import WAFPierceDB
@@ -90,3 +91,86 @@ def test_runner_blocks_active_pipeline_before_starting_out_of_scope_stage():
     assert result['ok'] is False
     assert result['state'] == 'scope_blocked'
     assert any('outside the active engagement scope' in line for line in logs)
+
+
+def test_http_observation_is_one_bounded_redirect_free_request(monkeypatch):
+    class Response:
+        status_code = 200
+        headers = {
+            'Content-Type': 'text/html',
+            'Server': 'example',
+            'Set-Cookie': 'secret=must-not-be-retained',
+            'Content-Security-Policy': "default-src 'self'",
+        }
+
+        @staticmethod
+        def iter_content(chunk_size):
+            assert chunk_size == 16 * 1024
+            return iter((b'hello', b' world'))
+
+        @staticmethod
+        def close():
+            return None
+
+    class Session:
+        def __init__(self):
+            self.calls = []
+            self.trust_env = True
+
+        def get(self, url, **kwargs):
+            self.calls.append((url, kwargs))
+            return Response()
+
+        @staticmethod
+        def close():
+            return None
+
+    session = Session()
+    monkeypatch.setattr(pl.requests, 'Session', lambda: session)
+    config = {
+        'method': 'GET',
+        'request_budget': 1,
+        'max_response_bytes': 256 * 1024,
+        'timeout': 10,
+        'follow_redirects': False,
+    }
+    pdef = {'name': 'observation', 'stages': [
+        {'id': 'observe', 'type': 'http_observation', 'config': config},
+    ]}
+    emitted = []
+    result = pl.PipelineRunner(
+        pdef,
+        'https://approved.example/path',
+        pl.PipelineHooks(on_findings=emitted.extend),
+        authorize_target=lambda target: target == 'https://approved.example/path',
+    ).run()
+
+    assert result['ok'] is True
+    assert len(session.calls) == 1
+    assert session.trust_env is False
+    assert session.calls[0][1]['allow_redirects'] is False
+    assert emitted[0]['response']['body_sha256'] == hashlib.sha256(b'hello world').hexdigest()
+    assert emitted[0]['response']['body_retained'] is False
+    assert 'set-cookie' not in emitted[0]['response']['headers']
+    assert emitted[0]['details']['requests_sent'] == 1
+
+
+def test_http_observation_requires_authorization_and_exact_contract():
+    config = {
+        'method': 'GET',
+        'request_budget': 2,
+        'max_response_bytes': 256 * 1024,
+        'timeout': 10,
+        'follow_redirects': False,
+    }
+    pdef = {'name': 'bad observation', 'stages': [
+        {'id': 'observe', 'type': 'http_observation', 'config': config},
+    ]}
+    assert any('fixed one-request contract' in error for error in pl.validate_pipeline(pdef))
+
+    config['request_budget'] = 1
+    result = pl.PipelineRunner(
+        pdef, 'https://approved.example/path'
+    ).run()
+    assert result['ok'] is False
+    assert result['state'] == 'scope_required'

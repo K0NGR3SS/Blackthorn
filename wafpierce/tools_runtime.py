@@ -272,7 +272,10 @@ def configured_command(
 
     if isinstance(extra_args, str):
         try:
-            configured_args = shlex.split(extra_args, posix=os.name != 'nt')
+            # Tool Manager arguments use one portable, shell-like quoting
+            # format.  They are always passed as an argv list (never through a
+            # shell), so remove grouping quotes on every platform.
+            configured_args = shlex.split(extra_args, posix=True)
         except ValueError as exc:
             raise ValueError(f'Invalid configured extra arguments: {exc}') from exc
     else:

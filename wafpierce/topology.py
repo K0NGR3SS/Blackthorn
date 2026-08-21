@@ -184,6 +184,8 @@ def _looks_vulnerable(finding: Mapping[str, Any]) -> bool:
         or finding.get('cve')
         or finding.get('nuclei')
         or finding.get('dalfox')
+        or finding.get('takeover')
+        or finding.get('risk')
         or technique.startswith('vuln:')
         or technique in {'xss', 'vulnerability'}
         or 'cve-' in technique
@@ -199,6 +201,8 @@ def _vulnerability_label(record: Mapping[str, Any]) -> str:
         or record.get('template_id')
         or record.get('technique')
         or record.get('type')
+        or record.get('category')
+        or record.get('reason')
         or 'Known vulnerability'
     )
 
@@ -414,6 +418,16 @@ def build_topology(report: Mapping[str, Any]) -> Dict[str, Any]:
             node['cnames'] + _strings(row.get('cname') or row.get('cnames'))
         ))
 
+    # Only scope-correlated external records become graph nodes. Validated
+    # AlterX candidates are already represented by the dnsx resolved stage.
+    for stage_key in ('uncover', 'cloudlist'):
+        for row in _list(stages.get(stage_key)):
+            if not isinstance(row, Mapping) or not _record_aliases(row):
+                continue
+            node = ensure_node(dict(row))
+            if stage_key not in node['sources']:
+                node['sources'].append(stage_key)
+
     if target:
         ensure_node({'hostname': target, 'is_apex': True})
     origin_id = next((
@@ -447,7 +461,7 @@ def build_topology(report: Mapping[str, Any]) -> Dict[str, Any]:
     # Ports discovered for a shared address belong to every hostname resolving
     # to it. This avoids the old last-write-wins alias bug.
     port_rows: List[Dict[str, Any]] = []
-    for key in ('ports', 'naabu'):
+    for key in ('ports',):
         port_rows.extend(
             dict(row) for row in _list(stages.get(key))
             if isinstance(row, Mapping)
@@ -495,8 +509,20 @@ def build_topology(report: Mapping[str, Any]) -> Dict[str, Any]:
                 if url and url not in nodes_by_id[node_id][destination]:
                     nodes_by_id[node_id][destination].append(url)
 
+    for stage_key in ('arjun',):
+        for row in _list(stages.get(stage_key)):
+            if not isinstance(row, Mapping):
+                continue
+            url = str(row.get('url') or row.get('target') or '')
+            source_url = str(row.get('source_url') or '')
+            match_value = url if _target_host(url) else source_url
+            display = url or source_url
+            for node_id in _resolve_nodes(match_value, aliases):
+                if display and display not in nodes_by_id[node_id]['endpoints']:
+                    nodes_by_id[node_id]['endpoints'].append(display)
+
     vulnerability_rows: List[Dict[str, Any]] = []
-    for key in ('vulns', 'vulnerabilities', 'xss'):
+    for key in ('vulns', 'vulnerabilities', 'xss', 'takeovers', 'risk_signals'):
         vulnerability_rows.extend(
             dict(row) for row in _list(stages.get(key))
             if isinstance(row, Mapping)

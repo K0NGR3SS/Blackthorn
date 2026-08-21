@@ -16,6 +16,8 @@ with the rest of the UI instead of hard-coding colours.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from .branding import asset_path
 
 
@@ -95,9 +97,11 @@ def contrast_ratio(foreground: str, background: str) -> float:
 def stylesheet() -> str:
     """Return the global application stylesheet."""
     p = PALETTE
-    chevron_down = asset_path('chevron-down.svg').replace('\\', '/')
-    chevron_down_muted = asset_path('chevron-down-muted.svg').replace('\\', '/')
-    chevron_right_muted = asset_path('chevron-right-muted.svg').replace('\\', '/')
+    # Qt 6 on Windows/offscreen does not consistently resolve a drive-letter
+    # path in QSS.  A proper file URI works across source and frozen layouts.
+    chevron_down = Path(asset_path('chevron-down.svg')).resolve().as_uri()
+    chevron_down_muted = Path(asset_path('chevron-down-muted.svg')).resolve().as_uri()
+    chevron_right_muted = Path(asset_path('chevron-right-muted.svg')).resolve().as_uri()
     return f"""
 /* ============================ BASE ============================ */
 QWidget {{

@@ -1764,7 +1764,7 @@ class CloudFrontBypasser(ExtraTechniques):
                 details={'target': self.target, 'error': str(e)}
             )
         
-        print(f"[*] Testing bypass techniques...\n")
+        print("[*] Testing bypass techniques...\n")
         
         # Run WAF Detection first
         _emit_phase_event('fingerprint', 'Fingerprinting edge controls', 20)
@@ -4635,8 +4635,8 @@ class CloudFrontBypasser(ExtraTechniques):
                 finding.update({
                     'bypass': True, 'severity': 'HIGH', 'confidence': 'high',
                     'verification_status': 'confirmed', 'kind': 'finding',
-                    'reason': (f'Boolean SQL pair changed application behavior: '
-                               f'true predicate matched control; false predicate differed'),
+                    'reason': ('Boolean SQL pair changed application behavior: '
+                               'true predicate matched control; false predicate differed'),
                     'payloads': [true_payload, false_payload],
                     'confirmations': 'paired true/false',
                     '_no_reconfirm': True,
@@ -5520,9 +5520,12 @@ class CloudFrontBypasser(ExtraTechniques):
             },
             {
                 'headers': {
-                    'Transfer-Encoding': ' chunked',
                     'Transfer-Encoding': 'x',
                 },
+                'raw_header_pairs': [
+                    ('Transfer-Encoding', ' chunked'),
+                    ('Transfer-Encoding', 'x'),
+                ],
                 'method': 'POST',
                 'technique': 'TE.TE Whitespace'
             },
@@ -6288,7 +6291,7 @@ class CloudFrontBypasser(ExtraTechniques):
                 )
                 if self._result_has_evidence(result, 'response_signature'):
                     results.append(result)
-                    print(f"  [✓] CRITICAL: SOAP XXE detected")
+                    print("  [✓] CRITICAL: SOAP XXE detected")
             except Exception as e:
                 logger.debug(f"SOAP XXE test error: {e}")
         
@@ -6423,7 +6426,7 @@ class CloudFrontBypasser(ExtraTechniques):
                             'details': {'viewstate_preview': viewstate[:50]}
                         }
                         results.append(result)
-                        print(f"  [!] ASP.NET ViewState detected (potentially exploitable)")
+                        print("  [!] ASP.NET ViewState detected (potentially exploitable)")
         except Exception as e:
             logger.debug(f"ViewState check error: {e}")
         
@@ -8841,7 +8844,7 @@ class CloudFrontBypasser(ExtraTechniques):
         
         # Injection points
         injection_vectors = [
-            ('query', f"?test=PAYLOAD"),
+            ('query', "?test=PAYLOAD"),
             ('header_ua', 'User-Agent'),
             ('header_ref', 'Referer'),
             ('header_xff', 'X-Forwarded-For'),
@@ -9448,7 +9451,7 @@ class CloudFrontBypasser(ExtraTechniques):
                                 'category': 'VERB_TAMPERING'
                             }
                             results.append(result)
-                            print(f"  [!] DEBUG method enabled")
+                            print("  [!] DEBUG method enabled")
                     
                     # WebDAV methods
                     elif method == 'PROPFIND' and resp.status_code in [200, 207]:
@@ -10147,9 +10150,12 @@ class CloudFrontBypasser(ExtraTechniques):
             # CL.CL desync
             {
                 'headers': {
-                    'Content-Length': '6',
-                    'Content-Length': '5',  # Will be overwritten, just for documentation
+                    'Content-Length': '5',
                 },
+                'raw_header_pairs': [
+                    ('Content-Length', '6'),
+                    ('Content-Length', '5'),
+                ],
                 'body': 'GPOST',
                 'technique': 'CL.CL Desync'
             },

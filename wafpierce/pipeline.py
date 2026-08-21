@@ -18,6 +18,7 @@ single ``abort`` tree-kills it (taskkill /T on Windows).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -25,6 +26,9 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
+from urllib.parse import urlsplit, urlunsplit
+
+import requests
 
 from .tools_runtime import popen_killable, kill_proc_tree, run_tool
 from .tools_registry import TOOL_REGISTRY
@@ -36,6 +40,7 @@ SCHEMA_VERSION = 1
 # Supported stage types and the config keys they understand.
 STAGE_TYPES = {
     'wafpierce_scan': 'Blackthorn scan',    # config: {categories: [..], threads, delay, safe_mode}
+    'http_observation': 'Authorized HTTP observation',  # fixed one-request metadata check
     'external_tool': 'External tool',        # config: {tool: <key>, extra_args, wordlist}
     'report': 'Report / export',             # config: {format: html|json|sarif|nuclei|pdf, path}
 }
@@ -102,6 +107,18 @@ def validate_pipeline(pdef: Dict) -> List[str]:
             fmt = cfg.get('format', 'html')
             if fmt not in ('html', 'json', 'sarif', 'nuclei', 'pdf'):
                 errors.append(f'{sid}: unsupported report format {fmt!r}')
+        elif st == 'http_observation':
+            expected = {
+                'method': 'GET',
+                'request_budget': 1,
+                'max_response_bytes': 256 * 1024,
+                'timeout': 10,
+                'follow_redirects': False,
+            }
+            if cfg != expected:
+                errors.append(
+                    f'{sid}: HTTP observation must use the fixed one-request contract'
+                )
     return errors
 
 
@@ -184,10 +201,23 @@ class PipelineRunner:
             self.hooks.log('[!] Pipeline invalid: ' + '; '.join(errs))
             return {'ok': False, 'errors': errs, 'findings': []}
 
-        has_active_stage = any(
-            stage.type in {'wafpierce_scan', 'external_tool'}
-            for stage in stages_from_def(self.pdef)
+        stages = stages_from_def(self.pdef)
+        has_observation_stage = any(
+            stage.type == 'http_observation' for stage in stages
         )
+        has_active_stage = any(
+            stage.type in {'wafpierce_scan', 'http_observation', 'external_tool'}
+            for stage in stages
+        )
+        if has_observation_stage and self.authorize_target is None:
+            message = 'HTTP observation requires a current target authorization callback.'
+            self.hooks.log(f'[!] {message}')
+            return {
+                'ok': False,
+                'state': 'scope_required',
+                'errors': [message],
+                'findings': [],
+            }
         if has_active_stage and self.authorize_target is not None:
             try:
                 authorized = bool(self.authorize_target(self.target))
@@ -210,25 +240,38 @@ class PipelineRunner:
                     'findings': [],
                 }
 
-        for stage in stages_from_def(self.pdef):
+        run_errors: List[str] = []
+        aborted = False
+        for stage in stages:
             if self.hooks.aborted():
                 self.hooks.log('[!] Pipeline aborted.')
                 self.hooks.stage(stage.id, 'skipped')
-                continue
+                aborted = True
+                break
             self.hooks.stage(stage.id, 'running')
             self.hooks.log(f'\n=== Stage {stage.id} ({stage.label()}) ===')
             try:
                 if stage.type == 'wafpierce_scan':
                     self._run_scan_stage(stage)
+                elif stage.type == 'http_observation':
+                    self._run_http_observation_stage(stage)
                 elif stage.type == 'external_tool':
                     self._run_tool_stage(stage)
                 elif stage.type == 'report':
                     self._run_report_stage(stage)
                 self.hooks.stage(stage.id, 'done')
             except Exception as e:
-                self.hooks.log(f'[!] Stage {stage.id} failed: {e}')
+                message = f'Stage {stage.id} failed: {e}'
+                run_errors.append(message)
+                self.hooks.log(f'[!] {message}')
                 self.hooks.stage(stage.id, 'error')
-        return {'ok': True, 'findings': self.all_findings, 'count': len(self.all_findings)}
+        return {
+            'ok': not run_errors and not aborted,
+            'state': 'aborted' if aborted else ('failed' if run_errors else 'completed'),
+            'errors': run_errors,
+            'findings': self.all_findings,
+            'count': len(self.all_findings),
+        }
 
     # -- stage implementations -------------------------------------------- #
     def _run_scan_stage(self, stage: Stage):
@@ -249,6 +292,8 @@ class PipelineRunner:
                     kill_proc_tree(proc)
                     break
         proc.wait()
+        if proc.returncode:
+            raise RuntimeError(f'scanner exited with status {proc.returncode}')
         findings = []
         try:
             if os.path.exists(tmp.name):
@@ -269,6 +314,148 @@ class PipelineRunner:
         self.hooks.findings(findings)
         self.hooks.log(f'[+] scan stage: {len(findings)} finding(s)')
 
+    def _run_http_observation_stage(self, stage: Stage):
+        """Fetch the exact authorized URL once and retain bounded metadata only."""
+        expected = {
+            'method': 'GET',
+            'request_budget': 1,
+            'max_response_bytes': 256 * 1024,
+            'timeout': 10,
+            'follow_redirects': False,
+        }
+        if stage.config != expected:
+            raise RuntimeError('HTTP observation contract was altered')
+        session = requests.Session()
+        session.trust_env = False
+        response = None
+        body_hash = hashlib.sha256()
+        body_size = 0
+        try:
+            response = session.get(
+                self.target,
+                headers={
+                    'Accept': '*/*',
+                    'User-Agent': 'Blackthorn-Authorized-Observation/1',
+                },
+                allow_redirects=False,
+                stream=True,
+                timeout=(5, expected['timeout']),
+            )
+            declared = response.headers.get('Content-Length')
+            if declared:
+                try:
+                    if int(declared) > expected['max_response_bytes']:
+                        raise RuntimeError('HTTP response exceeded the observation size limit')
+                except ValueError:
+                    pass
+            for chunk in response.iter_content(chunk_size=16 * 1024):
+                if self.hooks.aborted():
+                    raise RuntimeError('HTTP observation was cancelled')
+                if not chunk:
+                    continue
+                body_size += len(chunk)
+                if body_size > expected['max_response_bytes']:
+                    raise RuntimeError('HTTP response exceeded the observation size limit')
+                body_hash.update(chunk)
+
+            allowed_headers = (
+                'server', 'content-type', 'content-length', 'strict-transport-security',
+                'content-security-policy', 'x-content-type-options', 'x-frame-options',
+                'referrer-policy', 'permissions-policy', 'x-powered-by',
+            )
+
+            def safe_value(value: object) -> str:
+                text = ''.join(
+                    character if 32 <= ord(character) < 127 else ' '
+                    for character in str(value or '')
+                )
+                return ' '.join(text.split())[:512]
+
+            headers = {
+                name: safe_value(response.headers.get(name))
+                for name in allowed_headers
+                if response.headers.get(name) is not None
+            }
+            security_headers = {
+                name: name in response.headers
+                for name in (
+                    'strict-transport-security',
+                    'content-security-policy',
+                    'x-content-type-options',
+                    'x-frame-options',
+                    'referrer-policy',
+                )
+            }
+            parsed_target = urlsplit(self.target)
+            retained_target = urlunsplit((
+                parsed_target.scheme,
+                parsed_target.netloc,
+                parsed_target.path or '/',
+                '',
+                '',
+            ))
+            observation = {
+                'title': 'Authorized HTTP response observation',
+                'technique': 'One-request response metadata observation',
+                'category': 'AUTOMATION_OBSERVATION',
+                'severity': 'INFO',
+                'kind': 'observation',
+                'verification_status': 'informational',
+                'confidence': 'high',
+                'target': retained_target,
+                'url': retained_target,
+                'path': parsed_target.path or '/',
+                'method': 'GET',
+                'request': {
+                    'method': 'GET',
+                    'url': retained_target,
+                    'headers': {
+                        'Accept': '*/*',
+                        'User-Agent': 'Blackthorn-Authorized-Observation/1',
+                    },
+                    'body': None,
+                },
+                'response': {
+                    'status': int(response.status_code),
+                    'size': body_size,
+                    'content_type': headers.get('content-type', ''),
+                    'headers': headers,
+                    'body_sha256': body_hash.hexdigest(),
+                    'body_retained': False,
+                    'redirect_followed': False,
+                },
+                'details': {
+                    'request_budget': 1,
+                    'requests_sent': 1,
+                    'security_headers_present': security_headers,
+                    'server': headers.get('server', ''),
+                    'powered_by': headers.get('x-powered-by', ''),
+                    'query_redacted': bool(parsed_target.query),
+                },
+                'evidence': [{
+                    'type': 'bounded_http_observation',
+                    'description': (
+                        'One ordinary GET was sent to the exact approved URL. '
+                        'No redirect, payload mutation, exploit template, or body '
+                        'content was retained.'
+                    ),
+                    'matched': str(response.status_code),
+                    'excerpt': '',
+                }],
+                'source': 'automation',
+                'bypass': False,
+            }
+            self.all_findings.append(observation)
+            self.hooks.findings([observation])
+            self.hooks.log(
+                f"[+] HTTP observation: status {response.status_code}; 1 request; "
+                f"{body_size} byte(s) hashed"
+            )
+        finally:
+            if response is not None:
+                response.close()
+            session.close()
+
     def _run_tool_stage(self, stage: Stage):
         tool = stage.config.get('tool')
         legacy_api_key = stage.config.pop('api_key', None)
@@ -285,8 +472,9 @@ class PipelineRunner:
                        timeout=self.tool_timeout,
                        authorize_target=self.authorize_target)
         if not res.get('ok'):
-            self.hooks.log(f"[!] {tool}: {res.get('error') or res.get('state')}")
-            return
+            raise RuntimeError(
+                f"{tool}: {res.get('error') or res.get('state') or 'tool failed'}"
+            )
         findings = res.get('findings', []) or []
         self.all_findings.extend(findings)
         self.hooks.findings(findings)
@@ -305,3 +493,4 @@ class PipelineRunner:
             stage.config['_written_path'] = path
         except Exception as e:
             self.hooks.log(f'[!] report stage failed: {e}')
+            raise

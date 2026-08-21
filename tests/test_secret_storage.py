@@ -40,6 +40,14 @@ def test_secret_store_uses_keyring_when_available(monkeypatch):
     assert secret_store.get_msf_password() == 'rpc-secret'
 
 
+def test_generic_secret_handle_environment_variable(monkeypatch):
+    handle = 'identity:alice:session'
+    env_name = secret_store.secret_handle_env_name(handle)
+    monkeypatch.setenv(env_name, 'environment-session')
+    assert env_name == 'BLACKTHORN_SECRET_IDENTITY_ALICE_SESSION'
+    assert secret_store.get_secret(handle) == 'environment-session'
+
+
 def test_preferences_strip_and_migrate_plaintext_secrets(monkeypatch, tmp_path):
     prefs_path = tmp_path / 'gui_prefs.json'
     monkeypatch.setattr('wafpierce.gui.get_gui_prefs_path', lambda: str(prefs_path))

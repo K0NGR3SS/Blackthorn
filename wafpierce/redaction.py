@@ -15,6 +15,18 @@ _REDACTED = '<redacted>'
 
 # Patterns operate on free text (curl strings, header blobs, request bodies).
 _TEXT_RULES = [
+    # Common standalone credential formats sometimes emitted by discovery tools.
+    (re.compile(r'\b(?:AKIA|ASIA)[0-9A-Z]{16}\b'), _REDACTED),
+    (re.compile(r'\bAIza[0-9A-Za-z\-_]{35}\b'), _REDACTED),
+    (re.compile(r'\bxox[baprs]-[0-9A-Za-z-]{10,}\b'), _REDACTED),
+    (re.compile(r'\bgh[pousr]_[0-9A-Za-z_]{20,}\b'), _REDACTED),
+    (re.compile(r'\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}\b'),
+     _REDACTED),
+    (re.compile(
+        r'-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----[\s\S]*?'
+        r'-----END (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----',
+        re.IGNORECASE,
+    ), _REDACTED),
     # HTTP headers (curl -H '...', or raw "Name: value")
     (re.compile(r'(?i)(authorization\s*:\s*)(bearer\s+|basic\s+)?[^\'"\r\n]+'),
      lambda m: f"{m.group(1)}{m.group(2) or ''}{_REDACTED}"),

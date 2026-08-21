@@ -13,10 +13,13 @@ from wafpierce.gui import (
     _load_prefs, _normalize_language, _save_prefs,
     BANNER_PATH, LOGO_PATH, SIDEBAR_LOGO_PATH,
     LEGAL_ACCEPTANCE_VERSION, SCAN_CATEGORIES_GUI, SCAN_PROFILE_DEFINITIONS,
-    legal_acceptance_is_current, parse_scan_phase_event,
+    legal_acceptance_is_current, parse_recon_progress_event,
+    parse_scan_phase_event,
     scan_preflight_summary, scan_profile_settings,
     finding_request_spec, result_matches_filter,
-    filter_recon_hosts, recon_host_filter_options, recon_report_parts,
+    browser_scope_allows, filter_recon_hosts, recon_host_filter_options,
+    recon_report_parts,
+    PRIMARY_NAV_ITEMS, WORKBENCH_ITEMS,
 )
 
 
@@ -24,6 +27,26 @@ def test_blackthorn_brand_assets_are_available():
     paths = {BANNER_PATH, LOGO_PATH, SIDEBAR_LOGO_PATH}
     assert len(paths) == 3
     assert all(os.path.isfile(path) for path in paths)
+
+
+def test_browser_scope_uses_exact_host_boundaries_not_substrings():
+    assert browser_scope_allows(
+        'https://api.example.test/v1', '*.example.test'
+    )
+    assert browser_scope_allows('example.test', 'https://example.test')
+    assert not browser_scope_allows(
+        'https://example.test.attacker.invalid', 'example.test'
+    )
+    assert not browser_scope_allows(
+        'https://notexample.test', 'example.test'
+    )
+
+
+def test_browser_is_a_primary_workflow_item_not_a_workbench_item():
+    assert ('pipeline', 'Automation') in PRIMARY_NAV_ITEMS
+    assert all(label != 'Test plan' for _key, label in PRIMARY_NAV_ITEMS)
+    assert ('browser', 'Browser') in PRIMARY_NAV_ITEMS
+    assert ('Browser', 'browser') not in WORKBENCH_ITEMS
 
 
 def test_finding_url_prefers_explicit_url():
@@ -151,9 +174,9 @@ def test_recon_host_filters_separate_dns_and_http_liveness():
         {
             'hostname': 'mail.example.com',
             'dns_live': True,
-            'http_live': False,
-            'ip_addresses': ['192.0.2.2'],
-            'sources': ['amass'],
+                'http_live': False,
+                'ip_addresses': ['192.0.2.2'],
+                'sources': ['subfinder'],
         },
         {
             'hostname': 'old.example.com',
@@ -173,9 +196,9 @@ def test_recon_host_filters_separate_dns_and_http_liveness():
             'hostname': 'denied.example.com',
             'dns_live': True,
             'http_live': True,
-            'http_status': '403',
-            'http_url': 'https://denied.example.com',
-            'sources': ['amass'],
+                'http_status': '403',
+                'http_url': 'https://denied.example.com',
+                'sources': ['subfinder'],
         },
     ]
 
@@ -305,6 +328,19 @@ def test_structured_scan_phase_events_are_strict_and_bounded():
     ) == ('Done', 100)
     assert parse_scan_phase_event('[*] Testing selected techniques') is None
     assert parse_scan_phase_event('::blackthorn-phase::{broken') is None
+
+
+def test_structured_recon_progress_events_are_strict_and_bounded():
+    assert parse_recon_progress_event(
+        '::blackthorn-recon-progress::{"label":"Resolving DNS","progress":24}'
+    ) == ('Resolving DNS', 24)
+    assert parse_recon_progress_event(
+        '::blackthorn-recon-progress::{"label":"Done","progress":900}'
+    ) == ('Done', 100)
+    assert parse_recon_progress_event('[+] dnsx: 5 host(s)') is None
+    assert parse_recon_progress_event(
+        '::blackthorn-recon-progress::{broken'
+    ) is None
 
 
 def test_legal_acceptance_is_versioned():

@@ -146,10 +146,20 @@ def _run_recon_worker() -> int:
     parser.add_argument('--no-historical', action='store_true')
     parser.add_argument('--ports', action='store_true')
     parser.add_argument('--traceroute', action='store_true')
-    parser.add_argument('--naabu', action='store_true')
     parser.add_argument('--crawl', action='store_true')
     parser.add_argument('--nuclei', action='store_true')
     parser.add_argument('--xss', action='store_true')
+    parser.add_argument('--visual', action='store_true')
+    parser.add_argument('--arjun', action='store_true')
+    parser.add_argument('--alterx', action='store_true')
+    parser.add_argument('--uncover', action='store_true')
+    parser.add_argument('--asnmap', action='store_true')
+    parser.add_argument('--cloudlist', action='store_true')
+    parser.add_argument('--takeover', action='store_true')
+    parser.add_argument('--uncover-engines', default='shodan,censys')
+    parser.add_argument('--uncover-query', default='')
+    parser.add_argument('--artifact-dir', default='')
+    parser.add_argument('--history-dir', default='')
     parser.add_argument(
         '--nuclei-severity',
         default='low,medium,high,critical',
@@ -170,12 +180,22 @@ def _run_recon_worker() -> int:
             nuclei_tags=args.nuclei_tags,
             do_tls=not args.no_tls,
             do_historical=not args.no_historical,
-            do_naabu=args.naabu,
             do_crawl=args.crawl,
             do_nuclei=args.nuclei,
             do_xss=args.xss,
             do_ports=args.ports,
             do_traceroute=args.traceroute,
+            do_visual=args.visual,
+            do_arjun=args.arjun,
+            do_alterx=args.alterx,
+            do_uncover=args.uncover,
+            do_asnmap=args.asnmap,
+            do_cloudlist=args.cloudlist,
+            do_takeover=args.takeover,
+            uncover_engines=args.uncover_engines,
+            uncover_query=args.uncover_query,
+            artifact_dir=args.artifact_dir,
+            history_dir=args.history_dir,
         )
         with open(args.output, 'w', encoding='utf-8') as f:
             json.dump(report, f, indent=2, default=str)
@@ -192,9 +212,23 @@ def _run_recon_worker() -> int:
         return 1
 
 
+def _run_browser_worker() -> int:
+    """Run scoped Playwright automation without opening a second GUI."""
+    from wafpierce.browser_automation import main as browser_main
+
+    args = list(sys.argv[1:])
+    try:
+        args.remove('--browser-worker')
+    except ValueError:
+        pass
+    return browser_main(args)
+
+
 if __name__ == '__main__':
     if '--scan-worker' in sys.argv:
         raise SystemExit(_run_scan_worker())
     if '--recon-worker' in sys.argv:
         raise SystemExit(_run_recon_worker())
+    if '--browser-worker' in sys.argv:
+        raise SystemExit(_run_browser_worker())
     main()

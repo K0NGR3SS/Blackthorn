@@ -39,8 +39,6 @@ def _report(with_hops=True):
                     'service': 'https',
                     'product': 'nginx',
                 },
-            ],
-            'naabu': [
                 {'host': 'api.example.test', 'ip': '192.0.2.20', 'port': 8443},
             ],
             'vulns': [
@@ -220,3 +218,31 @@ def test_live_output_updates_hosts_without_out_of_scope_noise():
     assert [host['hostname'] for host in hosts] == ['api.example.test']
     assert hosts[0]['ip_addresses'] == ['192.0.2.20']
     assert hosts[0]['http_live'] is True
+
+
+def test_asset_graph_includes_correlated_external_and_parameter_intelligence():
+    report = _report(with_hops=False)
+    report['stages'].update({
+        'uncover': [{
+            'host': 'dev.example.test', 'a': ['192.0.2.30'],
+        }],
+        'arjun': [{
+            'url': 'https://api.example.test/v2/admin', 'method': 'POST',
+            'parameters': ['tenant'],
+        }],
+        'risk_signals': [{
+            'target': 'https://api.example.test/v2/admin',
+            'severity': 'HIGH', 'category': 'sensitive_path',
+            'reason': 'Sensitive API route discovered',
+        }],
+    })
+
+    graph = build_topology(report)
+    dev = find_topology_node(graph, 'dev.example.test')
+    api = find_topology_node(graph, 'api.example.test')
+
+    assert dev is not None
+    assert 'uncover' in dev['sources']
+    assert 'https://api.example.test/v2/admin' in api['endpoints']
+    assert api['vulnerable'] is True
+    assert api['risk_severity'] == 'HIGH'

@@ -28,6 +28,14 @@ def test_build_argv_substitutes_placeholders():
     assert argv == ['nuclei', '-u', 'https://example.com/app', '-jsonl', '-silent']
 
 
+def test_browser_stack_tools_are_registered_without_duplicate_crawlers():
+    assert reg.get_spec('retire').binaries == ('retire-site-scanner',)
+    assert reg.get_spec('dalfox').argv_template[:2] == ('scan', '{url}')
+    assert 'jsluice' not in reg.TOOL_REGISTRY
+    assert 'kiterunner' not in reg.TOOL_REGISTRY
+    assert 'shuffledns' not in reg.TOOL_REGISTRY
+
+
 def test_build_argv_rejects_flag_like_target():
     spec = reg.get_spec('nmap')
     ctx = rt._build_context(spec, '-oG', None, '/tmp/x')

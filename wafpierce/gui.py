@@ -48,14 +48,14 @@ BANNER_PATH = asset_path(BRAND_BANNER)
 PRIMARY_NAV_ITEMS = (
     ('scan', 'Scope & scan'),
     ('recon', 'Discover'),
-    ('pipeline', 'Test plan'),
+    ('pipeline', 'Automation'),
+    ('browser', 'Browser'),
     ('results', 'Analyze'),
     ('dashboard', 'Report'),
 )
 
 WORKBENCH_GROUPS = (
     ('REQUEST TESTING', (
-        ('Browser', 'browser'),
         ('Proxy', 'proxy'),
         ('Request lab', 'repeater'),
         ('Payload library', 'payloads'),
@@ -110,6 +110,27 @@ def _engagement_authorizes(target: str, scope: list, exclusions=None) -> bool:
     if not is_authorized(target, list(scope or [])):
         return False
     return not is_authorized(target, list(exclusions or []))
+
+
+def browser_scope_allows(value: str, scope_host: str) -> bool:
+    """Exact-host/subdomain browser scope check; never use substring matching."""
+    from urllib.parse import urlparse
+
+    def hostname(raw):
+        text = str(raw or '').strip()
+        if not text:
+            return ''
+        while text.startswith('*.'):
+            text = text[2:]
+        try:
+            parsed = urlparse(text if '://' in text else '//' + text)
+            return (parsed.hostname or '').lower().rstrip('.')
+        except ValueError:
+            return ''
+
+    host = hostname(value)
+    scope = hostname(scope_host)
+    return bool(host and scope and (host == scope or host.endswith('.' + scope)))
 
 
 def _finding_status_label(finding: dict) -> str:
@@ -715,13 +736,19 @@ def _load_prefs() -> dict:
     }
     try:
         if os.path.exists(path):
+            sanitized = None
+            needs_rewrite = False
             with open(path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 if isinstance(data, dict):
                     sanitized = _migrate_legacy_pref_secrets(data)
                     defaults.update(sanitized)
-                    if sanitized != data:
-                        _save_prefs(sanitized)
+                    needs_rewrite = sanitized != data
+            # On Windows an open read handle prevents os.replace() from
+            # atomically replacing the preferences file.  Close it before
+            # rewriting migrated plaintext secrets.
+            if needs_rewrite and sanitized is not None:
+                _save_prefs(sanitized)
     except Exception:
         pass
     defaults['language'] = _normalize_language(defaults.get('language', 'en'))
@@ -1319,11 +1346,10 @@ The developers, contributors, distributors, and owners of Blackthorn assume no l
         'clear': 'Очистити',
         'results_explorer': 'Провідник результатів',
         'sites': '🌐 Сайти',
-        'findings': 'знахідки',
+        'findings': 'знахідок',
         'languages': 'мови',
         'servers': 'сервери',
         'all_sites': '📋 Всі сайти',
-        'findings': 'знахідок',
         'total': 'Всього',
         'bypasses': 'Підтверджені',
         'sort_by': 'Сортувати:',
@@ -1892,6 +1918,7 @@ SCAN_PROFILE_DEFINITIONS = {
 
 LEGAL_ACCEPTANCE_VERSION = '2026-07-28'
 _PHASE_EVENT_PREFIX = '::blackthorn-phase::'
+_RECON_PROGRESS_PREFIX = '::blackthorn-recon-progress::'
 
 
 def scan_profile_settings(profile_key: str, custom_categories=None) -> dict:
@@ -1945,6 +1972,20 @@ def parse_scan_phase_event(line: str):
         return None
     try:
         event = json.loads(text[len(_PHASE_EVENT_PREFIX):])
+        label = str(event.get('label') or '').strip()
+        progress = max(0, min(100, int(event.get('progress', 0))))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return (label, progress) if label else None
+
+
+def parse_recon_progress_event(line: str):
+    """Parse one recon-engine progress event into ``(label, progress)``."""
+    text = str(line or '').strip()
+    if not text.startswith(_RECON_PROGRESS_PREFIX):
+        return None
+    try:
+        event = json.loads(text[len(_RECON_PROGRESS_PREFIX):])
         label = str(event.get('label') or '').strip()
         progress = max(0, min(100, int(event.get('progress', 0))))
     except (TypeError, ValueError, json.JSONDecodeError):
@@ -2063,10 +2104,27 @@ def main() -> None:
                                        QSpinBox, QDoubleSpinBox, QHeaderView,
                                        QProgressBar)
         from PySide6.QtCore import QObject, Signal, QTimer
-        from PySide6.QtGui import QBrush, QColor, QFont, QFontDatabase
+        from PySide6.QtGui import QBrush, QColor, QFont, QFontDatabase, QPainter, QPen
     except ImportError:
         _show_missing_packages_error()
         return
+
+    class ChevronComboBox(QtWidgets.QComboBox):
+        """Combo box with a platform-independent, high-contrast affordance."""
+
+        def paintEvent(self, event):
+            super().paintEvent(event)
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            pen = QPen(QColor('#e8e2d8'))
+            pen.setWidthF(1.8)
+            painter.setPen(pen)
+            center_x = self.width() - 15
+            center_y = self.height() // 2
+            painter.drawLine(center_x - 5, center_y - 2,
+                             center_x, center_y + 3)
+            painter.drawLine(center_x, center_y + 3,
+                             center_x + 5, center_y - 2)
 
     class QtWorker(QObject):
         finished = Signal()
@@ -2441,7 +2499,7 @@ def main() -> None:
         log_line = Signal(str)
         stage_update = Signal(str, str)   # (stage_id, status)
         findings = Signal(object)
-        finished = Signal()
+        finished = Signal(object)
 
         def __init__(
             self,
@@ -2449,6 +2507,7 @@ def main() -> None:
             target,
             authorization_patterns=None,
             authorization_exclusions=None,
+            external_is_aborted=None,
             parent=None,
         ):
             super().__init__(parent)
@@ -2456,8 +2515,22 @@ def main() -> None:
             self.target = target
             self.authorization_patterns = list(authorization_patterns or [])
             self.authorization_exclusions = list(authorization_exclusions or [])
+            self.external_is_aborted = (
+                external_is_aborted if callable(external_is_aborted) else None
+            )
             self._proc = None
             self._abort = False
+
+        def is_aborted(self):
+            if self._abort:
+                return True
+            try:
+                return bool(
+                    self.external_is_aborted and self.external_is_aborted()
+                )
+            except Exception:
+                # An external safety signal that cannot be evaluated fails closed.
+                return self.external_is_aborted is not None
 
         def abort(self):
             self._abort = True
@@ -2468,6 +2541,12 @@ def main() -> None:
                 pass
 
         def run(self):
+            outcome = {
+                'ok': False,
+                'state': 'failed',
+                'errors': ['pipeline worker did not complete'],
+                'findings': [],
+            }
             try:
                 from .pipeline import PipelineRunner, PipelineHooks
                 hooks = PipelineHooks(
@@ -2475,9 +2554,9 @@ def main() -> None:
                     on_stage=lambda sid, st: self.stage_update.emit(sid, st),
                     on_findings=lambda items: self.findings.emit(items),
                     register_proc=lambda p: setattr(self, '_proc', p),
-                    is_aborted=lambda: self._abort,
+                    is_aborted=self.is_aborted,
                 )
-                PipelineRunner(
+                outcome = PipelineRunner(
                     self.pdef,
                     self.target,
                     hooks=hooks,
@@ -2490,7 +2569,13 @@ def main() -> None:
                 ).run()
             except Exception as e:
                 self.log_line.emit(f'[!] Pipeline error: {e}')
-            self.finished.emit()
+                outcome = {
+                    'ok': False,
+                    'state': 'failed',
+                    'errors': [str(e)],
+                    'findings': [],
+                }
+            self.finished.emit(outcome)
 
     class ZapWorker(QObject):
         """Drives a ZAP spider + active-scan on a QThread and emits the resulting
@@ -2906,7 +2991,7 @@ def main() -> None:
             section = QLabel('WORKBENCH')
             section.setObjectName('NavSection')
             nav_lay.addWidget(section)
-            workbench = QtWidgets.QComboBox()
+            workbench = ChevronComboBox()
             workbench.setObjectName('WorkbenchSelector')
             workbench.setAccessibleName('Open a specialist workbench')
             workbench.setAccessibleDescription(
@@ -3309,7 +3394,7 @@ def main() -> None:
             convention (`_build_<key>_page`); only implemented builders register,
             so any section without one falls back to its legacy dialog. This lets
             sections migrate to in-place pages one at a time without breakage."""
-            keys = ['pipeline', 'recon', 'browser', 'fuzzer', 'secrets', 'sqli',
+            keys = ['pipeline', 'browser', 'recon', 'fuzzer', 'secrets', 'sqli',
                     'repeater', 'payloads', 'plugins',
                     'dashboard', 'results', 'settings', 'ai',
                     'tools', 'zapburp', 'adint', 'proxy', 'engagements']
@@ -3962,8 +4047,8 @@ def main() -> None:
                 self.append_log('='*50)
                 self.append_log(f'  User: {user}')
                 self.append_log(f'  Host: {host}')
-                self.append_log(f'  Status: Certified Penetration Tester 🎖️')
-                self.append_log(f'  Threat Level: MAXIMUM 💀')
+                self.append_log('  Status: Certified Penetration Tester 🎖️')
+                self.append_log('  Threat Level: MAXIMUM 💀')
                 self.append_log('='*50 + '\n')
             except Exception:
                 pass
@@ -5321,19 +5406,73 @@ def main() -> None:
             save.clicked.connect(do_save)
             d.exec()
 
-        def _show_pipeline_builder(self):
+        def _show_pipeline_builder(
+            self, *, initial_target=None, initial_pipeline=None,
+            automation_safe=False, automation_preflight=None,
+            automation_is_cancelled=None,
+            on_started=None, on_finished=None, on_stopped=None,
+        ):
             """Visual builder for a linear pipeline of typed stages (wafpierce_scan ->
             external_tool -> report). Runs stages sequentially as killable subprocesses,
-            folding each stage's findings into the Results Explorer."""
+            folding each stage's findings into the Results Explorer.
+
+            ``automation_safe`` is the approval-queue entry point.  It removes
+            arbitrary external-tool stages and forces Blackthorn scan stages
+            into safe mode.  Its approved target and recipe are immutable, and
+            the engagement scope plus optional signed-manifest preflight are
+            re-read immediately before execution.
+            """
+            import copy as _copy
             try:
                 from .pipeline import (STAGE_TYPES, default_pipeline, validate_pipeline)
                 from .tools_registry import TOOL_REGISTRY
             except Exception as e:
                 QMessageBox.critical(self, 'Pipeline', f'Pipeline engine unavailable: {e}')
                 return
+            if automation_safe and not all(callable(callback) for callback in (
+                automation_preflight,
+                automation_is_cancelled,
+                on_started,
+                on_finished,
+                on_stopped,
+            )):
+                QMessageBox.critical(
+                    self,
+                    'Safe validation unavailable',
+                    'The approval, cancellation, and timeout safety callbacks are '
+                    'required for Automation validation.',
+                )
+                return
 
-            dlg = QtWidgets.QDialog(self)
-            dlg.setWindowTitle('Pipeline Builder')
+            run_state = {'thread': None, 'worker': None}
+
+            class _PipelineDialog(QtWidgets.QDialog):
+                def _close_blocked(inner_self):
+                    if automation_safe and run_state.get('worker') is not None:
+                        QMessageBox.information(
+                            inner_self,
+                            'Validation still running',
+                            'Stop the safe validation and wait for it to finish '
+                            'before closing this window.',
+                        )
+                        return True
+                    return False
+
+                def reject(inner_self):
+                    if not inner_self._close_blocked():
+                        super().reject()
+
+                def closeEvent(inner_self, event):
+                    if inner_self._close_blocked():
+                        event.ignore()
+                    else:
+                        super().closeEvent(event)
+
+            dlg = _PipelineDialog(self)
+            dlg.setWindowTitle(
+                'Safe Automation Validation'
+                if automation_safe else 'Pipeline Builder'
+            )
             dlg.resize(980, 720)
             dlg.setStyleSheet('''
                 QDialog { background-color: #0f1112; }
@@ -5347,10 +5486,12 @@ def main() -> None:
                 QTextEdit { background-color: #0b0d0e; color: #9ee6a0; border: 1px solid #2b2f33; }
             ''')
             outer = QVBoxLayout(dlg)
-            state = {'stages': []}
+            seed = initial_pipeline or default_pipeline()
+            state = {'stages': _copy.deepcopy(seed.get('stages') or [])}
 
             row1 = QHBoxLayout()
             name_edit = QLineEdit(); name_edit.setPlaceholderText('pipeline name')
+            name_edit.setText(str(seed.get('name') or ''))
             load_combo = QtWidgets.QComboBox()
             load_btn = QPushButton('Load'); save_btn = QPushButton('Save'); del_btn = QPushButton('Delete')
             row1.addWidget(QLabel('Name:')); row1.addWidget(name_edit, 2)
@@ -5359,10 +5500,13 @@ def main() -> None:
 
             row2 = QHBoxLayout()
             target_edit = QLineEdit()
-            try:
-                target_edit.setText(self.target_edit.text().strip())
-            except Exception:
-                pass
+            if initial_target:
+                target_edit.setText(str(initial_target).strip())
+            else:
+                try:
+                    target_edit.setText(self.target_edit.text().strip())
+                except Exception:
+                    pass
             target_edit.setPlaceholderText('https://target')
             row2.addWidget(QLabel('Target:')); row2.addWidget(target_edit, 1)
             outer.addLayout(row2)
@@ -5373,6 +5517,12 @@ def main() -> None:
             side = QVBoxLayout()
             type_combo = QtWidgets.QComboBox()
             for k, v in STAGE_TYPES.items():
+                if k == 'http_observation':
+                    # This fixed-contract stage is created only by the signed
+                    # Automation manifest, never from the free-form builder.
+                    continue
+                if automation_safe and k == 'external_tool':
+                    continue
                 type_combo.addItem(v, k)
             add_btn = QPushButton('+ Add stage'); edit_btn = QPushButton('Edit')
             up_btn = QPushButton('↑ Up'); down_btn = QPushButton('↓ Down'); rm_btn = QPushButton('Remove')
@@ -5381,6 +5531,28 @@ def main() -> None:
             side.addStretch()
             mid.addLayout(side)
             outer.addLayout(mid, 1)
+
+            if automation_safe:
+                safety_note = QLabel(
+                    'Approved safe automation: the target and signed recipe are '
+                    'locked. Scope, approval expiry, rate limits, and the recipe '
+                    'manifest are checked again immediately before execution.'
+                )
+                safety_note.setWordWrap(True)
+                safety_note.setStyleSheet('color:#f59e0b;')
+                outer.addWidget(safety_note)
+                load_combo.setEnabled(False)
+                load_btn.setEnabled(False)
+                save_btn.setEnabled(False)
+                del_btn.setEnabled(False)
+                name_edit.setReadOnly(True)
+                target_edit.setReadOnly(True)
+                type_combo.setEnabled(False)
+                add_btn.setEnabled(False)
+                edit_btn.setEnabled(False)
+                up_btn.setEnabled(False)
+                down_btn.setEnabled(False)
+                rm_btn.setEnabled(False)
 
             runrow = QHBoxLayout()
             run_btn = style_button(
@@ -5409,6 +5581,8 @@ def main() -> None:
                         summ = cfg.get('format', 'html')
                     elif s['type'] == 'wafpierce_scan':
                         summ = ','.join(cfg.get('categories', []) or ['all'])
+                    elif s['type'] == 'http_observation':
+                        summ = 'GET · 1 request · no redirects'
                     else:
                         summ = ''
                     stage_list.addItem(f"{i+1}. {STAGE_TYPES.get(s['type'], s['type'])}  [{summ}]")
@@ -5505,11 +5679,41 @@ def main() -> None:
                     state['stages'] = rec['definition'].get('stages', [])
                     name_edit.setText(nm); refresh_list()
 
+            def _pipeline_definition(name):
+                stages = _copy.deepcopy(state['stages'])
+                if automation_safe:
+                    if any(
+                        stage.get('type') == 'external_tool'
+                        for stage in stages
+                    ):
+                        QMessageBox.warning(
+                            dlg,
+                            'Safe automation only',
+                            'Arbitrary external-tool stages are not allowed from '
+                            'the automation approval queue.',
+                        )
+                        return None
+                    for stage in stages:
+                        if stage.get('type') != 'wafpierce_scan':
+                            continue
+                        config = dict(stage.get('config') or {})
+                        config['safe_mode'] = True
+                        config.pop('full_impact', None)
+                        config.pop('intrusive', None)
+                        stage['config'] = config
+                return {
+                    'name': name,
+                    'schema_version': 1,
+                    'stages': stages,
+                }
+
             def do_save():
                 nm = name_edit.text().strip()
                 if not nm:
                     QMessageBox.information(dlg, 'Pipeline', 'Enter a name.'); return
-                pdef = {'name': nm, 'schema_version': 1, 'stages': state['stages']}
+                pdef = _pipeline_definition(nm)
+                if pdef is None:
+                    return
                 errs = validate_pipeline(pdef)
                 if errs:
                     QMessageBox.warning(dlg, 'Pipeline', 'Invalid:\n' + '\n'.join(errs)); return
@@ -5525,7 +5729,11 @@ def main() -> None:
                 tgt = target_edit.text().strip()
                 if not tgt:
                     QMessageBox.information(dlg, 'Pipeline', 'Enter a target.'); return
-                pdef = {'name': name_edit.text().strip() or 'pipeline', 'schema_version': 1, 'stages': state['stages']}
+                pdef = _pipeline_definition(
+                    name_edit.text().strip() or 'pipeline'
+                )
+                if pdef is None:
+                    return
                 errs = validate_pipeline(pdef)
                 if errs:
                     QMessageBox.warning(dlg, 'Pipeline', 'Invalid:\n' + '\n'.join(errs)); return
@@ -5537,7 +5745,11 @@ def main() -> None:
                     self._db.get_engagement(int(engagement_id))
                     if self._db and engagement_id else None
                 )
-                if not engagement or not engagement.get('scope'):
+                if (
+                    not engagement
+                    or str(engagement.get('status') or 'active').lower() != 'active'
+                    or not engagement.get('scope')
+                ):
                     QMessageBox.warning(
                         dlg,
                         'Scope required',
@@ -5556,36 +5768,119 @@ def main() -> None:
                         'The target is not authorized by the selected engagement.',
                     )
                     return
-                self._pipe_thread = QtCore.QThread()
-                self._pipe_worker = PipelineWorker(
+                if automation_safe:
+                    try:
+                        verdict = automation_preflight(tgt, pdef)
+                    except Exception:
+                        verdict = (False, 'The approved validation preflight failed.')
+                    if isinstance(verdict, tuple):
+                        allowed = bool(verdict[0])
+                        reason = str(verdict[1] if len(verdict) > 1 else '')
+                    else:
+                        allowed = bool(verdict)
+                        reason = ''
+                    if not allowed:
+                        QMessageBox.warning(
+                            dlg,
+                            'Validation blocked',
+                            reason or 'The approved validation is no longer authorized.',
+                        )
+                        return
+                pipe_thread = QtCore.QThread()
+                pipe_worker = PipelineWorker(
                     pdef,
                     tgt,
                     authorization_patterns=engagement.get('scope'),
                     authorization_exclusions=engagement.get('exclusions'),
+                    external_is_aborted=(
+                        automation_is_cancelled if automation_safe else None
+                    ),
                 )
-                self._pipe_worker.moveToThread(self._pipe_thread)
-                self._pipe_thread.started.connect(self._pipe_worker.run)
-                self._pipe_worker.log_line.connect(lambda m: log.append(str(m).rstrip()))
-                self._pipe_worker.findings.connect(
+                run_state['thread'] = pipe_thread
+                run_state['worker'] = pipe_worker
+                # Retain compatibility for existing diagnostics, but all lifecycle
+                # actions below use the run-bound local references.
+                self._pipe_thread = pipe_thread
+                self._pipe_worker = pipe_worker
+                pipe_worker.moveToThread(pipe_thread)
+                pipe_thread.started.connect(pipe_worker.run)
+                pipe_worker.log_line.connect(lambda m: log.append(str(m).rstrip()))
+                pipe_worker.findings.connect(
                     lambda items: self._ingest_external_findings(items, label=f'pipeline @ {tgt}'))
 
-                def fin():
-                    run_btn.setEnabled(True); stop_btn.setEnabled(False)
+                def fin(outcome, worker=pipe_worker, thread=pipe_thread):
+                    run_btn.setEnabled(not automation_safe); stop_btn.setEnabled(False)
                     log.append('[+] Pipeline finished. Open Results to view.')
+                    if callable(on_finished):
+                        try:
+                            on_finished(tgt, worker, outcome)
+                        except Exception:
+                            pass
                     try:
-                        self._pipe_thread.quit(); self._pipe_thread.wait(3000)
+                        thread.quit(); thread.wait(3000)
                     except Exception:
                         pass
+                    if run_state.get('worker') is worker:
+                        run_state['worker'] = None
+                        run_state['thread'] = None
+                    if getattr(self, '_pipe_worker', None) is worker:
+                        self._pipe_worker = None
+                    if getattr(self, '_pipe_thread', None) is thread:
+                        self._pipe_thread = None
 
-                self._pipe_worker.finished.connect(fin)
+                pipe_worker.finished.connect(fin)
                 run_btn.setEnabled(False); stop_btn.setEnabled(True)
                 log.append(f'[*] Running pipeline against {tgt} …')
-                self._pipe_thread.start()
+                try:
+                    started_ok = on_started(tgt, pipe_worker) if callable(on_started) else True
+                    if automation_safe and started_ok is not True:
+                        raise RuntimeError('required validation timeout was not installed')
+                except Exception:
+                    pipe_worker.abort()
+                    try:
+                        if callable(on_stopped):
+                            on_stopped(tgt, pipe_worker)
+                        if callable(on_finished):
+                            on_finished(
+                                tgt,
+                                pipe_worker,
+                                {
+                                    'ok': False,
+                                    'state': 'start_blocked',
+                                    'errors': [
+                                        'required validation timeout was not installed'
+                                    ],
+                                    'findings': [],
+                                },
+                            )
+                    except Exception:
+                        pass
+                    run_state['worker'] = None
+                    run_state['thread'] = None
+                    if getattr(self, '_pipe_worker', None) is pipe_worker:
+                        self._pipe_worker = None
+                    if getattr(self, '_pipe_thread', None) is pipe_thread:
+                        self._pipe_thread = None
+                    run_btn.setEnabled(not automation_safe)
+                    stop_btn.setEnabled(False)
+                    QMessageBox.warning(
+                        dlg,
+                        'Validation blocked',
+                        'The required validation timeout could not be installed.',
+                    )
+                    return
+                pipe_thread.start()
 
             def stop_pipeline():
                 try:
-                    if getattr(self, '_pipe_worker', None):
-                        self._pipe_worker.abort(); log.append('[!] Stop requested (tree-kill).')
+                    worker = run_state.get('worker')
+                    if worker is not None:
+                        worker.abort(); log.append('[!] Stop requested (tree-kill).')
+                        if callable(on_stopped):
+                            try:
+                                on_stopped(target_edit.text().strip(), worker)
+                            except Exception:
+                                pass
                 except Exception:
                     pass
 
@@ -5602,7 +5897,6 @@ def main() -> None:
             stop_btn.clicked.connect(stop_pipeline)
             results_btn.clicked.connect(self.show_results_summary)
 
-            state['stages'] = list(default_pipeline()['stages'])
             refresh_list(); reload_saved()
             dlg.exec()
 
@@ -6452,7 +6746,7 @@ def main() -> None:
                     cipher = ssl_info.get('cipher', {})
                     issues = ssl_info.get('security_issues', [])
                     
-                    self.append_log(f"[+] 🔐 SSL/TLS Analysis Complete\n")
+                    self.append_log("[+] 🔐 SSL/TLS Analysis Complete\n")
                     if cert.get('subject'):
                         self.append_log(f"    └─ Certificate: {cert.get('subject', 'Unknown')[:60]}\n")
                     if cipher.get('name'):
@@ -6494,14 +6788,31 @@ def main() -> None:
                 cmd.append('--no-tls')
             if not opts.get('do_historical', True):
                 cmd.append('--no-historical')
-            if opts.get('do_naabu'):
-                cmd.append('--naabu')
             if opts.get('do_crawl'):
                 cmd.append('--crawl')
             if opts.get('do_nuclei'):
                 cmd.append('--nuclei')
             if opts.get('do_xss'):
                 cmd.append('--xss')
+            for key, flag in (
+                ('do_visual', '--visual'),
+                ('do_arjun', '--arjun'),
+                ('do_alterx', '--alterx'),
+                ('do_uncover', '--uncover'),
+                ('do_asnmap', '--asnmap'),
+                ('do_cloudlist', '--cloudlist'),
+                ('do_takeover', '--takeover'),
+            ):
+                if opts.get(key):
+                    cmd.append(flag)
+            if opts.get('uncover_engines'):
+                cmd += ['--uncover-engines', str(opts['uncover_engines'])]
+            if opts.get('uncover_query'):
+                cmd += ['--uncover-query', str(opts['uncover_query'])]
+            if opts.get('artifact_dir'):
+                cmd += ['--artifact-dir', str(opts['artifact_dir'])]
+            if opts.get('history_dir'):
+                cmd += ['--history-dir', str(opts['history_dir'])]
             if opts.get('nuclei_severity'):
                 cmd += ['--nuclei-severity', str(opts['nuclei_severity'])]
             if opts.get('nuclei_tags'):
@@ -6509,20 +6820,22 @@ def main() -> None:
             return cmd
 
         def _build_recon_page(self):
-            """The Recon section as an in-place page: run subfinder/amass/dnsx/
-            httpx/nmap in a subprocess, stream output, and collect findings into a
-            tree that can be merged into Results or handed off to Metasploit /
-            Caido. The QProcess is parented to this cached page, so switching to
-            another section never interrupts a running recon."""
+            """Build the in-place, multi-engine Discovery workspace.
+
+            External tools run in a subprocess, stream progress, and return
+            structured, tool-separated results that can be merged into Results or
+            handed off to the rest of the pentest workspace.  The QProcess is
+            parented to this cached page, so navigation never interrupts a run.
+            """
             from PySide6 import QtWidgets, QtCore
             from PySide6.QtWidgets import (
                 QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QSpinBox,
                 QCheckBox, QPushButton, QPlainTextEdit, QTreeWidget,
                 QTreeWidgetItem, QSplitter, QMessageBox, QFileDialog,
                 QGridLayout, QGroupBox, QComboBox, QTabWidget, QHeaderView,
-                QMenu)
+                QMenu, QProgressBar)
             from PySide6.QtCore import Qt, QProcess, QProcessEnvironment
-            from PySide6.QtGui import QTextCursor
+            from PySide6.QtGui import QTextCursor, QBrush, QColor
             import tempfile
 
             dlg = QtWidgets.QWidget()
@@ -6531,12 +6844,18 @@ def main() -> None:
             lay.setContentsMargins(22, 20, 22, 20)
             _hdr = QLabel('Discovery')
             _hdr.setObjectName('PageTitle')
-            _hdr.setToolTip('subfinder · amass · dnsx · httpx · nmap  +  tlsx · gau · katana · nuclei · naabu · dalfox')
+            _hdr.setToolTip(
+                'Subdomains, DNS, visual HTTP, JavaScript, API routes, parameters, '
+                'permutations, internet exposure, cloud assets, ports, TLS, '
+                'takeovers, and vulnerability validation'
+            )
             lay.addWidget(_hdr)
             _intro = QLabel(
-                'Find subdomains first, then see exactly which names resolve '
-                'and which ones answer over HTTP(S). Wildcard scope such as '
-                '*.example.com is accepted.'
+                'Build an authorized attack-surface inventory across DNS, HTTP, '
+                'JavaScript, APIs, cloud exposure, ports, and takeover signals. '
+                'Every engine has its own result group, and multi-value output is '
+                'expanded into individual rows. Wildcards such as *.example.com '
+                'are accepted.'
             )
             _intro.setObjectName('FieldLabel')
             _intro.setWordWrap(True)
@@ -6615,47 +6934,62 @@ def main() -> None:
 
             _stage('tls', 'TLS / SAN (tlsx)', 'Grab TLS certs and harvest extra subdomains from SANs.', True, 0, 0)
             _stage('historical', 'Historical URLs (gau)', 'Pull URLs from wayback / commoncrawl / otx.', True, 0, 1)
+            _stage('visual', 'Visual recon (httpx)', 'Capture screenshots, rendered DOM, favicon, JARM, and response hashes.', False, 0, 2)
+            _stage('crawl', 'Crawl (katana)', 'Crawl live sites (incl. JS) for endpoints.', False, 1, 0)
+            _stage('arjun', 'Hidden parameters (Arjun)', 'Discover hidden GET parameters on scoped endpoints.', False, 1, 1)
+            _stage('alterx', 'DNS mutations (AlterX + dnsx)', 'Generate pattern-aware candidates and retain only those validated by dnsx.', False, 1, 2)
+            _stage('uncover', 'Exposure engines (Uncover)', 'Query configured Shodan/Censys and other provider APIs without active target traffic.', False, 2, 0)
+            _stage('asnmap', 'ASN / CIDR mapping', 'Map domain and organization network ranges without actively probing those ranges.', False, 2, 1)
+            _stage('cloudlist', 'Cloud inventory', 'Correlate configured cloud accounts to the current domain/IP scope.', False, 2, 2)
             _stage(
                 'ports',
                 'Active ports (Nmap) — opt in',
                 'Unprivileged TCP connect scan with light service detection. '
                 'Can trigger endpoint/network security alerts.',
-                False, 0, 2,
+                False, 3, 0,
             )
-            _stage('naabu', 'Fast ports (naabu)', 'Fast TCP connect port discovery across many hosts.', False, 1, 0)
-            _stage('crawl', 'Crawl (katana)', 'Crawl live sites (incl. JS) for endpoints.', False, 1, 1)
-            _stage('nuclei', 'Vuln scan (nuclei)', 'Run nuclei templates against live web services.', False, 1, 2)
-            _stage('xss', 'XSS (dalfox)', 'Test URLs that carry parameters for XSS.', False, 2, 0)
             _stage(
                 'traceroute',
                 'Network paths (Nmap traceroute) — opt in',
                 'Measure router hops and round-trip time so topology connections '
                 'are based on observed paths instead of scope relationships.',
-                False, 2, 1,
+                False, 3, 1,
             )
+            _stage('nuclei', 'Vuln scan (nuclei)', 'Run nuclei templates against live web services.', False, 4, 0)
+            _stage('xss', 'XSS (dalfox)', 'Test URLs that carry parameters for XSS.', False, 4, 1)
+            _stage('takeover', 'Takeover validation', 'Run dedicated Nuclei takeover templates against scoped subdomains.', False, 4, 2)
             stage_chks['ports'].toggled.connect(ports_spin.setEnabled)
 
             # nuclei + crawl tuning (compact 3-column grid)
-            sg.addWidget(QLabel('nuclei sev:'), 3, 0)
+            sg.addWidget(QLabel('nuclei sev:'), 5, 0)
             nuclei_sev_combo = QComboBox()
             nuclei_sev_combo.addItems(['low,medium,high,critical', 'medium,high,critical',
                                        'high,critical', 'critical',
                                        'info,low,medium,high,critical'])
-            sg.addWidget(nuclei_sev_combo, 3, 1, 1, 2)
-            sg.addWidget(QLabel('nuclei tags:'), 4, 0)
+            sg.addWidget(nuclei_sev_combo, 5, 1, 1, 2)
+            sg.addWidget(QLabel('nuclei tags:'), 6, 0)
             nuclei_tags_edit = QLineEdit()
             nuclei_tags_edit.setPlaceholderText('blank = all  ·  e.g. cve,xss,sqli,rce')
-            sg.addWidget(nuclei_tags_edit, 4, 1, 1, 2)
-            sg.addWidget(QLabel('crawl depth:'), 5, 0)
+            sg.addWidget(nuclei_tags_edit, 6, 1, 1, 2)
+            sg.addWidget(QLabel('crawl depth:'), 7, 0)
             depth_spin = QSpinBox(); depth_spin.setRange(1, 5); depth_spin.setValue(2)
-            sg.addWidget(depth_spin, 5, 1)
+            sg.addWidget(depth_spin, 7, 1)
+
+            uncover_engines_edit = QLineEdit('shodan,censys')
+            uncover_engines_edit.setPlaceholderText('shodan,censys,fofa,netlas')
+            sg.addWidget(QLabel('Exposure engines:'), 8, 0)
+            sg.addWidget(uncover_engines_edit, 8, 1, 1, 2)
+            uncover_query_edit = QLineEdit()
+            uncover_query_edit.setPlaceholderText('blank = authorized root domain')
+            sg.addWidget(QLabel('Exposure query:'), 9, 0)
+            sg.addWidget(uncover_query_edit, 9, 1, 1, 2)
 
             # Presets
             preset_row = QHBoxLayout()
             fast_btn = QPushButton('Passive + web')
             full_btn = QPushButton('Full active coverage')
             fast_btn.setToolTip(
-                'Subfinder, Amass, Certificate Transparency, dnsx, httpx, '
+                'Subfinder, Certificate Transparency, dnsx, httpx, '
                 'TLS SANs, and historical URLs; no port or vulnerability scans.'
             )
             full_btn.setToolTip(
@@ -6664,7 +6998,7 @@ def main() -> None:
             preset_row.addWidget(QLabel('Presets:'))
             preset_row.addWidget(fast_btn); preset_row.addWidget(full_btn)
             preset_row.addStretch()
-            sg.addLayout(preset_row, 6, 0, 1, 3)
+            sg.addLayout(preset_row, 10, 0, 1, 3)
 
             def _apply_preset(full):
                 for key, chk in stage_chks.items():
@@ -6711,12 +7045,20 @@ def main() -> None:
                     'nuclei_tags': nuclei_tags_edit.text().strip(),
                     'do_tls': stage_chks['tls'].isChecked(),
                     'do_historical': stage_chks['historical'].isChecked(),
-                    'do_naabu': stage_chks['naabu'].isChecked(),
                     'do_crawl': stage_chks['crawl'].isChecked(),
                     'do_nuclei': stage_chks['nuclei'].isChecked(),
                     'do_xss': stage_chks['xss'].isChecked(),
                     'do_ports': stage_chks['ports'].isChecked(),
                     'do_traceroute': stage_chks['traceroute'].isChecked(),
+                    'do_visual': stage_chks['visual'].isChecked(),
+                    'do_arjun': stage_chks['arjun'].isChecked(),
+                    'do_alterx': stage_chks['alterx'].isChecked(),
+                    'do_uncover': stage_chks['uncover'].isChecked(),
+                    'do_asnmap': stage_chks['asnmap'].isChecked(),
+                    'do_cloudlist': stage_chks['cloudlist'].isChecked(),
+                    'do_takeover': stage_chks['takeover'].isChecked(),
+                    'uncover_engines': uncover_engines_edit.text().strip(),
+                    'uncover_query': uncover_query_edit.text().strip(),
                 }
 
             # Actions — two compact rows so the buttons never overflow a narrow
@@ -6734,13 +7076,28 @@ def main() -> None:
             )
             tools_btn.setToolTip(
                 'Install optional recon tools: nmap, tlsx, gau, katana, '
-                'nuclei, naabu, dalfox'
+                'nuclei, dalfox, Arjun, AlterX, Uncover, ASNMap, and Cloudlist'
             )
             run_row.addWidget(run_btn)
             run_row.addWidget(stop_btn)
             run_row.addStretch()
             run_row.addWidget(tools_btn)
             lay.addLayout(run_row)
+
+            progress_row = QHBoxLayout()
+            progress_label = QLabel('Ready')
+            progress_label.setObjectName('FieldLabel')
+            progress_label.setMinimumWidth(210)
+            progress_bar = QProgressBar()
+            progress_bar.setAccessibleName('Discovery progress')
+            progress_bar.setRange(0, 100)
+            progress_bar.setValue(0)
+            progress_bar.setTextVisible(True)
+            progress_bar.setFormat('%p%')
+            progress_bar.setFixedHeight(22)
+            progress_row.addWidget(progress_label)
+            progress_row.addWidget(progress_bar, 1)
+            lay.addLayout(progress_row)
 
             out_grid = QGridLayout()
             merge_btn = style_button(
@@ -6775,13 +7132,15 @@ def main() -> None:
             out_grid.addWidget(caido_btn, 1, 2, 1, 2)
             lay.addLayout(out_grid)
             tools_btn.clicked.connect(lambda: self._download_tools_dialog(
-                ['nmap', 'tlsx', 'gau', 'katana', 'nuclei', 'naabu', 'dalfox'],
+                [
+                    'nmap', 'tlsx', 'gau', 'katana', 'nuclei', 'dalfox',
+                    'arjun', 'alterx', 'uncover', 'asnmap', 'cloudlist',
+                ],
                 'Optional recon tools — each one that installs adds a richer stage:\n'
                 '  tlsx   — TLS certs + extra subdomains from SAN entries\n'
                 '  gau    — historical URLs (wayback / commoncrawl / otx)\n'
                 '  katana — crawl live sites for endpoints\n'
                 '  nuclei — vulnerability / misconfiguration scan\n'
-                '  naabu  — fast port discovery\n'
                 '  nmap   — active ports plus measured traceroute paths\n'
                 '  dalfox — XSS scanning of URLs with parameters\n',
                 title='Install optional recon tools'))
@@ -6813,6 +7172,8 @@ def main() -> None:
                 ('web_live', 'Web live'),
                 ('dns_without_http', 'No HTTP'),
                 ('unresolved', 'Unresolved'),
+                ('new_assets', 'New assets'),
+                ('risk_signals', 'Risk signals'),
             ):
                 widget = QLabel(f'{label}: 0')
                 widget.setObjectName('FindingState')
@@ -6867,10 +7228,41 @@ def main() -> None:
             topology = create_topology_widget(tabs)
             tabs.addTab(topology, 'Topology')
 
+            tool_results_panel = QtWidgets.QWidget()
+            tool_results_layout = QVBoxLayout(tool_results_panel)
+            tool_results_layout.setContentsMargins(8, 8, 8, 8)
+            tool_results_bar = QHBoxLayout()
+            tool_filter = QComboBox()
+            tool_filter.setAccessibleName('Discovery tool filter')
+            tool_filter.addItem('All tools', 'all')
+            tool_search = QLineEdit()
+            tool_search.setAccessibleName('Search discovery tool results')
+            tool_search.setPlaceholderText(
+                'Search this tool output, including nested fields'
+            )
+            tool_search.setClearButtonEnabled(True)
+            expand_results_btn = QPushButton('Expand tools')
+            collapse_results_btn = QPushButton('Collapse all')
+            tool_count_label = QLabel('0 tool results')
+            tool_count_label.setObjectName('FindingState')
+            tool_results_bar.addWidget(QLabel('Tool:'))
+            tool_results_bar.addWidget(tool_filter)
+            tool_results_bar.addWidget(tool_search, 1)
+            tool_results_bar.addWidget(tool_count_label)
+            tool_results_bar.addWidget(expand_results_btn)
+            tool_results_bar.addWidget(collapse_results_btn)
+            tool_results_layout.addLayout(tool_results_bar)
+
             findings_tree = QTreeWidget()
             findings_tree.setAccessibleName('Discovery findings')
             findings_tree.setHeaderLabels(
-                ['Technique', 'Target', 'Severity', 'Detail']
+                ['Tool / result', 'Target / value', 'Severity', 'Detail']
+            )
+            findings_tree.setAlternatingRowColors(True)
+            findings_tree.setUniformRowHeights(True)
+            findings_tree.setToolTip(
+                'Results are separated by engine. Expand a result to inspect '
+                'every native field and each list item individually.'
             )
             try:
                 header = findings_tree.header()
@@ -6882,7 +7274,10 @@ def main() -> None:
                 findings_tree.setColumnWidth(1, 250)
             except Exception:
                 pass
-            tabs.addTab(findings_tree, 'All recon output')
+            tool_results_layout.addWidget(findings_tree, 1)
+            tool_results_tab_index = tabs.addTab(
+                tool_results_panel, 'Tool results'
+            )
             split.addWidget(tabs)
             log = QPlainTextEdit(); log.setReadOnly(True)
             log.setAccessibleName('Discovery activity log')
@@ -6901,6 +7296,8 @@ def main() -> None:
                 'report': recon_report_parts(None),
                 'live_output': '',
                 'live_report_signature': None,
+                'artifact_dir': '',
+                'progress_buffer': '',
             }
 
             live_report_timer = QtCore.QTimer(dlg)
@@ -6912,6 +7309,29 @@ def main() -> None:
                 log.moveCursor(QTextCursor.End)
                 log.insertPlainText(text)
                 log.moveCursor(QTextCursor.End)
+
+            def _set_discovery_progress(label, value):
+                value = max(progress_bar.value(), max(0, min(100, int(value))))
+                progress_bar.setValue(value)
+                progress_bar.setFormat('%p%')
+                progress_label.setText(str(label or 'Discovery'))
+
+            def _consume_progress_output(text):
+                """Remove machine events from logs and update the visible bar."""
+                combined = state.get('progress_buffer', '') + str(text or '')
+                lines = combined.splitlines(keepends=True)
+                if lines and not lines[-1].endswith(('\n', '\r')):
+                    state['progress_buffer'] = lines.pop()
+                else:
+                    state['progress_buffer'] = ''
+                visible = []
+                for line in lines:
+                    event = parse_recon_progress_event(line.rstrip('\r\n'))
+                    if event:
+                        _set_discovery_progress(*event)
+                    else:
+                        visible.append(line)
+                return ''.join(visible)
 
             def _sync_status_filters(hosts):
                 """Add exact HTTP response codes observed in this report."""
@@ -7093,50 +7513,142 @@ def main() -> None:
                     f'Discovered hosts · showing {len(shown)} of {len(hosts)}'
                 )
 
-            def _populate(report):
+            from .discovery_results import (
+                discovery_detail_nodes,
+                discovery_result_matches,
+                discovery_result_summary,
+                discovery_tool_sections,
+            )
+
+            def _sync_tool_filter(sections):
+                selected = tool_filter.currentData() or 'all'
+                tool_filter.blockSignals(True)
+                tool_filter.clear()
+                tool_filter.addItem('All tools', 'all')
+                for section in sections:
+                    tool_filter.addItem(
+                        f"{section['label']} ({section['total']})",
+                        section['tool'],
+                    )
+                selected_index = tool_filter.findData(selected)
+                tool_filter.setCurrentIndex(
+                    selected_index if selected_index >= 0 else 0
+                )
+                tool_filter.blockSignals(False)
+
+            def _add_detail_node(parent, node):
+                label = str(node.get('label') or 'value')
+                value = str(node.get('value') or '')
+                child = QTreeWidgetItem([f'  {label}', value, '', ''])
+                child.setToolTip(0, label)
+                child.setToolTip(1, value)
+                try:
+                    child.setForeground(0, QBrush(QColor('#9aa7b2')))
+                    child.setForeground(1, QBrush(QColor('#c7d1da')))
+                except Exception:
+                    pass
+                parent.addChild(child)
+                for nested in node.get('children') or []:
+                    if isinstance(nested, dict):
+                        _add_detail_node(child, nested)
+
+            def _populate_tool_results(report, sync_filter=True):
                 findings_tree.clear()
-                report = recon_report_parts(report)
-                state['report'] = report
-                findings = report['findings']
-                sev_color = {'CRITICAL': '#ff5d6c', 'HIGH': '#ff9f43',
-                             'MEDIUM': '#f6e05e', 'LOW': '#63b3ed', 'INFO': '#9aa7b2'}
-                from PySide6.QtGui import QBrush, QColor
-                for f in findings:
-                    sev = str(f.get('severity', 'INFO')).upper()
-                    it = QTreeWidgetItem([
-                        str(f.get('technique', '')), str(f.get('target', '')),
-                        sev, str(f.get('reason', ''))[:240]])
-                    it.setData(0, 257, f)
+                sections = discovery_tool_sections(report)
+                if sync_filter:
+                    _sync_tool_filter(sections)
+                selected_tool = tool_filter.currentData() or 'all'
+                query = tool_search.text()
+                sev_color = {
+                    'CRITICAL': '#ff5d6c', 'HIGH': '#ff9f43',
+                    'MEDIUM': '#f6e05e', 'LOW': '#63b3ed',
+                    'INFO': '#9aa7b2',
+                }
+                shown_results = 0
+                full_results = 0
+                shown_tools = 0
+                for section in sections:
+                    if selected_tool != 'all' and section['tool'] != selected_tool:
+                        continue
+                    records = [
+                        record for record in section['results']
+                        if discovery_result_matches(section['tool'], record, query)
+                    ]
+                    full_results += int(section['total'])
+                    if not records:
+                        continue
+                    shown_tools += 1
+                    shown_results += len(records)
+                    suffix = (
+                        f"showing {len(records)} of {section['total']}"
+                        if section['truncated'] or len(records) != section['total']
+                        else f"{section['total']} result(s)"
+                    )
+                    group = QTreeWidgetItem([
+                        f"{section['label']} · {suffix}", '', '',
+                        section['description'],
+                    ])
+                    group.setData(0, 257, {
+                        '_discovery_tool_group': True,
+                        'tool': section['tool'],
+                    })
+                    group.setToolTip(0, section['description'])
                     try:
-                        it.setForeground(2, QBrush(QColor(sev_color.get(sev, '#9aa7b2'))))
+                        group.setForeground(0, QBrush(QColor('#58a6ff')))
+                        group.setForeground(3, QBrush(QColor('#9aa7b2')))
                     except Exception:
                         pass
-                    detail_rows = [
-                        ('Reason', str(f.get('reason') or 'No detail reported')),
-                    ]
-                    metadata = []
-                    for key in (
-                            'port', 'service', 'product', 'version',
-                            'http_status', 'template_id', 'ip_addresses'):
-                        value = f.get(key)
-                        if value not in (None, '', [], {}):
-                            if isinstance(value, (list, tuple, set)):
-                                value = ', '.join(str(item) for item in value)
-                            metadata.append(f'{key.replace("_", " ")}: {value}')
-                    if metadata:
-                        detail_rows.append(('Scan data', ' · '.join(metadata)))
-                    for label, value in detail_rows:
-                        child = QTreeWidgetItem([
-                            f'  {label}', '', '', value,
+                    for record in records:
+                        summary = discovery_result_summary(section['tool'], record)
+                        result_item = QTreeWidgetItem([
+                            summary['title'], summary['target'],
+                            summary['severity'], summary['detail'],
                         ])
-                        child.setToolTip(0, value)
-                        child.setToolTip(3, value)
+                        result_item.setData(0, 257, {
+                            '_discovery_result': True,
+                            'tool': section['tool'],
+                            'record': record,
+                            'summary': summary,
+                        })
                         try:
-                            child.setForeground(0, QBrush(QColor('#9aa7b2')))
+                            result_item.setForeground(
+                                2,
+                                QBrush(QColor(sev_color.get(
+                                    summary['severity'], '#9aa7b2'
+                                ))),
+                            )
                         except Exception:
                             pass
-                        it.addChild(child)
-                    findings_tree.addTopLevelItem(it)
+                        for node in discovery_detail_nodes(record):
+                            _add_detail_node(result_item, node)
+                        group.addChild(result_item)
+                    if section['truncated']:
+                        omitted = int(section['total']) - int(section['shown'])
+                        group.addChild(QTreeWidgetItem([
+                            'Render limit', '', '',
+                            f'{omitted} additional {section["label"]} result(s) '
+                            'remain in the exported discovery report.',
+                        ]))
+                    findings_tree.addTopLevelItem(group)
+                tool_count_label.setText(
+                    f'{shown_results} shown · {full_results} total · '
+                    f'{shown_tools} tool(s)'
+                )
+                tabs.setTabText(
+                    tool_results_tab_index,
+                    f'Tool results ({shown_results})',
+                )
+                if not shown_results and query.strip():
+                    empty = QTreeWidgetItem([
+                        'No matching tool results', '', '',
+                        'Clear the search or select another tool.',
+                    ])
+                    findings_tree.addTopLevelItem(empty)
+
+            def _populate(report):
+                report = recon_report_parts(report)
+                state['report'] = report
+                _populate_tool_results(report)
 
                 hosts = report.get('stages', {}).get('hosts') or []
                 _sync_status_filters(hosts)
@@ -7162,6 +7674,14 @@ def main() -> None:
                             1 for host in hosts if not host.get('dns_live')
                         ),
                     }
+                asset_diff = dict(
+                    report.get('stages', {}).get('asset_diff') or {}
+                )
+                diff_summary = dict(asset_diff.get('summary') or {})
+                summary['new_assets'] = int(diff_summary.get('added', 0) or 0)
+                summary['risk_signals'] = len(
+                    report.get('stages', {}).get('risk_signals') or []
+                )
                 for key, widget in summary_labels.items():
                     widget.setText(
                         f'{widget.accessibleName()}: {int(summary.get(key, 0) or 0)}'
@@ -7180,21 +7700,29 @@ def main() -> None:
 
             finding_press_state = {'item': None, 'expanded': False}
 
-            def _remember_finding_press(item, _column=0):
-                if item is not None and item.parent() is not None:
+            def _finding_result_root(item):
+                while item is not None:
+                    payload = item.data(0, 257)
+                    if isinstance(payload, dict) and (
+                            payload.get('_discovery_result')
+                            or payload.get('_discovery_tool_group')):
+                        return item
                     item = item.parent()
+                return None
+
+            def _remember_finding_press(item, _column=0):
+                item = _finding_result_root(item)
                 finding_press_state['item'] = item
                 finding_press_state['expanded'] = bool(
                     item is not None and item.isExpanded()
                 )
 
             def _inspect_finding_row(item, _column=0):
+                item = _finding_result_root(item)
                 if item is None:
                     return
-                if item.parent() is not None:
-                    item = item.parent()
-                finding = item.data(0, 257)
-                if not isinstance(finding, dict):
+                payload = item.data(0, 257)
+                if not isinstance(payload, dict):
                     return
                 expanded = not (
                     finding_press_state['expanded']
@@ -7203,9 +7731,11 @@ def main() -> None:
                 )
                 finding_press_state['item'] = None
                 item.setExpanded(expanded)
-                discovery_host = finding.get('discovery')
-                if isinstance(discovery_host, dict):
-                    topology.select_host(discovery_host)
+                if payload.get('_discovery_result'):
+                    summary = payload.get('summary') or {}
+                    hostname = str(summary.get('hostname') or '')
+                    if hostname:
+                        topology.select_host({'hostname': hostname})
 
             def _on_stdout():
                 proc = state['proc']
@@ -7213,9 +7743,10 @@ def main() -> None:
                     text = bytes(proc.readAllStandardOutput()).decode(
                         'utf-8', 'replace'
                     )
-                    _append(text)
+                    visible_text = _consume_progress_output(text)
+                    _append(visible_text)
                     state['live_output'] = (
-                        state.get('live_output', '') + text
+                        state.get('live_output', '') + visible_text
                     )[-100000:]
                     try:
                         from .topology import extract_live_hosts
@@ -7277,6 +7808,14 @@ def main() -> None:
             def _on_finished(code=0, status=None):
                 live_report_timer.stop()
                 run_btn.setEnabled(True); stop_btn.setEnabled(False)
+                pending = state.get('progress_buffer', '')
+                state['progress_buffer'] = ''
+                if pending:
+                    event = parse_recon_progress_event(pending)
+                    if event:
+                        _set_discovery_progress(*event)
+                    else:
+                        _append(pending)
                 report = recon_report_parts(None)
                 tmp = state['tmp']
                 if tmp and os.path.exists(tmp):
@@ -7304,6 +7843,11 @@ def main() -> None:
                         '[!] Discovery worker failed before producing a report. '
                         'Review the log above for the failing tool.\n'
                     )
+                if code == 0:
+                    _set_discovery_progress('Discovery complete', 100)
+                else:
+                    progress_label.setText('Discovery stopped or failed')
+                    progress_bar.setFormat('Stopped · %p%')
 
             def _run():
                 import shutil
@@ -7344,16 +7888,24 @@ def main() -> None:
                 except Exception as exc:
                     _append(f'[!] Tool preflight failed: {exc}\n')
                     return
-                if opts.get('do_ports') or opts.get('do_traceroute'):
+                active_keys = [
+                    key for key in (
+                        'ports', 'traceroute', 'crawl', 'nuclei', 'xss',
+                        'visual', 'arjun', 'alterx', 'takeover',
+                    )
+                    if opts.get(f'do_{key}')
+                ]
+                if active_keys:
                     ret = QMessageBox.question(
                         dlg,
-                        'Run active Nmap discovery?',
-                        'Nmap port and path discovery are active network scans '
-                        'and may trigger macOS, '
-                        'EDR, IDS, or provider alerts.\n\n'
-                        'Blackthorn uses no NSE scripts. Port discovery uses an '
-                        'unprivileged TCP connect scan against at most 10 resolved '
-                        'IPs; path discovery measures hops for at most 25.\n\n'
+                        'Run active discovery?',
+                        'The following enabled stages send requests to the target '\
+                        'or its DNS infrastructure and can trigger provider, EDR, '
+                        'WAF, IDS, or rate-limit alerts:\n\n    '
+                        + ', '.join(active_keys) + '\n\n'
+                        'Blackthorn applies conservative caps and uses argv-only '
+                        'process execution, but the activity must still be explicitly '
+                        'authorized.\n\n'
                         'Continue only if this activity is authorized.',
                         QMessageBox.Yes | QMessageBox.No,
                         QMessageBox.No,
@@ -7363,13 +7915,33 @@ def main() -> None:
                 tmpf = tempfile.NamedTemporaryFile(delete=False, suffix='.json')
                 tmpf.close()
                 state['tmp'] = tmpf.name
+                if opts.get('do_visual'):
+                    opts['artifact_dir'] = tempfile.mkdtemp(
+                        prefix='blackthorn_discovery_visual_'
+                    )
+                    state['artifact_dir'] = opts['artifact_dir']
+                else:
+                    state['artifact_dir'] = ''
+                try:
+                    from .config import ensure_config_dir
+                    opts['history_dir'] = os.path.join(
+                        ensure_config_dir(), 'discovery-history'
+                    )
+                except Exception:
+                    opts['history_dir'] = ''
                 state['report'] = recon_report_parts(None)
                 state['findings'] = []
                 state['live_output'] = ''
                 state['live_report_signature'] = None
+                state['progress_buffer'] = ''
+                progress_bar.setValue(0)
+                progress_bar.setFormat('%p%')
+                progress_label.setText('Starting discovery')
                 log.clear()
                 host_tree.clear()
                 findings_tree.clear()
+                _sync_tool_filter([])
+                tool_count_label.setText('0 tool results')
                 for key, widget in summary_labels.items():
                     widget.setText(f'{widget.accessibleName()}: 0')
                 inventory_title.setText('Discovered hosts')
@@ -7400,6 +7972,7 @@ def main() -> None:
             def _stop():
                 proc = state['proc']
                 if proc is not None:
+                    progress_label.setText('Stopping discovery')
                     proc.kill()
                     _append('\n[recon] stopped by user\n')
 
@@ -7420,9 +7993,51 @@ def main() -> None:
                     'JSON files (*.json)')
                 if path:
                     try:
+                        import copy
+                        import shutil
+
+                        export_report = copy.deepcopy(state['report'])
+                        artifact_root = os.path.abspath(
+                            state.get('artifact_dir') or ''
+                        ) if state.get('artifact_dir') else ''
+                        artifact_export = ''
+                        if artifact_root and os.path.isdir(artifact_root):
+                            artifact_export = (
+                                os.path.splitext(os.path.abspath(path))[0]
+                                + '_artifacts'
+                            )
+                            os.makedirs(artifact_export, exist_ok=True)
+                            for index, row in enumerate(
+                                    export_report.get('stages', {}).get('visual') or []):
+                                if not isinstance(row, dict):
+                                    continue
+                                for key in ('screenshot_path', 'screenshot-path'):
+                                    source = str(row.get(key) or '')
+                                    if not source or not os.path.isfile(source):
+                                        continue
+                                    source = os.path.abspath(source)
+                                    try:
+                                        inside = os.path.commonpath(
+                                            [artifact_root, source]
+                                        ) == artifact_root
+                                    except ValueError:
+                                        inside = False
+                                    if not inside or os.path.getsize(source) > 50 * 1024 * 1024:
+                                        row.pop(key, None)
+                                        continue
+                                    destination = os.path.join(
+                                        artifact_export,
+                                        f'{index:04d}_{os.path.basename(source)}',
+                                    )
+                                    shutil.copy2(source, destination)
+                                    row[key] = destination
+                        if artifact_export:
+                            export_report['artifacts'] = {
+                                'screenshots': artifact_export,
+                            }
                         with open(path, 'w', encoding='utf-8') as f:
                             json.dump(
-                                state['report'], f, indent=2, default=str
+                                export_report, f, indent=2, default=str
                             )
                         hosts = state['report'].get('stages', {}).get('hosts') or []
                         _append(
@@ -7533,6 +8148,16 @@ def main() -> None:
             inventory_search.textChanged.connect(
                 lambda: _populate_host_inventory()
             )
+            tool_filter.currentIndexChanged.connect(
+                lambda: _populate_tool_results(state['report'], False)
+            )
+            tool_search.textChanged.connect(
+                lambda: _populate_tool_results(state['report'], False)
+            )
+            expand_results_btn.clicked.connect(
+                lambda: findings_tree.expandToDepth(0)
+            )
+            collapse_results_btn.clicked.connect(findings_tree.collapseAll)
             host_tree.itemPressed.connect(_remember_host_press)
             host_tree.itemClicked.connect(_inspect_host_row)
             host_tree.itemDoubleClicked.connect(_copy_host_row)
@@ -7564,7 +8189,6 @@ def main() -> None:
             from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
                                            QPlainTextEdit, QPushButton, QLabel)
             from PySide6.QtCore import QTimer
-            import threading
             import queue
             import shutil
 
@@ -7664,7 +8288,8 @@ def main() -> None:
             from PySide6.QtWidgets import (
                 QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox,
                 QTableWidget, QTableWidgetItem, QSplitter, QPlainTextEdit,
-                QHeaderView, QAbstractItemView, QTabWidget, QMenu)
+                QHeaderView, QAbstractItemView, QTabWidget, QMenu, QProgressBar,
+                QCheckBox)
             from PySide6.QtCore import Qt, Signal, QUrl
             from PySide6.QtGui import QBrush, QColor
             from datetime import datetime
@@ -7779,7 +8404,8 @@ def main() -> None:
                     super().__init__(parent)
                     self.extra_headers = {}   # injected into every request
                     self.block_types = set()  # resource-type ids to block
-                    self.scope = ''           # only capture hosts containing this (blank=all)
+                    self.scope = ''           # fallback root when no engagement is linked
+                    self.authorize = None
 
                 def interceptRequest(self, info):
                     try:
@@ -7797,7 +8423,9 @@ def main() -> None:
                         if _XHR_INT is not None and rt == _XHR_INT:
                             return  # fetch/XHR captured in full via the JS hook
                         url = info.requestUrl().toString()
-                        if self.scope and self.scope.lower() not in (info.requestUrl().host() or '').lower():
+                        if callable(self.authorize) and not self.authorize(url):
+                            return
+                        if not callable(self.authorize) and self.scope and not browser_scope_allows(url, self.scope):
                             return
                         self.captured.emit({
                             'method': bytes(info.requestMethod()).decode('ascii', 'replace'),
@@ -7809,6 +8437,23 @@ def main() -> None:
 
             class _CapturePage(QWebEnginePage):
                 consoleMsg = Signal(str)
+
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    self.authorize = None
+
+                def acceptNavigationRequest(self, url, nav_type, is_main_frame):
+                    value = url.toString()
+                    if (
+                        is_main_frame
+                        and not value.startswith('about:')
+                        and callable(self.authorize)
+                        and not self.authorize(value)
+                    ):
+                        return False
+                    return super().acceptNavigationRequest(
+                        url, nav_type, is_main_frame
+                    )
 
                 def javaScriptConsoleMessage(self, level, message, lineNumber, sourceID):
                     try:
@@ -7837,13 +8482,16 @@ def main() -> None:
                 b.setStyleSheet('QPushButton { padding: 0px; font-size: 15px; font-weight: bold; }')
             url_edit = QLineEdit(); url_edit.setPlaceholderText('https://example.com')
             go_btn = QPushButton('Go')
+            devtools_btn = QPushButton('DevTools')
+            devtools_btn.setCheckable(True)
+            devtools_btn.setToolTip('Dock Chromium DevTools beside the manual browser')
             settings_btn = QPushButton('⚙ Settings')
             settings_btn.setToolTip('User-Agent, header injection, upstream proxy, scope, blocking, JS…')
             export_btn = QPushButton('⭳ HAR')
             export_btn.setToolTip('Export captured traffic as a HAR file')
             navrow.addWidget(back_btn); navrow.addWidget(fwd_btn); navrow.addWidget(reload_btn)
             navrow.addWidget(url_edit, 1); navrow.addWidget(go_btn)
-            navrow.addWidget(settings_btn); navrow.addWidget(export_btn)
+            navrow.addWidget(devtools_btn); navrow.addWidget(settings_btn); navrow.addWidget(export_btn)
             v.addLayout(navrow)
 
             # Browser view + profile/page wired for capture. Creating the Chromium
@@ -7852,6 +8500,18 @@ def main() -> None:
             try:
                 profile = QWebEngineProfile(page)               # off-the-record
                 interceptor = _Interceptor(page)
+                try:
+                    initial_target = (self.target_edit.text() or '').strip()
+                except Exception:
+                    initial_target = ''
+                if initial_target:
+                    try:
+                        interceptor.scope = urlparse(
+                            initial_target if '://' in initial_target
+                            else '//' + initial_target
+                        ).hostname or ''
+                    except ValueError:
+                        interceptor.scope = ''
                 profile.setUrlRequestInterceptor(interceptor)
                 wpage = _CapturePage(profile, page)
                 try:
@@ -7867,6 +8527,11 @@ def main() -> None:
                 view = QWebEngineView(page)
                 view.setPage(wpage)
                 view.setUrl(QUrl('about:blank'))
+                devtools_view = QWebEngineView(page)
+                devtools_page = QWebEnginePage(profile, devtools_view)
+                devtools_view.setPage(devtools_page)
+                wpage.setDevToolsPage(devtools_page)
+                devtools_view.setVisible(False)
             except Exception as e:
                 fb = QWidget()
                 fbv = QVBoxLayout(fb)
@@ -7959,18 +8624,138 @@ def main() -> None:
             isplit.setSizes([320, 220])
             iw.addWidget(isplit, 1)
 
+            # Engine stack: one consolidated workflow around exact captured
+            # requests.  It deliberately chooses ZAP Client Spider as the DOM
+            # crawler rather than duplicating Katana's Discovery responsibility.
+            engines_w = QWidget()
+            ew = QVBoxLayout(engines_w); ew.setContentsMargins(0, 0, 0, 0)
+            engine_toolbar = QHBoxLayout()
+            authorization_chk = QCheckBox('I confirm active testing is authorized')
+            authorization_chk.setAccessibleName('Authorize Browser active testing')
+            refresh_engines_btn = QPushButton('Refresh stack')
+            start_proxy_btn = QPushButton('Start capture proxy')
+            engine_toolbar.addWidget(authorization_chk)
+            engine_toolbar.addStretch()
+            engine_toolbar.addWidget(start_proxy_btn)
+            engine_toolbar.addWidget(refresh_engines_btn)
+            ew.addLayout(engine_toolbar)
+
+            engine_status_table = QTableWidget(0, 4)
+            engine_status_table.setObjectName('BrowserEngineStack')
+            engine_status_table.setAccessibleName('Browser engine stack')
+            engine_status_table.setHorizontalHeaderLabels(
+                ['Engine', 'Responsibility', 'Status', 'Detail']
+            )
+            engine_status_table.setEditTriggers(
+                QAbstractItemView.EditTrigger.NoEditTriggers
+            )
+            engine_status_table.setSelectionMode(
+                QAbstractItemView.SelectionMode.NoSelection
+            )
+            try:
+                engine_status_table.horizontalHeader().setSectionResizeMode(
+                    3, QHeaderView.ResizeMode.Stretch
+                )
+            except Exception:
+                pass
+            ew.addWidget(engine_status_table)
+
+            execute_row = QHBoxLayout()
+            engine_combo = QComboBox()
+            engine_combo.setAccessibleName('Browser engine action')
+            for label, key in (
+                ('Playwright · scoped authenticated crawl', 'playwright'),
+                ('ZAP Client Spider · DOM crawl', 'zap_client_spider'),
+                ('Retire.js · dependency scan', 'retire'),
+                ('Nuclei · exact captured request', 'nuclei'),
+                ('Dalfox · exact captured request', 'dalfox'),
+                ('sqlmap · exact captured request', 'sqlmap'),
+                ('Interactsh · replay explicit FUZZ marker', 'interactsh'),
+            ):
+                engine_combo.addItem(label, key)
+            run_engine_btn = QPushButton('Run selected')
+            run_engine_btn.setObjectName('PrimaryButton')
+            stop_engine_btn = QPushButton('Stop')
+            stop_engine_btn.setEnabled(False)
+            execute_row.addWidget(QLabel('Action:'))
+            execute_row.addWidget(engine_combo, 1)
+            execute_row.addWidget(run_engine_btn)
+            execute_row.addWidget(stop_engine_btn)
+            ew.addLayout(execute_row)
+
+            engine_progress = QProgressBar()
+            engine_progress.setObjectName('BrowserEngineProgress')
+            engine_progress.setAccessibleName('Browser engine progress')
+            engine_progress.setRange(0, 100)
+            engine_progress.setValue(0)
+            engine_progress.setFormat('Idle')
+            ew.addWidget(engine_progress)
+            engine_log = QPlainTextEdit()
+            engine_log.setReadOnly(True)
+            engine_log.setAccessibleName('Browser engine log')
+            engine_log.setStyleSheet('font-family:Consolas,monospace; font-size:12px;')
+            ew.addWidget(engine_log, 1)
+
+            websocket_w = QWidget()
+            wsw = QVBoxLayout(websocket_w); wsw.setContentsMargins(0, 0, 0, 0)
+            websocket_table = QTableWidget(0, 4)
+            websocket_table.setObjectName('BrowserWebSocketTimeline')
+            websocket_table.setAccessibleName('Browser WebSocket timeline')
+            websocket_table.setHorizontalHeaderLabels(
+                ['Time', 'Direction', 'URL', 'Payload']
+            )
+            websocket_table.setEditTriggers(
+                QAbstractItemView.EditTrigger.NoEditTriggers
+            )
+            try:
+                websocket_table.horizontalHeader().setSectionResizeMode(
+                    3, QHeaderView.ResizeMode.Stretch
+                )
+            except Exception:
+                pass
+            wsw.addWidget(websocket_table)
+
             tabs = QTabWidget()
             tabs.addTab(traffic_w, 'Traffic')
             tabs.addTab(issues_w, 'Issues (0)')
+            tabs.addTab(engines_w, 'Engines')
+            tabs.addTab(websocket_w, 'WebSockets')
 
+            browser_surface = QSplitter(Qt.Horizontal)
+            browser_surface.setObjectName('BrowserSurfaceSplitter')
+            browser_surface.addWidget(view)
+            browser_surface.addWidget(devtools_view)
+            browser_surface.setSizes([900, 0])
             outer = QSplitter(Qt.Vertical)
-            outer.addWidget(view); outer.addWidget(tabs)
+            outer.addWidget(browser_surface); outer.addWidget(tabs)
             outer.setSizes([300, 420])   # "a little window" on top, capture below
             v.addWidget(outer, 1)
 
             # ---- helpers ----
             def _now():
                 return datetime.now().strftime('%H:%M:%S')
+
+            def _browser_authorized(value):
+                engagement_id = (
+                    getattr(self, '_current_engagement_id', None)
+                    or self._prefs.get('current_engagement_id')
+                )
+                engagement = None
+                if engagement_id and self._db:
+                    try:
+                        engagement = self._db.get_engagement(int(engagement_id))
+                    except Exception:
+                        engagement = None
+                if engagement and engagement.get('scope'):
+                    return _engagement_authorizes(
+                        value,
+                        engagement.get('scope') or [],
+                        engagement.get('exclusions') or [],
+                    )
+                return browser_scope_allows(value, interceptor.scope)
+
+            interceptor.authorize = _browser_authorized
+            wpage.authorize = _browser_authorized
 
             def _next_id():
                 state['seq'] += 1
@@ -8050,7 +8835,7 @@ def main() -> None:
                 except Exception:
                     return
                 u = urlparse(rec.get('url', ''))
-                if interceptor.scope and interceptor.scope.lower() not in (u.netloc or '').lower():
+                if not _browser_authorized(rec.get('url', '')):
                     return  # respect the scope filter for JS-captured traffic too
                 body = rec.get('respBody') or ''
                 _record({
@@ -8142,6 +8927,15 @@ def main() -> None:
                 if '://' not in u and not u.startswith('about:'):
                     u = 'https://' + u
                     url_edit.setText(u)
+                if not u.startswith('about:') and not _browser_authorized(u):
+                    QMessageBox.warning(
+                        page,
+                        'Browser scope blocked',
+                        'This URL is outside the selected engagement scope. '
+                        'If no engagement is selected, configure an exact root '
+                        'host in Browser settings first.',
+                    )
+                    return
                 view.setUrl(QUrl(u))
 
             # ---- pentest: passive scanner + issues ----
@@ -8225,8 +9019,8 @@ def main() -> None:
                 _update_issue_counts()
 
             def _passive(t):
-                if t.get('source') != 'js':
-                    return  # only JS-captured txns carry full response bodies/headers
+                if t.get('source') not in ('js', 'proxy', 'playwright'):
+                    return  # only full captures carry response bodies/headers
                 body = t.get('respBody') or ''
                 rh = {str(k).lower(): str(vv) for k, vv in (t.get('respHeaders') or {}).items()}
                 host = t.get('host', ''); url = t.get('url', '')
@@ -8353,7 +9147,7 @@ def main() -> None:
                     u = t.get('url')
                     if not u or u in seen:
                         continue
-                    if interceptor.scope and interceptor.scope.lower() not in (t.get('host', '') or '').lower():
+                    if not _browser_authorized(u):
                         continue
                     seen.add(u); urls.append(u)
                 urls = urls[:300]
@@ -8484,6 +9278,755 @@ def main() -> None:
                 elif chosen == a_nuc:
                     _nuclei_scan(t)
 
+            # ---- consolidated Browser engine stack ----
+            engine_state = {
+                'process': None,
+                'buffer': '',
+                'output': '',
+                'artifact_dir': '',
+                'engine': '',
+                'transaction': None,
+                'stop': False,
+                'zap_client': None,
+                'zap_scan_id': '',
+                'oob_provider': None,
+            }
+
+            def _append_engine(message):
+                text = str(message or '').rstrip()
+                tx = engine_state.get('transaction')
+                if tx:
+                    try:
+                        from .browser_stack import normalize_transaction
+                        ntx = normalize_transaction(tx)
+                        for name, value in ntx['headers'].items():
+                            if name.lower() in (
+                                'authorization', 'cookie',
+                                'proxy-authorization', 'x-api-key',
+                            ) and value:
+                                text = text.replace(value, '<redacted>')
+                    except Exception:
+                        pass
+                if text:
+                    engine_log.appendPlainText(text)
+
+            def _set_engine_running(running, label=''):
+                run_engine_btn.setEnabled(not running)
+                stop_engine_btn.setEnabled(running)
+                refresh_engines_btn.setEnabled(not running)
+                engine_combo.setEnabled(not running)
+                if running:
+                    engine_progress.setRange(0, 0)
+                    engine_progress.setFormat(label or 'Running…')
+                else:
+                    engine_progress.setRange(0, 100)
+                    if engine_progress.value() < 100:
+                        engine_progress.setValue(0)
+                    engine_progress.setFormat(label or 'Idle')
+
+            def _refresh_stack(zap_running=None):
+                from .browser_stack import quick_stack_statuses
+
+                proxy_running = bool(
+                    getattr(self, '_proxy_engine', None)
+                    and getattr(self._proxy_engine, 'server', None)
+                )
+                rows = quick_stack_statuses(
+                    qt_ready=True,
+                    proxy_running=proxy_running,
+                    zap_running=zap_running,
+                )
+                engine_status_table.setRowCount(0)
+                for status in rows:
+                    row = engine_status_table.rowCount()
+                    engine_status_table.insertRow(row)
+                    values = (
+                        status.name, status.role,
+                        'READY' if status.ready else 'NOT READY', status.detail,
+                    )
+                    for column, value in enumerate(values):
+                        item = QTableWidgetItem(value)
+                        if column == 2:
+                            item.setForeground(QBrush(QColor(
+                                '#3fb950' if status.ready else '#f59e0b'
+                            )))
+                        engine_status_table.setItem(row, column, item)
+                engine_status_table.resizeRowsToContents()
+
+            def _selected_or_current_transaction(require_capture=False):
+                tx = _selected_txn()
+                if tx:
+                    return tx
+                if require_capture:
+                    QMessageBox.information(
+                        page, 'Captured request required',
+                        'Select a captured request in the Traffic tab first.',
+                    )
+                    return None
+                current = view.url().toString() or url_edit.text().strip()
+                if not current or current == 'about:blank':
+                    QMessageBox.information(
+                        page, 'Browser target required',
+                        'Open an in-scope HTTP(S) page first.',
+                    )
+                    return None
+                return {
+                    'method': 'GET', 'url': current,
+                    'reqHeaders': dict(interceptor.extra_headers),
+                    'reqBody': '', 'respHeaders': {}, 'respBody': '',
+                }
+
+            def _authorize_engine(tx, *, active=True):
+                if not tx or not _browser_authorized(tx.get('url', '')):
+                    QMessageBox.warning(
+                        page, 'Browser engine scope blocked',
+                        'The selected request is outside the engagement or exact '
+                        'Browser scope.',
+                    )
+                    return False
+                if active and not authorization_chk.isChecked():
+                    QMessageBox.warning(
+                        page, 'Authorization confirmation required',
+                        'Confirm that active testing is authorized before running '
+                        'automation, crawling, replay, or validation engines.',
+                    )
+                    return False
+                return True
+
+            def _record_proxy_flow(flow):
+                try:
+                    url = str(flow.get('url') or '')
+                    if not _browser_authorized(url):
+                        return
+                    parsed = urlparse(url)
+                    req_body = flow.get('req_body') or ''
+                    resp_body = flow.get('resp_body') or ''
+                    if isinstance(req_body, bytes):
+                        req_body = req_body.decode('utf-8', 'replace')
+                    if isinstance(resp_body, bytes):
+                        resp_body = resp_body.decode('utf-8', 'replace')
+                    _record({
+                        'id': _next_id(), 'time': _now(),
+                        'method': str(flow.get('method') or 'GET').upper(),
+                        'status': flow.get('status_code'), 'url': url,
+                        'host': parsed.netloc,
+                        'path': (parsed.path or '/') + (
+                            ('?' + parsed.query) if parsed.query else ''
+                        ),
+                        'type': 'proxy', 'length': len(resp_body),
+                        'reqHeaders': flow.get('req_headers') or {},
+                        'reqBody': req_body,
+                        'respHeaders': flow.get('resp_headers') or {},
+                        'respBody': resp_body,
+                        'source': 'proxy',
+                    })
+                except Exception as exc:
+                    _append_engine(f'[capture] Could not import proxy flow: {exc}')
+
+            def _start_capture_proxy():
+                ok, message = self._start_proxy('127.0.0.1', 8081)
+                _append_engine(f'[capture] {message}')
+                if ok:
+                    start_proxy_btn.setText('Capture proxy running')
+                    start_proxy_btn.setEnabled(False)
+                _refresh_stack()
+
+            def _finish_external(code, _status=None):
+                import shutil as _shutil
+
+                engine = engine_state.get('engine') or 'engine'
+                tx = engine_state.get('transaction') or {}
+                text = engine_state.get('output') or ''
+                findings = []
+                if engine in ('nuclei', 'dalfox', 'sqlmap'):
+                    try:
+                        from .tools_registry import get_spec
+                        from . import tools_parsers
+                        spec = get_spec(engine)
+                        parser = getattr(tools_parsers, spec.parser)
+                        findings = parser(
+                            spec, tx.get('url', ''), text,
+                            {'outfile': '', 'outdir': engine_state.get('artifact_dir', '')},
+                        )
+                    except Exception as exc:
+                        _append_engine(f'[{engine}] result parser failed: {exc}')
+                for finding in findings:
+                    severity = str(finding.get('severity') or 'INFO').upper()
+                    _add_issue(
+                        severity if severity in _SEV_RANK else 'INFO',
+                        f"{engine}: {finding.get('technique', 'finding')}",
+                        tx.get('host') or urlparse(tx.get('url', '')).netloc,
+                        finding.get('reason') or finding.get('url') or tx.get('url', ''),
+                        tx.get('id'),
+                    )
+                if findings:
+                    self._results.extend(findings)
+                elif engine == 'retire' and code == 0:
+                    _add_issue(
+                        'INFO', 'Retire.js', urlparse(tx.get('url', '')).netloc,
+                        'Retire.js completed; review the engine log for dependency evidence.',
+                        tx.get('id'),
+                    )
+                _append_engine(
+                    f'[{engine}] finished with exit {code}; '
+                    f'{len(findings)} normalized finding(s).'
+                )
+                engine_progress.setRange(0, 100)
+                engine_progress.setValue(100 if code == 0 else 0)
+                engine_progress.setFormat(
+                    'Complete' if code == 0 else f'Failed (exit {code})'
+                )
+                _set_engine_running(False, engine_progress.format())
+                artifact_dir = engine_state.get('artifact_dir')
+                if artifact_dir:
+                    try:
+                        _shutil.rmtree(artifact_dir)
+                    except OSError:
+                        pass
+                engine_state.update({
+                    'process': None, 'buffer': '', 'output': '',
+                    'artifact_dir': '', 'engine': '', 'transaction': None,
+                })
+                _refresh_stack()
+
+            def _external_output():
+                proc = engine_state.get('process')
+                if proc is None:
+                    return
+                chunk = bytes(proc.readAllStandardOutput()).decode('utf-8', 'replace')
+                engine_state['output'] += chunk
+                engine_state['buffer'] += chunk
+                while '\n' in engine_state['buffer']:
+                    line, engine_state['buffer'] = engine_state['buffer'].split('\n', 1)
+                    if line.strip() and not line.lstrip().startswith('{'):
+                        _append_engine(line)
+
+            def _run_external(engine, tx):
+                import os as _os
+                import shutil as _shutil
+                import tempfile as _tempfile
+                from .browser_stack import (
+                    create_engine_artifacts, engine_command,
+                    private_artifact_dir, redact_command,
+                )
+
+                tool_key = engine
+                status = self._configured_tool_status(tool_key)
+                launcher_prefix = []
+                if engine == 'sqlmap' and not status.found:
+                    try:
+                        from . import recon_install
+                        script = recon_install.sqlmap_script()
+                    except Exception:
+                        script = None
+                    if script:
+                        launcher_prefix = [sys.executable, script]
+                if not status.found and not launcher_prefix:
+                    downloadable = engine in ('nuclei', 'dalfox', 'sqlmap')
+                    if downloadable:
+                        self._download_tools_dialog(
+                            [engine],
+                            f'{engine} is required for this Browser validation action.',
+                            title=f'Install {engine}',
+                        )
+                        status = self._configured_tool_status(tool_key)
+                        if engine == 'sqlmap' and not status.found:
+                            try:
+                                from . import recon_install
+                                script = recon_install.sqlmap_script()
+                            except Exception:
+                                script = None
+                            if script:
+                                launcher_prefix = [sys.executable, script]
+                    if not status.found and not launcher_prefix:
+                        QMessageBox.information(
+                            page, f'{engine} unavailable',
+                            status.error or (
+                                f'Configure {engine} in Tool manager before running it.'
+                            ),
+                        )
+                        return
+                directory = private_artifact_dir()
+                try:
+                    artifacts = create_engine_artifacts(tx, directory)
+                    executable = (
+                        launcher_prefix[-1] if launcher_prefix else status.path
+                    )
+                    cmd = engine_command(
+                        engine, executable, tx, artifacts, output_dir=directory,
+                    )
+                    if launcher_prefix:
+                        cmd = launcher_prefix + cmd[1:]
+                    else:
+                        cmd = self._configured_tool_command(engine, cmd)
+                except Exception as exc:
+                    _shutil.rmtree(directory, ignore_errors=True)
+                    QMessageBox.warning(page, f'{engine} handoff', str(exc))
+                    return
+
+                engine_state.update({
+                    'engine': engine, 'transaction': tx,
+                    'artifact_dir': directory, 'buffer': '', 'output': '',
+                })
+                safe = redact_command(cmd, tx)
+                _append_engine(f"[{engine}] $ " + ' '.join(safe))
+                proc = QtCore.QProcess(page)
+                proc.setProcessChannelMode(
+                    QtCore.QProcess.ProcessChannelMode.MergedChannels
+                )
+                proc.readyReadStandardOutput.connect(_external_output)
+                proc.finished.connect(_finish_external)
+                engine_state['process'] = proc
+                self._browser_procs = getattr(self, '_browser_procs', [])
+                self._browser_procs.append(proc)
+                _set_engine_running(True, f'{engine} running…')
+                proc.start(cmd[0], cmd[1:])
+                proc.closeWriteChannel()
+
+            def _playwright_event(obj):
+                kind = obj.get('type')
+                if kind == 'transaction':
+                    rec = obj.get('transaction') or {}
+                    url = rec.get('url', '')
+                    if not _browser_authorized(url):
+                        return
+                    parsed = urlparse(url)
+                    body = rec.get('respBody') or ''
+                    _record({
+                        'id': _next_id(), 'time': _now(),
+                        'method': rec.get('method', 'GET'),
+                        'status': rec.get('status'), 'url': url,
+                        'host': parsed.netloc,
+                        'path': (parsed.path or '/') + (
+                            ('?' + parsed.query) if parsed.query else ''
+                        ),
+                        'type': rec.get('type', 'playwright'),
+                        'length': len(body),
+                        'reqHeaders': rec.get('reqHeaders') or {},
+                        'reqBody': rec.get('reqBody') or '',
+                        'respHeaders': rec.get('respHeaders') or {},
+                        'respBody': body, 'source': 'playwright',
+                    })
+                elif kind == 'websocket':
+                    row = websocket_table.rowCount()
+                    websocket_table.insertRow(row)
+                    for column, value in enumerate((
+                        _now(), obj.get('direction', ''), obj.get('url', ''),
+                        obj.get('payload', ''),
+                    )):
+                        websocket_table.setItem(row, column, QTableWidgetItem(str(value)))
+                    tabs.setTabText(3, f'WebSockets ({websocket_table.rowCount()})')
+                elif kind == 'progress':
+                    current = int(obj.get('current') or 0)
+                    total = max(1, int(obj.get('total') or 1))
+                    engine_progress.setRange(0, total)
+                    engine_progress.setValue(current)
+                    engine_progress.setFormat(
+                        f'Playwright %v/%m · {obj.get("status", 0)}'
+                    )
+                    _append_engine(
+                        f"[playwright] {current}/{total} "
+                        f"{obj.get('status', 0)} {obj.get('url', '')}"
+                    )
+                elif kind == 'artifact':
+                    _append_engine(
+                        f"[playwright] trace saved: {obj.get('path', '')}"
+                    )
+                elif kind in ('error', 'log'):
+                    _append_engine(f"[playwright] {obj.get('message', '')}")
+                elif kind == 'complete':
+                    _append_engine(
+                        f"[playwright] completed {obj.get('pages', 0)} page(s)."
+                    )
+
+            def _playwright_output():
+                proc = engine_state.get('process')
+                if proc is None:
+                    return
+                chunk = bytes(proc.readAllStandardOutput()).decode('utf-8', 'replace')
+                engine_state['buffer'] += chunk
+                while '\n' in engine_state['buffer']:
+                    line, engine_state['buffer'] = engine_state['buffer'].split('\n', 1)
+                    if not line.strip():
+                        continue
+                    try:
+                        _playwright_event(_json.loads(line))
+                    except Exception:
+                        # Worker IPC may contain request/session data.  Do not
+                        # echo malformed JSON into the human-readable log.
+                        _append_engine('[playwright] ignored malformed worker event')
+
+            def _playwright_finished(code, _status=None):
+                import shutil as _shutil
+
+                _playwright_output()
+                _append_engine(f'[playwright] worker finished with exit {code}.')
+                engine_progress.setRange(0, 100)
+                engine_progress.setValue(100 if code == 0 else 0)
+                engine_progress.setFormat(
+                    'Complete' if code == 0 else f'Failed (exit {code})'
+                )
+                _set_engine_running(False, engine_progress.format())
+                directory = engine_state.get('artifact_dir')
+                if directory:
+                    _shutil.rmtree(directory, ignore_errors=True)
+                engine_state.update({
+                    'process': None, 'buffer': '', 'output': '',
+                    'artifact_dir': '', 'engine': '', 'transaction': None,
+                })
+                _refresh_stack()
+
+            def _run_playwright(tx):
+                import os as _os
+                import time as _time
+                from .browser_stack import (
+                    normalize_transaction, private_artifact_dir,
+                    quick_stack_statuses, write_private_text,
+                )
+                from .config import ensure_config_dir
+
+                ready = next(
+                    s for s in quick_stack_statuses(qt_ready=True)
+                    if s.key == 'playwright'
+                )
+                if not ready.ready:
+                    QMessageBox.information(page, 'Playwright unavailable', ready.detail)
+                    return
+                ntx = normalize_transaction(tx)
+                parsed = urlparse(ntx['url'])
+                cookie_header = next((
+                    value for name, value in ntx['headers'].items()
+                    if name.lower() == 'cookie'
+                ), '')
+                headers = {
+                    name: value for name, value in ntx['headers'].items()
+                    if name.lower() not in (
+                        'host', 'content-length', 'cookie', 'connection',
+                    )
+                }
+                cookies = []
+                for pair in cookie_header.split(';'):
+                    name, sep, value = pair.strip().partition('=')
+                    if sep and name:
+                        cookies.append({
+                            'name': name, 'value': value,
+                            'domain': parsed.hostname, 'path': '/',
+                            'secure': parsed.scheme == 'https',
+                        })
+                proxy = getattr(self, '_proxy_engine', None)
+                proxy_server = ''
+                if proxy and getattr(proxy, 'server', None):
+                    proxy_server = f'http://{proxy.host}:{proxy.port}'
+                directory = private_artifact_dir('blackthorn_playwright_')
+                trace_dir = _os.path.join(ensure_config_dir(), 'browser_traces')
+                _os.makedirs(trace_dir, exist_ok=True)
+                trace_path = _os.path.join(
+                    trace_dir, f'playwright-{int(_time.time())}.zip'
+                )
+                config = {
+                    'start_url': ntx['url'],
+                    'scope_host': interceptor.scope or parsed.hostname,
+                    'max_pages': 25,
+                    'headers': headers,
+                    'cookies': cookies,
+                    'proxy_server': proxy_server,
+                    'emit_transactions': not bool(proxy_server),
+                    'trace_path': trace_path,
+                }
+                config_path = write_private_text(
+                    directory, 'automation.json', _json.dumps(config)
+                )
+                cmd = (
+                    [sys.executable, '--browser-worker', '--config', config_path]
+                    if IS_FROZEN else
+                    [sys.executable, '-u', '-m', 'wafpierce.browser_automation',
+                     '--config', config_path]
+                )
+                engine_state.update({
+                    'engine': 'playwright', 'transaction': tx,
+                    'artifact_dir': directory, 'buffer': '', 'output': '',
+                })
+                _append_engine(
+                    '[playwright] starting isolated scoped context'
+                    + (' through the capture proxy.' if proxy_server else '.')
+                    + ' The saved trace can contain authenticated session evidence.'
+                )
+                proc = QtCore.QProcess(page)
+                proc.setProcessChannelMode(
+                    QtCore.QProcess.ProcessChannelMode.MergedChannels
+                )
+                proc.readyReadStandardOutput.connect(_playwright_output)
+                proc.finished.connect(_playwright_finished)
+                engine_state['process'] = proc
+                self._browser_procs = getattr(self, '_browser_procs', [])
+                self._browser_procs.append(proc)
+                _set_engine_running(True, 'Playwright starting…')
+                proc.start(cmd[0], cmd[1:])
+                proc.closeWriteChannel()
+
+            def _run_zap_client_spider(tx):
+                import queue as _queue
+                import threading as _threading
+                import time as _time
+                from .tooldrivers import ZAPClient, detect_zap, zap_alert_to_finding
+
+                events = _queue.Queue()
+                engine_state.update({
+                    'engine': 'zap_client_spider', 'transaction': tx,
+                    'stop': False, 'zap_client': None, 'zap_scan_id': '',
+                })
+                host = str(self._prefs.get('zap_host', '127.0.0.1'))
+                port = int(self._prefs.get('zap_port', 8080) or 8080)
+                api_key = get_zap_api_key()
+
+                def worker():
+                    try:
+                        detected = detect_zap(host, port, api_key)
+                        if detected.get('state') != 'running':
+                            events.put(('error', detected.get('error') or 'ZAP is not reachable'))
+                            return
+                        events.put(('detected', detected.get('version', '?')))
+                        client = ZAPClient(host, port, api_key)
+                        engine_state['zap_client'] = client
+                        context_name = str(self._prefs.get('zap_context', ''))
+                        scan_id = client.client_spider(
+                            tx['url'],
+                            context_name=context_name,
+                            user_name=(
+                                str(self._prefs.get('zap_user', ''))
+                                if context_name else ''
+                            ),
+                        )
+                        engine_state['zap_scan_id'] = scan_id
+                        events.put(('log', f'Client Spider scan {scan_id} started'))
+                        while not engine_state['stop']:
+                            progress = client.client_spider_status(scan_id)
+                            events.put(('progress', progress))
+                            if progress >= 100:
+                                break
+                            _time.sleep(1.0)
+                        if engine_state['stop']:
+                            client.client_spider_stop(scan_id)
+                            events.put(('stopped', None))
+                            return
+                        alerts = client.alerts(tx['url'])
+                        events.put(('done', [
+                            zap_alert_to_finding(alert, tx['url']) for alert in alerts
+                        ]))
+                    except Exception as exc:
+                        events.put(('error', str(exc)))
+
+                timer = QtCore.QTimer(page)
+
+                def drain():
+                    terminal = False
+                    try:
+                        while True:
+                            kind, payload = events.get_nowait()
+                            if kind == 'detected':
+                                _refresh_stack(True)
+                                _append_engine(f'[zap] connected to ZAP {payload}')
+                            elif kind == 'log':
+                                _append_engine(f'[zap] {payload}')
+                            elif kind == 'progress':
+                                engine_progress.setRange(0, 100)
+                                engine_progress.setValue(int(payload))
+                                engine_progress.setFormat('ZAP Client Spider %p%')
+                            elif kind == 'done':
+                                for finding in payload:
+                                    _add_issue(
+                                        finding.get('severity', 'INFO'),
+                                        finding.get('technique', '[ZAP] alert'),
+                                        urlparse(finding.get('url') or tx['url']).netloc,
+                                        finding.get('reason') or finding.get('url') or '',
+                                        tx.get('id'),
+                                    )
+                                self._results.extend(payload)
+                                _append_engine(
+                                    f'[zap] Client Spider completed; '
+                                    f'{len(payload)} alert(s) imported.'
+                                )
+                                engine_progress.setValue(100)
+                                terminal = True
+                            elif kind == 'stopped':
+                                _append_engine('[zap] Client Spider stopped.')
+                                terminal = True
+                            elif kind == 'error':
+                                _append_engine(f'[zap] {payload}')
+                                _refresh_stack(False)
+                                terminal = True
+                    except _queue.Empty:
+                        pass
+                    if terminal:
+                        timer.stop()
+                        engine_state.update({
+                            'engine': '', 'transaction': None,
+                            'zap_client': None, 'zap_scan_id': '',
+                        })
+                        _set_engine_running(False, 'Complete')
+
+                timer.timeout.connect(drain)
+                self._browser_zap_timer = timer
+                _set_engine_running(True, 'Connecting to ZAP…')
+                _threading.Thread(target=worker, daemon=True).start()
+                timer.start(150)
+
+            def _run_interactsh(tx):
+                import queue as _queue
+                import threading as _threading
+                import time as _time
+                from .browser_stack import apply_injection_marker
+
+                events = _queue.Queue()
+                try:
+                    # Validate marker placement before contacting a provider.
+                    apply_injection_marker(tx, 'http://oob.invalid')
+                except ValueError as exc:
+                    QMessageBox.information(page, 'Interactsh marker required', str(exc))
+                    _to_repeater()
+                    return
+                engine_state.update({
+                    'engine': 'interactsh', 'transaction': tx,
+                    'stop': False, 'oob_provider': None,
+                })
+
+                def worker():
+                    provider = None
+                    try:
+                        from .oob import build_oob
+                        from .proxy import replay
+                        provider = build_oob('interactsh')
+                        if provider is None:
+                            raise RuntimeError('Interactsh could not be initialized.')
+                        engine_state['oob_provider'] = provider
+                        handle = provider.register(label='browser')
+                        request = apply_injection_marker(tx, handle.http_url)
+                        original_host = urlparse(tx.get('url', '')).hostname or ''
+                        if not browser_scope_allows(request['url'], original_host):
+                            raise RuntimeError('The marked request changed to an out-of-scope URL.')
+                        events.put(('log', f'payload token {handle.token} sent'))
+                        result = replay(
+                            request['method'], request['url'], request['headers'],
+                            request['data'], timeout=30,
+                        )
+                        events.put(('replay', result.get('status') or result.get('error', 'failed')))
+                        deadline = _time.monotonic() + 15
+                        while not engine_state['stop'] and _time.monotonic() < deadline:
+                            interactions = provider.poll()
+                            for interaction in interactions:
+                                events.put(('interaction', interaction))
+                            if interactions:
+                                break
+                            _time.sleep(2)
+                        events.put(('done', None))
+                    except Exception as exc:
+                        events.put(('error', str(exc)))
+                    finally:
+                        if provider is not None:
+                            provider.close()
+
+                timer = QtCore.QTimer(page)
+
+                def drain():
+                    terminal = False
+                    try:
+                        while True:
+                            kind, payload = events.get_nowait()
+                            if kind == 'log':
+                                _append_engine(f'[interactsh] {payload}')
+                            elif kind == 'replay':
+                                _append_engine(f'[interactsh] exact request replay: {payload}')
+                            elif kind == 'interaction':
+                                _add_issue(
+                                    'HIGH', 'Interactsh callback',
+                                    urlparse(tx.get('url', '')).netloc,
+                                    f'{payload.protocol} callback from {payload.source}',
+                                    tx.get('id'),
+                                )
+                                _append_engine(
+                                    f'[interactsh] {payload.protocol} callback '
+                                    f'from {payload.source}'
+                                )
+                            elif kind == 'error':
+                                _append_engine(f'[interactsh] {payload}')
+                                terminal = True
+                            elif kind == 'done':
+                                _append_engine('[interactsh] polling complete.')
+                                terminal = True
+                    except _queue.Empty:
+                        pass
+                    if terminal:
+                        timer.stop()
+                        engine_progress.setRange(0, 100)
+                        engine_progress.setValue(100)
+                        engine_state.update({
+                            'engine': '', 'transaction': None,
+                            'oob_provider': None,
+                        })
+                        _set_engine_running(False, 'Complete')
+
+                timer.timeout.connect(drain)
+                self._browser_oob_timer = timer
+                _set_engine_running(True, 'Interactsh polling…')
+                _threading.Thread(target=worker, daemon=True).start()
+                timer.start(150)
+
+            def _run_selected_engine():
+                engine = engine_combo.currentData()
+                exact = engine in ('retire', 'nuclei', 'dalfox', 'sqlmap', 'interactsh')
+                tx = _selected_or_current_transaction(require_capture=exact)
+                if not tx or not _authorize_engine(tx, active=True):
+                    return
+                if engine == 'playwright':
+                    _run_playwright(tx)
+                elif engine == 'zap_client_spider':
+                    _run_zap_client_spider(tx)
+                elif engine == 'interactsh':
+                    _run_interactsh(tx)
+                else:
+                    _run_external(engine, tx)
+
+            def _stop_selected_engine():
+                engine_state['stop'] = True
+                proc = engine_state.get('process')
+                if proc is not None:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                client = engine_state.get('zap_client')
+                scan_id = engine_state.get('zap_scan_id')
+                if client is not None and scan_id:
+                    try:
+                        client.client_spider_stop(scan_id)
+                    except Exception:
+                        pass
+                provider = engine_state.get('oob_provider')
+                if provider is not None:
+                    try:
+                        provider.close()
+                    except Exception:
+                        pass
+                _append_engine('[engine] stop requested.')
+
+            def _toggle_devtools(visible):
+                devtools_view.setVisible(bool(visible))
+                browser_surface.setSizes([560, 440] if visible else [1000, 0])
+
+            if not getattr(self, '_proxy_signals', None):
+                self._proxy_signals = ProxySignals()
+                self._proxy_signals.flow_captured.connect(self._persist_proxy_flow)
+            self._proxy_signals.flow_captured.connect(_record_proxy_flow)
+
+            def _disconnect_proxy_flow(*_args):
+                try:
+                    self._proxy_signals.flow_captured.disconnect(_record_proxy_flow)
+                except Exception:
+                    pass
+
+            page.destroyed.connect(_disconnect_proxy_flow)
+            _refresh_stack()
+
             # ---- customization: settings + export ----
             def _apply_proxy(s):
                 from PySide6.QtNetwork import QNetworkProxy
@@ -8510,8 +10053,18 @@ def main() -> None:
                 proxy_edit = QLineEdit(); proxy_edit.setText(getattr(self, '_browser_proxy', ''))
                 proxy_edit.setPlaceholderText('host:port (e.g. 127.0.0.1:8080 to chain through Burp/Caido)')
                 form.addRow('Upstream proxy:', proxy_edit)
+                zap_context_edit = QLineEdit()
+                zap_context_edit.setText(str(self._prefs.get('zap_context', '')))
+                zap_context_edit.setPlaceholderText('optional ZAP authentication context')
+                form.addRow('ZAP context:', zap_context_edit)
+                zap_user_edit = QLineEdit()
+                zap_user_edit.setText(str(self._prefs.get('zap_user', '')))
+                zap_user_edit.setPlaceholderText('optional user from that ZAP context')
+                form.addRow('ZAP user:', zap_user_edit)
                 scope_edit = QLineEdit(); scope_edit.setText(interceptor.scope)
-                scope_edit.setPlaceholderText('only capture hosts containing this (blank = all)')
+                scope_edit.setPlaceholderText(
+                    'exact host or its subdomains; blank blocks navigation/capture'
+                )
                 form.addRow('Scope host:', scope_edit)
                 block_chk = QCheckBox('Block images / media / fonts (faster, fewer rows)')
                 block_chk.setChecked(bool(interceptor.block_types))
@@ -8556,6 +10109,12 @@ def main() -> None:
                                             if n in ('image', 'media', 'fontresource')}
                                            if block_chk.isChecked() else set())
                 self._browser_proxy = proxy_edit.text().strip()
+                self._prefs['zap_context'] = zap_context_edit.text().strip()
+                self._prefs['zap_user'] = zap_user_edit.text().strip()
+                try:
+                    _save_prefs(self._prefs)
+                except Exception:
+                    pass
                 _apply_proxy(self._browser_proxy)
                 try:
                     wpage.settings().setAttribute(
@@ -8605,6 +10164,11 @@ def main() -> None:
             iexport_btn.clicked.connect(_export_issues)
             settings_btn.clicked.connect(_settings)
             export_btn.clicked.connect(_export)
+            devtools_btn.toggled.connect(_toggle_devtools)
+            refresh_engines_btn.clicked.connect(lambda: _refresh_stack())
+            start_proxy_btn.clicked.connect(_start_capture_proxy)
+            run_engine_btn.clicked.connect(_run_selected_engine)
+            stop_engine_btn.clicked.connect(_stop_selected_engine)
             search_edit.textChanged.connect(_refresh)
             method_combo.currentIndexChanged.connect(_refresh)
             type_combo.currentIndexChanged.connect(_refresh)
@@ -8625,6 +10189,8 @@ def main() -> None:
             self._browser_profile = profile
             self._browser_interceptor = interceptor
             self._browser_script_obj = locals().get('script')
+            self._browser_devtools_view = devtools_view
+            self._browser_engine_status_table = engine_status_table
             return page
 
         def _tool_manager_config(self, tool_key):
@@ -9047,26 +10613,10 @@ def main() -> None:
             return page
 
         def _build_pipeline_page(self):
-            """Test plan with immediate pipeline and scheduled-run tabs."""
-            page = self._tabbed_workflow_page(
-                'PipelinePage',
-                'Test plan workflows',
-                (
-                    ('Run now', self._build_pipeline_runner()),
-                    ('Schedule', self._build_schedule_page(embedded=True)),
-                ),
-            )
-            tabs = page.findChild(QtWidgets.QTabWidget, 'PipelinePageTabs')
+            """Global exploit intelligence and approval-gated automation hub."""
+            from .automation_ui import build_automation_page
 
-            def refresh_schedule(index):
-                if index == 1:
-                    refresh = getattr(self, '_schedule_refresh', None)
-                    if callable(refresh):
-                        refresh()
-
-            if tabs is not None:
-                tabs.currentChanged.connect(refresh_schedule)
-            return page
+            return build_automation_page(self, save_prefs=_save_prefs)
 
         def _build_fuzzer_page(self):
             """ffuf content discovery — dir/file/vhost/parameter fuzzing via FUZZ."""
@@ -12238,27 +13788,27 @@ def main() -> None:
                 error = entry.get('error')
                 
                 text.append('=' * 60)
-                text.append(f"📤 REQUEST")
+                text.append("📤 REQUEST")
                 text.append('=' * 60)
                 text.append(f"Method: {req.get('method', 'N/A')}")
                 text.append(f"URL: {req.get('url', 'N/A')}")
-                text.append(f"\nHeaders:")
+                text.append("\nHeaders:")
                 for k, v in req.get('headers', {}).items():
                     text.append(f"  {k}: {v[:100]}{'...' if len(v) > 100 else ''}")
                 
                 text.append('')
                 text.append('=' * 60)
-                text.append(f"📥 RESPONSE")
+                text.append("📥 RESPONSE")
                 text.append('=' * 60)
                 
                 if resp:
                     text.append(f"Status: {resp.get('status_code', 'N/A')} {resp.get('reason', '')}")
                     text.append(f"Time: {resp.get('elapsed_ms', 'N/A')} ms")
                     text.append(f"Size: {resp.get('content_length', 'N/A')} bytes")
-                    text.append(f"\nHeaders:")
+                    text.append("\nHeaders:")
                     for k, v in resp.get('headers', {}).items():
                         text.append(f"  {k}: {v[:100]}{'...' if len(v) > 100 else ''}")
-                    text.append(f"\nBody Preview:")
+                    text.append("\nBody Preview:")
                     text.append(resp.get('body_preview', '')[:2000])
                 elif error:
                     text.append(f"❌ Error: {error}")
@@ -13257,7 +14807,7 @@ def main() -> None:
                     
                     comparison = self._db.compare_scans(scan_id_1, scan_id_2)
                     
-                    result_text = f"📊 Comparison Results:\\n\\n"
+                    result_text = "📊 Comparison Results:\\n\\n"
                     result_text += f"🆕 New findings in later scan: {len(comparison.get('new', []))}\\n"
                     for f in comparison.get('new', [])[:5]:
                         result_text += f"   • [{f.get('severity', 'INFO')}] {f.get('technique', 'Unknown')}\\n"
@@ -14986,7 +16536,7 @@ PLUGIN_CLASS = DoubleEncodingBypassPlugin
                 form_layout.addWidget(QLabel('Type:'), 3, 0)
                 jobtype_combo = QtWidgets.QComboBox()
                 jobtype_combo.addItems(['Scan', 'Recon'])
-                jobtype_combo.setToolTip('Scan = web security scan. Recon = subfinder/amass/dnsx/httpx/nmap.')
+                jobtype_combo.setToolTip('Scan = web security scan. Recon = subfinder/CT/dnsx/httpx/nmap.')
                 form_layout.addWidget(jobtype_combo, 3, 1)
 
                 layout.addWidget(form_group)

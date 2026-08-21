@@ -114,7 +114,11 @@ blackthorn scan --list-techniques
 - Enumerate subdomains and check DNS resolution, certificate transparency, historical DNS, and zone-transfer exposure.
 - Fingerprint frameworks, servers, CMS platforms, cloud providers, edge controls, and known vulnerable software versions.
 - Detect subdomain takeover conditions across supported provider signatures.
-- Run a dedicated discovery workflow with Subfinder, Amass, Certificate Transparency, dnsx, and ProjectDiscovery httpx; Nmap is a separately confirmed active option.
+- Run a dedicated discovery workflow with Subfinder, Certificate Transparency, dnsx, and ProjectDiscovery httpx; Nmap is a separately confirmed active option.
+- Review discovery output in separate per-engine sections, including Subfinder, Certificate Transparency, dnsx, httpx, tlsx, gau, Katana, Arjun, AlterX, Uncover, ASNMap, Cloudlist, Nuclei, Dalfox, Nmap, takeover validation, discovery changes, and risk correlation. Every native field and multi-value item is individually expandable.
+- Capture optional httpx screenshots, rendered DOM, favicon hashes, JARM fingerprints, response hashes, and visual changes between runs.
+- Keep secret-free continuous asset snapshots, identify added/removed/changed attack surface, and rank administrative hosts, sensitive paths, high-value ports, cloud exposure, and takeover matches with their source provenance.
+- Follow each discovery run with a stage-aware progress bar from enumeration through correlation and report completion.
 - Filter the finished host inventory by DNS state, HTTP availability, response class, or exact status code, and copy one URL directly from its row.
 - Explore a radial discovery topology with measured hop rings, RTT-aware routes, shared-IP and CNAME relationships, searchable hosts, open-port exposure, and per-host scan coverage.
 
@@ -140,11 +144,17 @@ blackthorn scan --list-techniques
 ### Real traffic and authenticated testing
 
 - Import HAR captures, Postman v2 collections, and Burp items XML.
+- Build a persistent, scoped pentest workspace from Nmap XML, BloodHound JSON/ZIP, and Prowler JSON.
+- Correlate hosts, services, endpoints, identities, cloud resources, IAM relationships, and evidence in a bounded attack graph.
 - Seed testing from real application routes and parameters instead of only the target root.
 - Supply cookies, repeatable custom headers, bearer tokens, or HTTP Basic credentials.
 - Authenticate through a login URL with form data and a configurable success marker.
 - Re-authenticate when a configured session expires during a scan.
 - Send captured requests between the Browser, Proxy, Repeater, Fuzzer, and findings workflow.
+- Replay one captured request across multiple credential-handle identities to validate role and object authorization controls.
+- Analyze session rotation, logout invalidation, cookie flags, OAuth/OIDC controls, and bounded idle-timeout probe plans.
+- Preview or send byte-exact HTTP/1.1 requests and HTTP/2 frames after separate authorization, full-impact, and intrusive gates.
+- Select technology-aware WordPress, GraphQL, IIS/ASP.NET, Kubernetes, storage, WebSocket, OAuth/OIDC, and authenticated-web recipes.
 
 ### Execution controls
 
@@ -184,7 +194,9 @@ blackthorn scan --list-techniques
 Blackthorn currently runs 101 groups in a normal non-intrusive scan. Nineteen
 additional stateful, billable, or internal-network groups require the separate
 `--intrusive` impact opt-in. Seven ambiguous HTTP framing/race groups remain
-visible but disabled until Blackthorn has a raw HTTP/1.1 and HTTP/2 transport.
+disabled in the legacy bulk scanner; the engagement workspace now provides a
+separate exact HTTP/1.1 and HTTP/2 wire engine so an operator can pair a narrowly
+scoped exchange with explicit controls instead of bulk-spraying ambiguous probes.
 DNS rebinding is also disabled until a user-owned authoritative DNS workflow can
 change answers and capture proof; a Host-header size difference is insufficient.
 
@@ -366,13 +378,13 @@ change answers and capture proof; a Host-header size difference is insufficient.
 
 ## Desktop GUI workspace
 
-The PySide6 desktop application keeps five primary workflow destinations visible
+The PySide6 desktop application keeps six primary workflow destinations visible
 and moves specialist surfaces into one Workbench chooser:
 
 | Area | Sections and tools |
 | --- | --- |
-| Workflow | Scope & scan, Discover, Test plan, Analyze, Report |
-| Workbench | External Tools, Browser, Proxy, Repeater, Fuzzer, SQLi, Secrets, Payloads, ZAP/Burp, AD / Internal, AI assistance, Live Logs, Timeline, Schedule, Plugins |
+| Workflow | Scope & scan, Discover, Automation, Browser, Analyze, Report |
+| Workbench | Proxy, Repeater, Fuzzer, SQLi, Secrets, Payloads, ZAP/Burp, AD / Internal, AI assistance, External Tools, and Plugins |
 | Utilities | Engagements, Settings |
 
 GUI functionality includes:
@@ -382,7 +394,16 @@ GUI functionality includes:
 - Evidence-led results workspace with target grouping, verification/workflow filters, exact-request reproduction, authorized re-test, Repeater handoff, analyst notes, and export.
 - Dashboard statistics, scan comparison, historical timeline, and live logs.
 - Built-in intercepting proxy, local CA management, traffic history, and Repeater.
-- Browser workspace and ZAP/Burp handoff.
+- Automation workspace with bounded CISA KEV, NVD, GitHub Advisory, FIRST EPSS,
+  and exact-package OSV intelligence; engagement-scoped software inventory;
+  bounded CycloneDX/SPDX SBOM import; CPE/PURL/version evidence; explainable
+  exact/likely/possible matching; KEV/EPSS/exposure/criticality risk scoring;
+  remediation ownership, SLAs, mitigations, exceptions, and patch retests;
+  change/regression alerts; feed-health monitoring; deduplicated webhook,
+  Slack, Teams, Jira, and TLS-email notifications; signed approval-gated safe
+  validation with live scope checks, expiry, rate limits, timeout, and kill switch;
+  read-only watch schedules; and run history.
+- Standalone scope-enforced Browser workspace with live traffic capture, passive issue detection, Repeater handoff, Nuclei actions, and HAR export.
 - Payload Workbench with searchable category/family variants, expected-signal
   guidance, explicit query/path/form/JSON/header/cookie/body placement, encoding,
   exact HTTP/cURL preview, and Repeater handoff.
@@ -393,13 +414,41 @@ GUI functionality includes:
 - External-tool detection, execution, output streaming, and normalized findings.
 - Engagement management, scheduled scans, scan-profile import/export, plugins, and persistent settings.
 
-## External tool drivers — 23
+### Automation inventory and notifications
+
+Open **Automation → Inventory** to sync technology evidence from Discover, add
+an observed component, or import a CycloneDX JSON/XML or SPDX JSON SBOM. An
+import must be bound to an exact asset authorized by the active engagement.
+Use **Exposure Matches** to inspect the evidence and risk calculation, then
+open a case in **Remediation** or request a signed safe validation.
+
+Outbound connectors are disabled by default. Enable them under
+**Automation → Notifications & Health** after setting the relevant environment
+variables. Connector values are read only when a message is sent and are never
+written to Blackthorn state:
+
+- Generic webhook: `BLACKTHORN_AUTOMATION_WEBHOOK_URL`
+- Slack: `BLACKTHORN_SLACK_WEBHOOK_URL`
+- Teams: `BLACKTHORN_TEAMS_WEBHOOK_URL`
+- Jira: `BLACKTHORN_JIRA_BASE_URL`, `BLACKTHORN_JIRA_EMAIL`,
+  `BLACKTHORN_JIRA_API_TOKEN`, `BLACKTHORN_JIRA_PROJECT_KEY`, and optional
+  `BLACKTHORN_JIRA_ISSUE_TYPE`
+- Email: `BLACKTHORN_SMTP_HOST`, `BLACKTHORN_SMTP_FROM`,
+  `BLACKTHORN_SMTP_TO`, and optional `BLACKTHORN_SMTP_PORT`,
+  `BLACKTHORN_SMTP_USERNAME`/`BLACKTHORN_SMTP_PASSWORD`, and
+  `BLACKTHORN_SMTP_SECURITY` (`ssl` or `starttls`)
+
+Webhook/Jira destinations must use HTTPS and all connector hosts must resolve
+only to public addresses. Redirects, URL credentials, plaintext SMTP, and
+private/loopback/link-local destinations are rejected.
+
+## External tool drivers — 21
 
 Blackthorn does not silently install these tools. When already available on the host, it can detect and drive:
 
 | Purpose | Tools |
 | --- | --- |
-| Reconnaissance | Nmap, Masscan, Naabu, Subfinder, OWASP Amass, dnsx, httpx, WhatWeb, Katana |
+| Reconnaissance | Nmap, Masscan, Subfinder, dnsx, httpx, WhatWeb, Katana |
 | Content discovery | ffuf, Feroxbuster, Gobuster, dirsearch |
 | Vulnerability testing | Nuclei, Nikto, WPScan, Dalfox, SSLyze, sqlmap |
 | Secrets and cloud | TruffleHog, Gitleaks, ScoutSuite, Prowler |
@@ -409,12 +458,12 @@ Availability, binary path, and version are detected at runtime. Empty output is
 reported as an empty run—not fabricated as a finding—and tool alerts enter the
 candidate workflow until Blackthorn verifies them independently.
 
-The dedicated `blackthorn recon` workflow expects Subfinder, Amass, dnsx, and
+The dedicated `blackthorn recon` workflow expects Subfinder, dnsx, and
 the ProjectDiscovery httpx binary (not the Python package with the same command
-name). It merges those sources with public Certificate Transparency names and
+name). It merges Subfinder with public Certificate Transparency names and
 keeps DNS-resolved, HTTP-live, DNS-only, and unresolved hosts distinct.
-Independent passive sources run concurrently and their complete results are
-merged with source attribution, reducing wait time without dropping a source.
+The passive sources run concurrently and their complete results are merged with
+source attribution, reducing wait time without dropping a source.
 Wildcard scope notation is accepted and normalized:
 
 ```bash
@@ -434,6 +483,23 @@ blackthorn recon example.com --traceroute
 Without traceroute evidence, the topology keeps scope-to-host relationships
 dashed and labels its rings as relationship layers rather than network hops.
 
+Enable individual advanced discovery engines, or use the convenience preset:
+
+```bash
+blackthorn recon example.com --visual --crawl --arjun
+blackthorn recon example.com --alterx
+blackthorn recon example.com --uncover --asnmap --takeover
+blackthorn recon example.com --advanced-discovery
+```
+
+AlterX candidates are validated by the existing dnsx stage before they are
+promoted into the host inventory.
+
+Uncover and Cloudlist use their own provider configuration files. ASNMap uses
+`PDCP_API_KEY` when required. Provider credentials are never placed in command
+arguments or discovery history. Cloudlist output is retained only when it
+correlates to the current domain or its already-resolved IP addresses.
+
 ## CLI commands
 
 | Command | Function |
@@ -443,6 +509,7 @@ dashed and labels its rings as relationship layers rather than network hops.
 | `blackthorn chain <url>` | Run discovery, testing, reconnaissance, and reporting as one workflow |
 | `blackthorn msf ...` | Check Metasploit RPC, run auxiliary scanners, or push findings |
 | `blackthorn caido ...` | Check Caido, replay findings through its proxy, or export raw requests |
+| `blackthorn pentest ...` | Run scoped recon ingestion, identity replay, graphing, recipes, and exact wire tests |
 | `blackthorn agent-server --stdio` | Start the local JSON-lines agent bridge |
 | `blackthorn doctor` | Check dependencies, configuration, OOB support, recon tools, and integrations |
 | `blackthorn gui` | Open the desktop application |
@@ -495,6 +562,45 @@ blackthorn scan https://target.example --resume --monitor
 
 Run `blackthorn scan --help` for every flag.
 
+### Engagement pentest workspace
+
+The pentest commands keep scope, relationships, credential handles, captured
+request templates, and proof records in a private SQLite namespace. Actual
+credentials remain process-local or in the OS keychain.
+
+```bash
+# Create the engagement boundary
+blackthorn pentest workspace-create \
+  --name "Example assessment" \
+  --scope https://app.example.test \
+  --exclude https://app.example.test/logout
+
+# Import real tool evidence (use the returned workspace id)
+blackthorn pentest import-nmap --workspace workspace:... nmap.xml
+blackthorn pentest import-bloodhound --workspace workspace:... bloodhound.zip
+blackthorn pentest import-prowler --workspace workspace:... prowler-output.json
+
+# Select a targeted plan and generate a Nuclei workflow
+blackthorn pentest recipes \
+  --tech "WordPress nginx" \
+  --impact safe \
+  --nuclei-out blackthorn-workflow.yaml
+
+# Find a bounded path between normalized nodes
+blackthorn pentest graph-paths \
+  --workspace workspace:... \
+  --start asset:... \
+  --target asset:...
+```
+
+For role differential testing, add identities using credential handles, store
+the credential interactively with `pentest secret-set`, add a request template,
+then run `role-test` with both `--confirm-authorized` and `--active`. Raw wire
+sends additionally require `--full-impact --intrusive --send`; without `--send`
+they only serialize and hash the proposed bytes. See
+[the pentest workspace guide](docs/PENTEST_WORKSPACE.md) for the complete model,
+input formats, commands, and verification rules.
+
 ## Configuration files
 
 Blackthorn accepts JSON or TOML configuration. Explicit CLI flags take precedence over file values.
@@ -535,9 +641,18 @@ Other optional integrations include Metasploit RPC through `pymetasploit3`, a ru
 
 ### Credential storage
 
-Blackthorn does not write AI keys, external-tool API keys, proxy passwords, ZAP keys, or the Metasploit RPC password to its preferences JSON or SQLite database. Environment variables take precedence. With the optional `keyring` extra installed, GUI-entered secrets are saved in the operating-system credential store; otherwise they remain available only for the current process.
+Blackthorn does not write identity credentials, AI keys, external-tool API keys,
+proxy passwords, ZAP keys, or the Metasploit RPC password to its preferences JSON
+or SQLite database. Pentest workspace identities store only credential handles.
+Environment variables take precedence for supported integrations. With the
+optional `keyring` extra installed, GUI-entered and `pentest secret-set` values
+are saved in the operating-system credential store; otherwise they remain
+available only for the current process.
 
 Common variables include `ANTHROPIC_API_KEY`, `AI_API_KEY`, `OPENAI_API_KEY`, `MSF_RPC_PASSWORD`, and `ZAP_API_KEY`. External-tool keys use `BLACKTHORN_TOOL_<TOOL>_API_KEY`.
+Arbitrary pentest credential handles can use
+`BLACKTHORN_SECRET_<NORMALIZED_HANDLE>` (for example,
+`identity:alice:session` maps to `BLACKTHORN_SECRET_IDENTITY_ALICE_SESSION`).
 
 ## Build the desktop executable
 

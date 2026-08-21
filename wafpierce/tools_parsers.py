@@ -115,7 +115,7 @@ def generic_lines(spec: ToolSpec, target: str, text: str, ctx: Dict) -> List[Dic
 
 
 # --------------------------------------------------------------------------- #
-# ProjectDiscovery family (jsonl on stdout): httpx, subfinder, naabu, dnsx, katana
+# ProjectDiscovery family (jsonl on stdout): httpx, subfinder, dnsx, katana
 # --------------------------------------------------------------------------- #
 def parse_pd_jsonl(spec: ToolSpec, target: str, text: str, ctx: Dict) -> List[Dict]:
     out: List[Dict] = []
@@ -211,17 +211,6 @@ def parse_masscan_json(spec: ToolSpec, target: str, text: str, ctx: Dict) -> Lis
             out.append(make_finding(spec, target,
                                     technique=f"{ip}:{p.get('port')}/{p.get('proto')}",
                                     reason=f"open (ttl={p.get('ttl')})", confidence='high'))
-    return out or generic_lines(spec, target, text, ctx)
-
-
-def parse_amass_jsonl(spec: ToolSpec, target: str, text: str, ctx: Dict) -> List[Dict]:
-    raw = _read_outfile(ctx, 'outfile') or text
-    out: List[Dict] = []
-    for obj in _iter_jsonl(raw):
-        if isinstance(obj, dict) and obj.get('name'):
-            addrs = ','.join(a.get('ip', '') for a in obj.get('addresses', []) if isinstance(a, dict))
-            out.append(make_finding(spec, target, technique=obj['name'],
-                                    reason=f'subdomain {addrs}'.strip(), confidence='high'))
     return out or generic_lines(spec, target, text, ctx)
 
 

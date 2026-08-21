@@ -1,6 +1,6 @@
 """Auto-installer for the external recon tools.
 
-Recon shells out to subfinder / amass / dnsx / httpx / nmap and refuses to run
+Recon shells out to subfinder / dnsx / httpx / nmap and refuses to run
 unless they are on PATH (see :mod:`wafpierce.recon`). This module downloads
 prebuilt binaries into a managed directory under the WAFPierce config dir and
 puts that directory on PATH, so the user can get recon-ready without installing
@@ -8,7 +8,6 @@ Go or a package manager.
 
 Sources:
   * subfinder / dnsx / httpx  -> ProjectDiscovery GitHub release zips
-  * amass                     -> OWASP amass GitHub release zips
   * nmap                      -> the official Windows portable .zip (Windows
                                  only; elsewhere we point at the package manager)
 
@@ -41,14 +40,16 @@ GITHUB_TOOLS: Dict[str, Tuple[str, str]] = {
     'subfinder': ('projectdiscovery/subfinder', 'subfinder'),
     'dnsx': ('projectdiscovery/dnsx', 'dnsx'),
     'httpx': ('projectdiscovery/httpx', 'httpx'),
-    'amass': ('owasp-amass/amass', 'amass'),
     # Optional tools that add richer recon stages
     'tlsx': ('projectdiscovery/tlsx', 'tlsx'),
     'katana': ('projectdiscovery/katana', 'katana'),
     'nuclei': ('projectdiscovery/nuclei', 'nuclei'),
-    'naabu': ('projectdiscovery/naabu', 'naabu'),
     'gau': ('lc/gau', 'gau'),
     'dalfox': ('hahwul/dalfox', 'dalfox'),
+    'alterx': ('projectdiscovery/alterx', 'alterx'),
+    'uncover': ('projectdiscovery/uncover', 'uncover'),
+    'asnmap': ('projectdiscovery/asnmap', 'asnmap'),
+    'cloudlist': ('projectdiscovery/cloudlist', 'cloudlist'),
     # Standalone pentest sections
     'ffuf': ('ffuf/ffuf', 'ffuf'),                       # content discovery / fuzzing
     'feroxbuster': ('epi052/feroxbuster', 'feroxbuster'),  # recursive content discovery
@@ -456,6 +457,11 @@ PIP_URL_TOOLS = {
                'ghauri', 'from ghauri.scripts.ghauri import main; main()'),
 }
 
+# PyPI packages exposed through a small managed launcher in ``tools_dir``.
+PYPI_MODULE_TOOLS = {
+    'arjun': ('arjun', 'arjun'),
+}
+
 
 def _install_pip_url(name: str, log: _Logger) -> str:
     import sys
@@ -472,6 +478,49 @@ def _install_pip_url(name: str, log: _Logger) -> str:
     if not os.path.isdir(os.path.join(dest, package)):
         raise RuntimeError(f'{package} not found after install')
     return os.path.join(dest, package)
+
+
+def _install_pypi_module(name: str, log: _Logger) -> str:
+    """Install a Python CLI in the isolated tool library and create a launcher."""
+    import subprocess
+    import sys
+
+    package, module = PYPI_MODULE_TOOLS[name]
+    dest = pylibs_dir()
+    log(f'  pip install {package} into the managed tool environment …')
+    result = subprocess.run(
+        [
+            sys.executable, '-m', 'pip', 'install', '--upgrade',
+            '--target', dest, package,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    if result.returncode != 0:
+        tail = (result.stderr or result.stdout or 'pip failed').strip().splitlines()
+        raise RuntimeError(tail[-1][:200] if tail else 'pip failed')
+
+    if platform.system().lower().startswith('win'):
+        launcher = os.path.join(tools_dir(), name + '.cmd')
+        body = (
+            '@echo off\r\n'
+            f'set "PYTHONPATH={dest};%PYTHONPATH%"\r\n'
+            f'"{sys.executable}" -m {module} %*\r\n'
+        )
+    else:
+        launcher = os.path.join(tools_dir(), name)
+        body = (
+            f'#!{sys.executable}\n'
+            'import os, runpy, sys\n'
+            f'sys.path.insert(0, {dest!r})\n'
+            f'runpy.run_module({module!r}, run_name="__main__")\n'
+        )
+    with open(launcher, 'w', encoding='utf-8', newline='') as handle:
+        handle.write(body)
+    if not launcher.lower().endswith('.cmd'):
+        os.chmod(launcher, os.stat(launcher).st_mode | stat.S_IXUSR)
+    return launcher
 
 
 def python_tool_cmd(name: str):
@@ -537,6 +586,8 @@ def is_installed(name: str) -> bool:
         return sqlmap_script() is not None
     if name in PIP_URL_TOOLS:
         return os.path.isdir(os.path.join(pylibs_dir(), PIP_URL_TOOLS[name][1]))
+    if name in PYPI_MODULE_TOOLS:
+        return shutil.which(name) is not None
     if name in SCRIPT_REPO_TOOLS:
         return script_repo_path(name) is not None
     return shutil.which(name) is not None
@@ -599,7 +650,10 @@ def download_all(only: Optional[List[str]] = None,
     install every supported tool. Returns ``{name: ('ok'|'error', detail)}`` and
     never raises. PATH is refreshed at the end so the tools resolve immediately.
     """
-    names = list(only) if only else list(GITHUB_TOOLS.keys()) + ['nmap']
+    names = (
+        list(only) if only
+        else list(GITHUB_TOOLS.keys()) + list(PYPI_MODULE_TOOLS.keys()) + ['nmap']
+    )
     results: Dict[str, Tuple[str, str]] = {}
     ensure_tools_on_path()
     for i, name in enumerate(names, 1):
@@ -612,6 +666,8 @@ def download_all(only: Optional[List[str]] = None,
                 path = _install_sqlmap(log)
             elif name in PIP_URL_TOOLS:
                 path = _install_pip_url(name, log)
+            elif name in PYPI_MODULE_TOOLS:
+                path = _install_pypi_module(name, log)
             elif name in SCRIPT_REPO_TOOLS:
                 path = _install_script_repo(name, log)
             elif name in GITHUB_TOOLS:

@@ -26,7 +26,7 @@ def _keyring():
 
 def get_secret(name: str, env_names: Iterable[str] = ()) -> str:
     """Return a secret without exposing its source to callers."""
-    for env_name in env_names:
+    for env_name in tuple(env_names) + (secret_handle_env_name(name),):
         value = os.environ.get(env_name)
         if value:
             return value
@@ -41,6 +41,12 @@ def get_secret(name: str, env_names: Iterable[str] = ()) -> str:
         except Exception:
             pass
     return ''
+
+
+def secret_handle_env_name(name: str) -> str:
+    """Return the generic environment variable for an arbitrary secret handle."""
+    safe = re.sub(r'[^A-Za-z0-9]+', '_', str(name or '')).strip('_').upper()
+    return f'BLACKTHORN_SECRET_{safe}'
 
 
 def set_secret(name: str, value: Optional[str]) -> bool:

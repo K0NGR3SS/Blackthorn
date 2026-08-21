@@ -118,11 +118,11 @@ def test_core_theme_contrast_meets_wcag_aa():
     assert contrast_ratio(PALETTE['text_inverse'], PALETTE['accent']) >= 4.5
 
 
-def test_primary_navigation_tracks_the_five_step_workflow():
+def test_primary_navigation_tracks_the_six_step_workflow():
     assert [label for _key, label in PRIMARY_NAV_ITEMS] == [
-        'Scope & scan', 'Discover', 'Test plan', 'Analyze', 'Report'
+        'Scope & scan', 'Discover', 'Automation', 'Browser', 'Analyze', 'Report'
     ]
-    assert len({key for key, _label in PRIMARY_NAV_ITEMS}) == 5
+    assert len({key for key, _label in PRIMARY_NAV_ITEMS}) == 6
     assert len({key for _label, key in WORKBENCH_ITEMS}) == len(WORKBENCH_ITEMS)
 
 

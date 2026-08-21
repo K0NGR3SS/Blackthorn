@@ -14,6 +14,7 @@ exposing subcommands:
     blackthorn chain  <url> [...]                  # discovery->test->recon->report
     blackthorn msf    <check|scan|push> [...]      # Metasploit RPC integration
     blackthorn caido  <check|push|export> [...]    # Caido proxy integration
+    blackthorn pentest <command> [...]             # engagement pentest workspace
     blackthorn doctor                              # environment preflight
     blackthorn agent-server --stdio                # local agent bridge
     blackthorn gui                                 # launch the desktop GUI
@@ -30,7 +31,7 @@ from typing import List, Optional
 from . import __version__
 from .branding import CLI_NAME, PRODUCT_NAME, TAGLINE
 
-_SUBCOMMANDS = {'scan', 'recon', 'chain', 'msf', 'caido', 'agent-server',
+_SUBCOMMANDS = {'scan', 'recon', 'chain', 'msf', 'caido', 'pentest', 'agent-server',
                 'doctor', 'gui', 'version', 'help'}
 
 
@@ -45,11 +46,13 @@ commands:
                        --import-*,
                        --export, --ai-*, scope/auth, --dry-run, ...).
                        This is the default if you pass a URL with no command.
-  recon <domain>       External-tool recon (subfinder/amass/dnsx/httpx/nmap).
+  recon <domain>       External-tool recon (subfinder/CT/dnsx/httpx/nmap).
                        Requires those tools on PATH; `{CLI_NAME} doctor` checks.
   chain <url> [flags]  Run discovery -> test -> recon -> report as one workflow.
   msf <sub> [flags]    Metasploit RPC: check | scan <target> | push <results>.
   caido <sub> [flags]  Caido: check | push <results> | export <results> -o.
+  pentest <sub>         Scoped workspaces, Nmap/BloodHound/Prowler imports,
+                       role replay, attack paths, recipes, and raw wire tests.
   agent-server --stdio Local JSON-lines bridge for authorized AI/agent workflows.
   doctor               Environment preflight (deps, config dir, egress, OOB).
   gui                  Launch the desktop GUI.
@@ -128,6 +131,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     if head == 'caido':
         from .caido import main as caido_main
         return caido_main(argv[1:])
+
+    if head == 'pentest':
+        from .pentest_cli import main as pentest_main
+        return pentest_main(argv[1:])
 
     if head == 'agent-server':
         from .agent_server import main as agent_main

@@ -52,9 +52,7 @@ def test_enumeration_merges_sources_and_certificate_transparency(monkeypatch):
 
     def run(cmd, _timeout, stdin_text=None):
         calls.append((cmd, stdin_text))
-        if cmd[0] == 'subfinder':
-            return 0, 'a.example.com\nshared.example.com\n', ''
-        return 0, 'b.example.com\nshared.example.com\n', ''
+        return 0, 'a.example.com\nshared.example.com\n', ''
 
     monkeypatch.setattr(recon, '_run', run)
     monkeypatch.setattr(
@@ -69,13 +67,12 @@ def test_enumeration_merges_sources_and_certificate_transparency(monkeypatch):
 
     assert hosts == [
         'a.example.com',
-        'b.example.com',
         'ct.example.com',
         'example.com',
         'shared.example.com',
     ]
     assert set(sources['shared.example.com']) == {
-        'amass', 'certificate transparency', 'subfinder'
+        'certificate transparency', 'subfinder'
     }
     assert any(
         call[0][0] == 'subfinder' and '-all' in call[0]
@@ -84,7 +81,7 @@ def test_enumeration_merges_sources_and_certificate_transparency(monkeypatch):
 
 
 def test_passive_enumeration_sources_run_concurrently(monkeypatch):
-    rendezvous = threading.Barrier(3, timeout=3)
+    rendezvous = threading.Barrier(2, timeout=3)
     worker_ids = set()
 
     def run(cmd, _timeout, stdin_text=None):
@@ -104,10 +101,9 @@ def test_passive_enumeration_sources_run_concurrently(monkeypatch):
         'example.com', 30, include_sources=True
     )
 
-    assert len(worker_ids) == 3
+    assert len(worker_ids) == 2
     assert {
         'subfinder.example.com',
-        'amass.example.com',
         'ct.example.com',
     } <= set(hosts)
     assert sources['ct.example.com'] == ['certificate transparency']
@@ -264,7 +260,52 @@ def test_run_recon_normalizes_wildcard_and_skips_nmap_by_default(monkeypatch):
         'routes': False,
         'content': False,
         'vulnerabilities': False,
+        'visual': False,
+        'api': False,
+        'mutations': False,
+        'exposure': False,
+        'takeovers': False,
     }
+
+
+def test_alterx_candidates_are_promoted_only_after_dnsx_validation(monkeypatch):
+    from wafpierce import recon_engines
+
+    monkeypatch.setattr(recon, 'diagnostics_banner', lambda: '')
+    monkeypatch.setattr(recon, '_emit', lambda _message: None)
+    monkeypatch.setattr(
+        recon, 'enum_subdomains',
+        lambda domain, _timeout, include_sources=False: (
+            [domain], {domain: ['scope root']},
+        ),
+    )
+
+    def resolve(hosts, _timeout):
+        return {
+            host: ['192.0.2.20']
+            for host in hosts
+            if host in {'example.test', 'dev.example.test'}
+        }
+
+    monkeypatch.setattr(recon, 'resolve_hosts', resolve)
+    monkeypatch.setattr(recon, 'probe_http', lambda *_args: [])
+    monkeypatch.setattr(
+        recon_engines, 'alterx_generate',
+        lambda *_args, **_kwargs: [
+            {'hostname': 'dev.example.test', 'source': 'alterx'},
+            {'hostname': 'ghost.example.test', 'source': 'alterx'},
+        ],
+    )
+
+    report = recon.run_recon(
+        'example.test', do_tls=False, do_historical=False, do_alterx=True,
+    )
+
+    assert 'dev.example.test' in report['stages']['subdomains']
+    assert 'ghost.example.test' not in report['stages']['subdomains']
+    assert report['stages']['sources']['dev.example.test'] == [
+        'alterx', 'dnsx',
+    ]
 
 
 def test_nmap_uses_unprivileged_light_connect_scan(monkeypatch):
@@ -335,6 +376,35 @@ def test_cli_can_write_full_discovery_report(monkeypatch, tmp_path):
         '--report-output', str(output),
     ]) == 0
     assert json.loads(output.read_text(encoding='utf-8')) == report
+
+
+def test_cli_wires_every_advanced_discovery_engine(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(recon, 'preflight', lambda: [])
+    monkeypatch.setattr(
+        recon,
+        'run_recon',
+        lambda target, **kwargs: (
+            calls.append((target, kwargs))
+            or {'target': target, 'findings': [], 'stages': {}}
+        ),
+    )
+
+    assert recon.main([
+        'example.test', '--advanced-discovery', '--cloudlist',
+        '--uncover-engines', 'shodan,censys,netlas',
+        '--uncover-query', 'ssl.example.test',
+        '--artifact-dir', str(tmp_path / 'screens'),
+        '--history-dir', str(tmp_path / 'history'),
+    ]) == 0
+
+    options = calls[0][1]
+    assert all(options[key] for key in (
+        'do_visual', 'do_arjun', 'do_alterx', 'do_uncover', 'do_asnmap',
+        'do_cloudlist', 'do_takeover', 'do_crawl',
+    ))
+    assert options['uncover_engines'] == 'shodan,censys,netlas'
+    assert options['history_dir'] == str(tmp_path / 'history')
 
 
 def test_frozen_recon_worker_writes_report_without_enabling_nmap(

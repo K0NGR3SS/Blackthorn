@@ -9,7 +9,7 @@ into a half-working scan.
 Pipeline::
 
     subdomains          ->  resolve  ->  http probe  ->  ports/services
-    (subfinder+amass)        (dnsx)       (httpx)         (nmap)
+    (subfinder + CT)        (dnsx)       (httpx)         (nmap)
 
 Every result is emitted in the same dict shape the scanner uses (``technique`` /
 ``severity`` / ``reason`` / ``target`` / ``bypass`` …) tagged ``category='recon'``
@@ -55,8 +55,6 @@ except Exception:  # pragma: no cover - never block recon on installer wiring
 REQUIRED_TOOLS: List[Tuple[str, str, str, str]] = [
     ('subfinder', 'subfinder', 'passive subdomain enumeration',
      'go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest'),
-    ('amass', 'amass', 'subdomain enumeration (OWASP)',
-     'go install github.com/owasp-amass/amass/v4/...@master  (or: snap install amass)'),
     ('dnsx', 'dnsx', 'DNS resolution / liveness',
      'go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest'),
     ('httpx', 'httpx', 'HTTP probing / tech detection',
@@ -78,10 +76,18 @@ OPTIONAL_TOOLS: List[Tuple[str, str, str, str]] = [
      'go install github.com/projectdiscovery/katana/cmd/katana@latest'),
     ('nuclei', 'nuclei', 'vulnerability & misconfiguration scan (deep)',
      'go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest'),
-    ('naabu', 'naabu', 'fast port discovery',
-     'go install github.com/projectdiscovery/naabu/v2/cmd/naabu@latest'),
     ('dalfox', 'dalfox', 'XSS scanning of URLs with parameters (deep)',
      'go install github.com/hahwul/dalfox/v2@latest'),
+    ('arjun', 'Arjun', 'hidden HTTP parameter discovery',
+     'pipx install arjun'),
+    ('alterx', 'AlterX', 'intelligent subdomain permutations',
+     'go install github.com/projectdiscovery/alterx/cmd/alterx@latest'),
+    ('uncover', 'Uncover', 'internet exposure search providers',
+     'go install github.com/projectdiscovery/uncover/cmd/uncover@latest'),
+    ('asnmap', 'ASNMap', 'organization and ASN/CIDR mapping',
+     'go install github.com/projectdiscovery/asnmap/cmd/asnmap@latest'),
+    ('cloudlist', 'Cloudlist', 'configured cloud account asset inventory',
+     'go install github.com/projectdiscovery/cloudlist/cmd/cloudlist@latest'),
 ]
 
 # Binary needed by each optional stage key (used by the GUI to know what to
@@ -91,10 +97,16 @@ STAGE_TOOL = {
     'historical': 'gau',
     'ports': 'nmap',
     'traceroute': 'nmap',
-    'naabu': 'naabu',
     'crawl': 'katana',
     'nuclei': 'nuclei',
     'xss': 'dalfox',
+    'visual': 'httpx',
+    'arjun': 'arjun',
+    'alterx': 'alterx',
+    'uncover': 'uncover',
+    'asnmap': 'asnmap',
+    'cloudlist': 'cloudlist',
+    'takeover': 'nuclei',
 }
 
 # A hostname anywhere in noisy tool output. Intentionally permissive; callers
@@ -107,6 +119,18 @@ _HOST_RE = re.compile(
 def _emit(msg: str) -> None:
     """Print a progress line to stdout, flushed, so the GUI can stream it."""
     print(msg, flush=True)
+
+
+_RECON_PROGRESS_PREFIX = '::blackthorn-recon-progress::'
+
+
+def _emit_progress(label: str, progress: int) -> None:
+    """Emit a machine-readable Discovery progress update for GUI consumers."""
+    event = {
+        'label': str(label or 'Discovery').strip()[:160],
+        'progress': max(0, min(100, int(progress))),
+    }
+    _emit(_RECON_PROGRESS_PREFIX + json.dumps(event, separators=(',', ':')))
 
 
 # --------------------------------------------------------------------------- #
@@ -322,7 +346,7 @@ def certificate_transparency_hosts(
 
 
 def enum_subdomains(domain: str, timeout: float, include_sources: bool = False):
-    """Merge passive enumeration and CT results with per-host provenance.
+    """Merge Subfinder and CT results with per-host provenance.
 
     The independent passive sources run concurrently.  Their complete outputs
     are merged only after every source finishes, so the shorter wall-clock time
@@ -332,18 +356,12 @@ def enum_subdomains(domain: str, timeout: float, include_sources: bool = False):
     sources: Dict[str, Set[str]] = {domain: {'scope root'}}
 
     _emit(f"[*] subfinder -all -d {domain}")
-    _emit(f"[*] amass enum -passive -d {domain}")
     _emit(f"[*] Certificate Transparency: querying {domain}")
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         subfinder_future = executor.submit(
             _run,
             ['subfinder', '-d', domain, '-all', '-silent'],
-            timeout,
-        )
-        amass_future = executor.submit(
-            _run,
-            ['amass', 'enum', '-passive', '-nocolor', '-d', domain],
             timeout,
         )
         ct_future = executor.submit(
@@ -351,7 +369,6 @@ def enum_subdomains(domain: str, timeout: float, include_sources: bool = False):
         )
 
         rc, out, err = subfinder_future.result()
-        amass_rc, amass_out, amass_err = amass_future.result()
         ct_hosts = ct_future.result()
 
     subs = _extract_hosts(out, domain)
@@ -363,18 +380,6 @@ def enum_subdomains(domain: str, timeout: float, include_sources: bool = False):
         line += f"  (rc={rc})"
         if _err_tail(err):
             line += f"\n    ! {_err_tail(err)}"
-    _emit(line)
-
-    amass_subs = _extract_hosts(amass_out, domain)
-    new = amass_subs - found
-    found |= amass_subs
-    for host in amass_subs:
-        sources.setdefault(host, set()).add('amass')
-    line = f"[+] amass: {len(amass_subs)} host(s), {len(new)} new"
-    if amass_rc:
-        line += f"  (rc={amass_rc})"
-        if _err_tail(amass_err):
-            line += f"\n    ! {_err_tail(amass_err)}"
     _emit(line)
 
     found |= ct_hosts
@@ -427,20 +432,28 @@ def probe_http(hosts: Sequence[str], timeout: float) -> List[Dict[str, Any]]:
         return []
     _emit(f"[*] httpx: probing {len(hosts)} host(s)")
     binary = _which('httpx') or 'httpx'
-    base_cmd = [
+    core_cmd = [
         binary, '-silent', '-json', '-no-color', '-t', '50', '-timeout', '8',
         '-retries', '1', '-status-code', '-title', '-tech-detect',
         '-web-server', '-ip', '-cname', '-location',
     ]
+    enrichment = [
+        '-favicon', '-jarm', '-hash', 'sha256', '-content-length',
+        '-content-type', '-response-time', '-method', '-asn', '-cdn',
+    ]
+    base_cmd = core_cmd + enrichment
     rc, out, err = _run(
         base_cmd + ['-probe'],
         timeout,
         stdin_text='\n'.join(hosts),
     )
-    if rc and not out and 'probe' in (err or '').lower():
-        _emit("[*] httpx: installed version lacks -probe; inferring unavailable hosts")
+    if rc and not out:
+        _emit(
+            "[*] httpx: retrying with compatibility flags; the installed "
+            "version may not support every enrichment probe"
+        )
         rc, out, err = _run(
-            base_cmd,
+            core_cmd,
             timeout,
             stdin_text='\n'.join(hosts),
         )
@@ -721,30 +734,6 @@ def vuln_scan(urls: Sequence[str], timeout: float,
     return rows
 
 
-def fast_ports(hosts: Sequence[str], timeout: float, top_ports: int = 100) -> List[Dict[str, Any]]:
-    """naabu: fast TCP connect port discovery across many hosts at once."""
-    if not hosts or not _which('naabu'):
-        return []
-    _emit(f"[*] naabu: fast port scan on {len(hosts)} host(s) (top {top_ports})")
-    rc, out, err = _run(
-        ['naabu', '-silent', '-json', '-s', 'c', '-top-ports', str(top_ports), '-c', '25'],
-        timeout, stdin_text='\n'.join(hosts))
-    rows: List[Dict[str, Any]] = []
-    for line in out.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rows.append(json.loads(line))
-        except Exception:
-            continue
-    msg = f"[+] naabu: {len(rows)} open port(s)"
-    if rc and not rows and _err_tail(err):
-        msg += f"\n    ! {_err_tail(err)}"
-    _emit(msg)
-    return rows
-
-
 def xss_scan(urls: Sequence[str], timeout: float) -> List[Dict[str, Any]]:
     """dalfox: test URLs that carry parameters for reflected/DOM XSS."""
     targets = [u for u in urls if '?' in u and '=' in u]
@@ -836,9 +825,16 @@ def build_host_inventory(
 def run_recon(target: str, *, timeout: float = 300.0, top_ports: int = 100,
               max_hosts: int = 1000, crawl_depth: int = 2,
               nuclei_severity: str = 'low,medium,high,critical', nuclei_tags: str = '',
-              do_tls: bool = True, do_historical: bool = True, do_naabu: bool = False,
+              do_tls: bool = True, do_historical: bool = True,
               do_crawl: bool = False, do_nuclei: bool = False, do_xss: bool = False,
-              do_ports: bool = False, do_traceroute: bool = False) -> Dict[str, Any]:
+              do_ports: bool = False, do_traceroute: bool = False,
+              do_visual: bool = False, do_arjun: bool = False,
+              do_alterx: bool = False,
+              do_uncover: bool = False, do_asnmap: bool = False,
+              do_cloudlist: bool = False, do_takeover: bool = False,
+              uncover_engines: str = 'shodan,censys',
+              uncover_query: str = '', artifact_dir: str = '',
+              history_dir: str = '') -> Dict[str, Any]:
     """Run the recon pipeline against ``target`` and return a structured report.
 
     Each optional stage is individually switchable (``do_*``). The ``findings``
@@ -849,26 +845,81 @@ def run_recon(target: str, *, timeout: float = 300.0, top_ports: int = 100,
     if not domain:
         raise ValueError(f"could not parse a hostname from target {target!r}")
 
-    enabled = [n for n, on in (('tls', do_tls), ('gau', do_historical),
-                               ('naabu', do_naabu), ('katana', do_crawl),
-                               ('nuclei', do_nuclei), ('dalfox', do_xss),
-                               ('nmap', do_ports), ('traceroute', do_traceroute)) if on]
+    enabled = [n for n, on in (
+        ('tls', do_tls), ('gau', do_historical),
+        ('katana', do_crawl), ('nuclei', do_nuclei), ('dalfox', do_xss),
+        ('nmap', do_ports), ('traceroute', do_traceroute),
+        ('httpx-visual', do_visual), ('arjun', do_arjun),
+        ('alterx', do_alterx),
+        ('uncover', do_uncover), ('asnmap', do_asnmap),
+        ('cloudlist', do_cloudlist), ('takeover', do_takeover),
+    ) if on]
     _emit(diagnostics_banner())
-    _emit(f"[*] Recon target: {domain}  (stages: subfinder, amass, dnsx, httpx"
+    _emit_progress('Starting discovery', 2)
+    _emit(f"[*] Recon target: {domain}  (stages: subfinder, CT, dnsx, httpx"
           + (', ' + ', '.join(enabled) if enabled else '') + ')')
     findings: List[Dict[str, Any]] = []
 
-    # 1. Subdomains (subfinder + amass)
+    # 1. Passive subdomains (Subfinder + Certificate Transparency).
+    _emit_progress('Enumerating subdomains', 8)
     subdomains, host_sources = enum_subdomains(
         domain, timeout, include_sources=True
     )
 
+    # 1b. Pattern-aware candidates remain separate until dnsx validates them.
+    from .recon_engines import (
+        alterx_generate,
+        arjun_scan,
+        asnmap_lookup,
+        cloudlist_inventory,
+        uncover_search,
+        visual_probe,
+    )
+
+    alterx_rows: List[Dict[str, Any]] = []
+    if do_alterx:
+        _emit_progress('Generating DNS mutations', 16)
+        alterx_rows = alterx_generate(
+            subdomains, domain, timeout, _run, _which
+        )
+        _emit(f"[+] alterx: {len(alterx_rows)} scoped permutation candidate(s)")
     # 2. Resolve
+    _emit_progress('Resolving DNS', 24)
     resolved = resolve_hosts(subdomains, timeout)
+    if alterx_rows:
+        mutation_candidate_set = {
+            str(row.get('hostname') or '').lower().rstrip('.')
+            for row in alterx_rows if isinstance(row, dict)
+        }
+        mutation_candidate_set.discard('')
+        mutation_candidates = sorted(mutation_candidate_set - set(subdomains))
+        mutation_resolved = resolve_hosts(mutation_candidates, timeout)
+        for host in mutation_resolved:
+            host_sources.setdefault(host, []).extend(['alterx', 'dnsx'])
+        resolved.update(mutation_resolved)
+        subdomains = sorted(set(subdomains) | set(mutation_resolved))
+        _emit(
+            f"[+] dnsx: validated {len(mutation_resolved)} AlterX candidate(s)"
+        )
+
+    uncover_rows: List[Dict[str, Any]] = []
+    if do_uncover:
+        _emit_progress('Querying exposure providers', 30)
+        uncover_rows = uncover_search(
+            domain, uncover_query or domain, uncover_engines,
+            timeout, _run, _which,
+        )
+        _emit(f"[+] uncover: {len(uncover_rows)} exposure candidate(s)")
+
+    asnmap_rows: List[Dict[str, Any]] = []
+    if do_asnmap:
+        asnmap_rows = asnmap_lookup(domain, timeout, _run, _which)
+        _emit(f"[+] asnmap: {len(asnmap_rows)} ASN/CIDR mapping(s)")
 
     # 2b. TLS certs (tlsx, optional) — also harvests extra subdomains from SANs.
     tls_rows: List[Dict[str, Any]] = []
     if do_tls:
+        _emit_progress('Inspecting TLS certificates', 38)
         tls_rows, sans = grab_tls(sorted(resolved.keys()) or subdomains, timeout)
         new_sans = sorted({s for s in sans
                            if s == domain or s.endswith('.' + domain)} - set(subdomains))
@@ -919,7 +970,18 @@ def run_recon(target: str, *, timeout: float = 300.0, top_ports: int = 100,
             f"{host} -> {', '.join(ips) if ips else 'no A record'}",
             ip_addresses=ips))
 
+    cloudlist_rows: List[Dict[str, Any]] = []
+    if do_cloudlist:
+        cloudlist_rows = cloudlist_inventory(
+            domain, all_ips, timeout, _run, _which
+        )
+        _emit(
+            f"[+] cloudlist: {len(cloudlist_rows)} configured-cloud asset(s) "
+            "correlated to scope"
+        )
+
     # 3. HTTP probe (httpx)
+    _emit_progress('Probing HTTP services', 48)
     web = probe_http(active or subdomains, timeout)
     live_web = [row for row in web if row.get('live')]
     live_urls: List[str] = []
@@ -938,6 +1000,16 @@ def run_recon(target: str, *, timeout: float = 300.0, top_ports: int = 100,
             f"{title or 'live'} — {' | '.join(bits)}" if bits else (title or 'live web service'),
             http_status=status, title=title, server=server, tech=tech))
     live_urls = list(dict.fromkeys(live_urls))
+
+    visual_rows: List[Dict[str, Any]] = []
+    if do_visual and live_urls:
+        visual_rows = visual_probe(
+            live_urls, domain, timeout, _run, _which,
+            artifact_dir=artifact_dir,
+        )
+        _emit(
+            f"[+] httpx visual: {len(visual_rows)} screenshot/fingerprint record(s)"
+        )
 
     inventory = build_host_inventory(
         domain,
@@ -975,6 +1047,7 @@ def run_recon(target: str, *, timeout: float = 300.0, top_ports: int = 100,
         ))
 
     # 3b. Historical URLs (gau, optional)
+    _emit_progress('Discovering application content', 60)
     historical: List[str] = []
     if do_historical:
         historical = historical_urls(domain, timeout)
@@ -994,19 +1067,22 @@ def run_recon(target: str, *, timeout: float = 300.0, top_ports: int = 100,
                 f"{len(endpoints)} endpoint(s) discovered by crawling live sites",
                 endpoints=endpoints, sample=endpoints[:50]))
 
-    # 3d. Fast ports (naabu)
-    naabu_rows: List[Dict[str, Any]] = []
-    if do_naabu and active:
-        naabu_rows = fast_ports(active, timeout, top_ports=top_ports)
-        for r in naabu_rows:
-            host = r.get('host') or r.get('ip') or domain
-            port = r.get('port')
-            findings.append(_finding(
-                'Open Port (naabu)', f"{host}:{port}",
-                f"{port}/tcp open (fast scan)",
-                severity='LOW', port=port, ip=r.get('ip')))
+    # 3c.1. Parameter intelligence consumes only already-scoped URLs.
+    arjun_rows: List[Dict[str, Any]] = []
+    if do_arjun:
+        _emit_progress('Discovering hidden parameters', 70)
+        parameter_targets = list(dict.fromkeys(
+            [url for url in endpoints + historical if '?' in url]
+            + live_urls
+        ))
+        arjun_rows = arjun_scan(
+            parameter_targets, domain, timeout, _run, _which
+        )
+        _emit(f"[+] Arjun: {len(arjun_rows)} parameter result(s)")
 
     # 3e. Vulnerabilities (nuclei)
+    if do_nuclei or do_takeover or do_xss:
+        _emit_progress('Checking vulnerabilities', 78)
     vulns: List[Dict[str, Any]] = []
     if do_nuclei and live_urls:
         scan_targets = list(dict.fromkeys(live_urls + endpoints))[:500]
@@ -1024,6 +1100,27 @@ def run_recon(target: str, *, timeout: float = 300.0, top_ports: int = 100,
                 f"[{raw_sev}] {name}" + (f"  ({tid})" if tid else ''),
                 severity=sev, template_id=tid, nuclei=vrow))
 
+    takeovers: List[Dict[str, Any]] = []
+    if do_takeover and subdomains:
+        takeover_targets = [f"https://{host}" for host in subdomains[:500]]
+        takeovers = vuln_scan(
+            takeover_targets,
+            timeout,
+            severity='info,low,medium,high,critical',
+            tags='takeover',
+        )
+        for row in takeovers:
+            info = row.get('info') or {}
+            matched = (
+                row.get('matched-at') or row.get('host') or row.get('url')
+                or domain
+            )
+            findings.append(_finding(
+                'Subdomain Takeover Candidate', str(matched),
+                str(info.get('name') or row.get('template-id') or 'takeover template matched'),
+                severity='HIGH', source_tool='takeover', takeover=row,
+            ))
+
     # 3f. XSS (dalfox) — tests URLs (live + crawled + historical) that carry params
     xss: List[Dict[str, Any]] = []
     if do_xss:
@@ -1038,6 +1135,8 @@ def run_recon(target: str, *, timeout: float = 300.0, top_ports: int = 100,
                 severity='HIGH', param=param, dalfox=row))
 
     # 4. Ports / services (nmap) — cap IPs so a big resolve set doesn't run forever.
+    if do_ports or do_traceroute:
+        _emit_progress('Inspecting network services', 88)
     ports: List[Dict[str, Any]] = []
     if do_ports:
         nmap_ips = sorted(all_ips)[:min(10, max_hosts)]
@@ -1081,12 +1180,14 @@ def run_recon(target: str, *, timeout: float = 300.0, top_ports: int = 100,
         'unresolved': sum(1 for host in inventory if not host['dns_live']),
         'routes': len(routes),
     }
+    _emit_progress('Correlating attack-surface changes', 96)
     _emit(f"[+] Recon complete: {subdomain_count} subdomains, {len(resolved)} resolved, "
           f"{summary['web_live']} web hosts, {len(historical)} historical URLs, "
-          f"{len(endpoints)} crawled, {len(naabu_rows)} fast-ports, {len(vulns)} vulns, "
-          f"{len(xss)} XSS, {len(ports)} open ports, {len(routes)} routes")
+          f"{len(endpoints)} crawled, {len(arjun_rows)} parameter results, "
+          f"{len(vulns)} vulns, {len(xss)} XSS, {len(ports)} open ports, "
+          f"{len(routes)} routes")
 
-    return {
+    report = {
         'target': domain,
         'findings': findings,
         'stages': {
@@ -1099,22 +1200,45 @@ def run_recon(target: str, *, timeout: float = 300.0, top_ports: int = 100,
             'http': web,
             'historical': historical,
             'endpoints': endpoints,
-            'naabu': naabu_rows,
             'vulns': vulns,
             'xss': xss,
             'ports': ports,
             'traceroute': routes,
+            'visual': visual_rows,
+            'arjun': arjun_rows,
+            'alterx': alterx_rows,
+            'uncover': uncover_rows,
+            'asnmap': asnmap_rows,
+            'cloudlist': cloudlist_rows,
+            'takeovers': takeovers,
             'coverage': {
                 'dns': True,
                 'http': True,
-                'ports': bool(do_ports or do_naabu),
+                'ports': bool(do_ports),
                 'tls': bool(do_tls),
                 'routes': bool(do_traceroute),
                 'content': bool(do_crawl or do_historical),
-                'vulnerabilities': bool(do_nuclei or do_xss),
+                'vulnerabilities': bool(do_nuclei or do_xss or do_takeover),
+                'visual': bool(do_visual),
+                'api': bool(do_arjun),
+                'mutations': bool(do_alterx),
+                'exposure': bool(do_uncover or do_asnmap or do_cloudlist),
+                'takeovers': bool(do_takeover),
             },
         },
     }
+    from .discovery_intelligence import apply_continuous_intelligence
+
+    apply_continuous_intelligence(report, history_dir=history_dir)
+    for signal in report['stages'].get('risk_signals') or []:
+        findings.append(_finding(
+            'Risk Correlation', str(signal.get('target') or domain),
+            str(signal.get('reason') or 'Correlated attack-surface signal'),
+            severity=str(signal.get('severity') or 'LOW'),
+            source_tool='risk', risk=signal,
+        ))
+    _emit_progress('Discovery complete', 100)
+    return report
 
 
 # --------------------------------------------------------------------------- #
@@ -1123,7 +1247,7 @@ def run_recon(target: str, *, timeout: float = 300.0, top_ports: int = 100,
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog='blackthorn recon',
-        description='External-tool reconnaissance (subfinder/amass/dnsx/httpx/nmap).')
+        description='External-tool reconnaissance (subfinder/CT/dnsx/httpx/nmap).')
     p.add_argument('target', help='domain or URL, e.g. example.com or https://example.com')
     p.add_argument('-o', '--output', help='write findings JSON to this file')
     p.add_argument(
@@ -1162,10 +1286,35 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument('--no-historical', action='store_true', help='skip gau historical URLs')
     p.add_argument('--no-extras', action='store_true',
                    help='skip all default extras (tlsx + gau)')
-    p.add_argument('--naabu', action='store_true', help='enable naabu fast port scan')
     p.add_argument('--crawl', action='store_true', help='enable katana crawl')
     p.add_argument('--nuclei', action='store_true', help='enable nuclei vuln scan')
     p.add_argument('--xss', action='store_true', help='enable dalfox XSS scan')
+    p.add_argument('--visual', action='store_true',
+                   help='enable httpx screenshots and visual/fingerprint enrichment')
+    p.add_argument('--arjun', action='store_true',
+                   help='enable hidden HTTP parameter discovery')
+    p.add_argument('--alterx', action='store_true',
+                   help='generate intelligent subdomain permutation candidates')
+    p.add_argument('--uncover', action='store_true',
+                   help='query configured internet exposure search providers')
+    p.add_argument('--uncover-engines', default='shodan,censys',
+                   help='comma-separated Uncover provider engines')
+    p.add_argument('--uncover-query', default='',
+                   help='provider search query (default: authorized root domain)')
+    p.add_argument('--asnmap', action='store_true',
+                   help='map the domain to candidate ASNs and CIDRs')
+    p.add_argument('--cloudlist', action='store_true',
+                   help='correlate configured-cloud inventory to the target scope')
+    p.add_argument('--takeover', action='store_true',
+                   help='run dedicated Nuclei takeover templates against scoped hosts')
+    p.add_argument('--artifact-dir', default='',
+                   help='directory for screenshot artifacts')
+    p.add_argument('--history-dir', default='',
+                   help='directory for secret-free continuous discovery snapshots')
+    p.add_argument('--no-history', action='store_true',
+                   help='disable continuous discovery snapshots and run-to-run diffs')
+    p.add_argument('--advanced-discovery', action='store_true',
+                   help='enable visual, crawl, parameter, mutation, exposure, ASN, and takeover stages')
     p.add_argument('--deep', action='store_true',
                    help='convenience: enable katana crawl + nuclei + dalfox')
     p.add_argument('--json', action='store_true',
@@ -1186,6 +1335,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         _emit("[!] Proceeding with missing tools (--skip-preflight); results will be partial.")
 
     try:
+        if args.no_history:
+            history_dir = ''
+        elif args.history_dir:
+            history_dir = args.history_dir
+        else:
+            from .config import ensure_config_dir
+
+            history_dir = os.path.join(
+                ensure_config_dir(), 'discovery-history'
+            )
         report = run_recon(
             args.target,
             timeout=args.timeout,
@@ -1196,12 +1355,22 @@ def main(argv: Optional[List[str]] = None) -> int:
             nuclei_tags=args.nuclei_tags,
             do_tls=not (args.no_tls or args.no_extras),
             do_historical=not (args.no_historical or args.no_extras),
-            do_naabu=args.naabu,
-            do_crawl=args.crawl or args.deep,
+            do_crawl=args.crawl or args.deep or args.advanced_discovery,
             do_nuclei=args.nuclei or args.deep,
             do_xss=args.xss or args.deep,
             do_ports=args.ports and not args.no_ports,
             do_traceroute=args.traceroute,
+            do_visual=args.visual or args.advanced_discovery,
+            do_arjun=args.arjun or args.advanced_discovery,
+            do_alterx=args.alterx or args.advanced_discovery,
+            do_uncover=args.uncover or args.advanced_discovery,
+            do_asnmap=args.asnmap or args.advanced_discovery,
+            do_cloudlist=args.cloudlist,
+            do_takeover=args.takeover or args.advanced_discovery,
+            uncover_engines=args.uncover_engines,
+            uncover_query=args.uncover_query,
+            artifact_dir=args.artifact_dir,
+            history_dir=history_dir,
         )
     except ValueError as e:
         print(f"[!] {e}", file=sys.stderr)

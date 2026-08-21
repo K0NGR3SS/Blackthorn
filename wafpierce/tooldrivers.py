@@ -160,6 +160,38 @@ class ZAPClient:
     def spider_status(self, scan_id: str) -> int:
         return int(self._get('/JSON/spider/view/status/', scanId=scan_id).get('status', 0))
 
+    def client_spider(self, url: str, *, browser: str = 'firefox-headless',
+                      max_depth: int = 5, page_load_time: int = 30,
+                      browsers: int = 1, context_name: str = '',
+                      user_name: str = '') -> str:
+        """Start the modern DOM-aware Client Spider with strict scope checks."""
+        params = {
+            'url': url,
+            'browser': browser,
+            'subtreeOnly': 'false',
+            'maxCrawlDepth': max(0, min(int(max_depth), 100)),
+            'pageLoadTime': max(1, min(int(page_load_time), 300)),
+            'numberOfBrowsers': max(1, min(int(browsers), 10)),
+            'scopeCheck': 'STRICT',
+            'logoutAvoidance': 'true',
+        }
+        if context_name:
+            params['contextName'] = context_name
+        if user_name:
+            params['userName'] = user_name
+        return self._get('/JSON/clientSpider/action/scan/', **params).get('scan', '')
+
+    def client_spider_status(self, scan_id: str) -> int:
+        return int(self._get(
+            '/JSON/clientSpider/view/status/', scanId=scan_id
+        ).get('status', 0))
+
+    def client_spider_stop(self, scan_id: str):
+        try:
+            self._get('/JSON/clientSpider/action/stop/', scanId=scan_id)
+        except Exception:
+            pass
+
     def ascan(self, url: str) -> str:
         return self._get('/JSON/ascan/action/scan/', url=url).get('scan', '')
 
